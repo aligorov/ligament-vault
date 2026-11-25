@@ -65,6 +65,17 @@ log_step "2/7 — SFTPGo initprovider (update_mode=1, однократно на 
 remote_exec "${NODE1_IP}" "cd '${REMOTE_BASE_DIR}' && docker compose run --rm --no-deps sftpgo sftpgo initprovider --config-file /etc/sftpgo/sftpgo.json"
 log_info "  ✅ Схема SFTPGo в PostgreSQL инициализирована"
 
+_ensure_sftpgo_unprivileged_ports_cb() {
+    local ip="$2" name="$3"
+    local cur_start
+    cur_start=$(remote_exec "${ip}" "sysctl -n net.ipv4.ip_unprivileged_port_start 2>/dev/null || echo 0")
+    if [[ "${cur_start}" =~ ^[0-9]+$ ]] && (( cur_start > 21 )); then
+        log_info "  Разрешаем SFTPGo (UID 1000) бинд портов >= 21 на ${name} (${ip})..."
+        remote_exec "${ip}" "sysctl -w net.ipv4.ip_unprivileged_port_start=21 >/dev/null && (grep -q 'ip_unprivileged_port_start' /etc/sysctl.d/99-ligament-vault.conf 2>/dev/null || echo 'net.ipv4.ip_unprivileged_port_start = 21' >> /etc/sysctl.d/99-ligament-vault.conf)"
+    fi
+}
+for_each_node _ensure_sftpgo_unprivileged_ports_cb
+
 # --- 3. Запуск SFTPGo и node-exporter ---
 log_step "3/7 — Запуск SFTPGo и node-exporter на всех нодах"
 start_edge_cb() {

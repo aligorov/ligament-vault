@@ -557,6 +557,7 @@ cat > /etc/sysctl.d/99-ligament-vault.conf <<'SYSCTL'
 fs.file-max = 1048576
 net.core.somaxconn = 65535
 net.ipv4.ip_local_port_range = 1024 65535
+net.ipv4.ip_unprivileged_port_start = 21
 net.ipv4.tcp_tw_reuse = 1
 vm.swappiness = 1
 SYSCTL

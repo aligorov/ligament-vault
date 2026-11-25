@@ -375,6 +375,7 @@ jobs:
               docker compose logs sftpgo || true
               exit 1
           fi
+          sudo sysctl -w net.ipv4.ip_unprivileged_port_start=21
           docker compose up -d sftpgo
           SFTP_OK=false
           for _ in $(seq 1 25); do
@@ -392,4 +393,5 @@ jobs:
           docker exec "$(docker ps -qf name=sftpgo)" sftpgo ping --config-file /etc/sftpgo/sftpgo.json
           curl -sf http://127.0.0.1:8081/healthz
           nc -z 127.0.0.1 2022
+          nc -z 127.0.0.1 21
           echo "LIVE_STACK_SMOKE_OK"
