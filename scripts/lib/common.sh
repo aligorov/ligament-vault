@@ -13,6 +13,8 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="${SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+
 # --- Цвета (безопасно при non-TTY) ---
 if [[ -t 1 ]]; then
     RED='\033[0;31m'

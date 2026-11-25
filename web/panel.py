@@ -37,24 +37,30 @@ MAX_FAILED_LOGINS = 10
 FAIL_WINDOW_SEC = 300
 
 
-def read_env_dict(path):
+def parse_env_text(text):
     data = {}
-    if not os.path.exists(path):
-        return data
-    with open(path, "r", encoding="utf-8") as f:
-        for raw in f:
-            line = raw.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            try:
-                parts = shlex.split(line, comments=True)
-                if parts and "=" in parts[0]:
-                    k, v = parts[0].split("=", 1)
-                    data[k] = v
-            except Exception:
-                k, v = line.split("=", 1)
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        try:
+            parts = shlex.split(line, comments=True)
+            if parts and "=" in parts[0]:
+                k, v = parts[0].split("=", 1)
+                data[k] = v
+        except Exception:
+            no_comment = line.split("#", 1)[0].strip()
+            if "=" in no_comment:
+                k, v = no_comment.split("=", 1)
                 data[k.strip()] = v.strip().strip('"').strip("'")
     return data
+
+
+def read_env_dict(path):
+    if not os.path.exists(path):
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        return parse_env_text(f.read())
 
 
 def read_secrets_dict():
@@ -70,13 +76,7 @@ def read_secrets_dict():
         if os.path.exists(age_key):
             res = subprocess.run(["age", "-d", "-i", age_key, enc], capture_output=True, text=True, timeout=5)
             if res.returncode == 0:
-                data = {}
-                for raw in res.stdout.splitlines():
-                    s = raw.strip()
-                    if s and not s.startswith("#") and "=" in s:
-                        k, v = s.split("=", 1)
-                        data[k.strip()] = v.strip().strip('"').strip("'")
-                return data
+                return parse_env_text(res.stdout)
     return {}
 
 

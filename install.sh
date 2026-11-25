@@ -111,7 +111,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=${INSTALL_DIR}
+Environment="HOME=/root"
 Environment="CONFIG_ROOT=${INSTALL_DIR}"
+Environment="AGE_KEY_FILE=/root/.config/ligament/age.key"
 Environment="PANEL_PORT=${PANEL_PORT}"
 ExecStart=/usr/bin/python3 ${INSTALL_DIR}/web/panel.py
 Restart=always
@@ -124,7 +126,8 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now ligament-vault-ui.service
+systemctl enable ligament-vault-ui.service >/dev/null 2>&1 || true
+systemctl restart ligament-vault-ui.service
 
 if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
     ufw allow "${PANEL_PORT}/tcp" comment "ligament-vault:web-panel" >/dev/null 2>&1 || true
@@ -132,9 +135,10 @@ fi
 
 # Извлекаем пароль администратора для вывода в консоль
 ADMIN_PASS=$(
+    export SCRIPT_DIR="${INSTALL_DIR}"
     cd "${INSTALL_DIR}"
     # shellcheck disable=SC1091
-    source scripts/lib/common.sh
+    source "${INSTALL_DIR}/scripts/lib/common.sh"
     load_cluster_env "${INSTALL_DIR}"
     echo "${SFTPGO_ADMIN_PASSWORD:-}"
 )

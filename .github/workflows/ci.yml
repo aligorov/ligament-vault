@@ -49,14 +49,22 @@ jobs:
           ./ligactl secrets init
           ./ligactl secrets status
 
-          # Live HTTPS integration test of Web Panel (:18443)
-          PANEL_PORT=18443 PANEL_BIND=127.0.0.1 PANEL_ADMIN_PASSWORD="ci-test-password-123" python3 web/panel.py &
+          # Live HTTPS integration test of Web Panel (:18443) using real age-encrypted secrets!
+          EXTRACTED_PW=$(
+            source scripts/lib/common.sh
+            load_cluster_env "${WORKDIR}/repo"
+            echo "${SFTPGO_ADMIN_PASSWORD}"
+          )
+          PANEL_PORT=18443 PANEL_BIND=127.0.0.1 python3 web/panel.py &
           PANEL_PID=$!
           trap 'kill "${PANEL_PID}" 2>/dev/null || true' EXIT
           sleep 2
           curl -ksf https://127.0.0.1:18443/api/v1/health | jq -e '.ok == true'
           curl -ksf https://127.0.0.1:18443/ | grep -q "Ligament Vault"
-          curl -ksf -H "Authorization: Bearer ci-test-password-123" https://127.0.0.1:18443/api/v1/overview | jq -e '.config.CLUSTER_SLUG == "ligament-vault"'
+          curl -ksf -X POST https://127.0.0.1:18443/api/v1/auth/login \
+            -H "Content-Type: application/json" \
+            -d "{\"username\":\"admin\",\"password\":\"${EXTRACTED_PW}\"}" | jq -e '.ok == true'
+          curl -ksf -H "Authorization: Bearer ${EXTRACTED_PW}" https://127.0.0.1:18443/api/v1/overview | jq -e '.config.CLUSTER_SLUG == "ligament-vault"'
           kill "${PANEL_PID}"
 
           ./ligactl preflight --dry-run
