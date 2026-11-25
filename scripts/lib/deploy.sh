@@ -847,8 +847,8 @@ build_patroni_image_on_node() {
             docker tag 'ghcr.io/aligorov/ligament_vault_patroni:16' '${PATRONI_PG_IMAGE}'
             echo 'Pulled ghcr.io/aligorov/ligament_vault_patroni:16'
         else
-            echo 'Registry pull unavailable — building ${PATRONI_PG_IMAGE} locally from Dockerfile.patroni...'
-            cd '${REMOTE_BASE_DIR}/build-patroni' && docker build --no-cache -q -t '${PATRONI_PG_IMAGE}' -f Dockerfile.patroni .
+            echo 'Registry pull unavailable — building ${PATRONI_PG_IMAGE} locally from Dockerfile.patroni (1-2 min)...'
+            cd '${REMOTE_BASE_DIR}/build-patroni' && docker build --no-cache --progress=plain -t '${PATRONI_PG_IMAGE}' -f Dockerfile.patroni . 2>&1 | grep -E '^#[0-9]+ \[[0-9]+/[0-9]+\]|^Step [0-9]+/|Successfully tagged|DONE' || true
             docker builder prune -af >/dev/null 2>&1 || true
             docker image prune -f >/dev/null 2>&1 || true
         fi

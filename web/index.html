@@ -105,6 +105,26 @@
       padding: 10px 12px; font-family: monospace; font-size: 12px; word-break: break-all; margin-top: 6px;
     }
     .msg { padding: 10px 14px; border-radius: 8px; margin-top: 12px; font-size: 13px; }
+    /* Progress Bar & Stepper */
+    .prog-box { background: #0d1320; border: 1px solid var(--card-border); border-radius: 12px; padding: 14px 16px; margin-bottom: 14px; }
+    .prog-top { display: flex; justify-content: space-between; align-items: center; font-size: 13px; margin-bottom: 8px; gap: 12px; flex-wrap: wrap; }
+    .prog-track { width: 100%; height: 10px; background: #1a243b; border-radius: 999px; overflow: hidden; }
+    .prog-fill {
+      height: 100%; width: 0%; border-radius: 999px;
+      background: linear-gradient(90deg, #4f7cff, #10b981, #4f7cff);
+      background-size: 200% 100%;
+      transition: width 0.5s ease;
+      animation: progShimmer 2s linear infinite;
+    }
+    @keyframes progShimmer { 0% { background-position: 200% 0; } 100% { background-position: 0 0; } }
+    .stepper { display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px; margin-top: 12px; }
+    .step-pill {
+      font-size: 11.5px; text-align: center; padding: 6px 4px; border-radius: 7px;
+      background: #131b2e; border: 1px solid var(--card-border); color: var(--muted);
+    }
+    .step-pill.done { background: rgba(16,185,129,.14); border-color: rgba(16,185,129,.4); color: #34d399; }
+    .step-pill.active { background: rgba(79,124,255,.2); border-color: #4f7cff; color: #fff; font-weight: 600; }
+    @media (max-width: 760px) { .stepper { grid-template-columns: repeat(2, 1fr); } }
   </style>
 </head>
 <body>
@@ -381,6 +401,23 @@
           <span id="consoleTitle">Журнал выполнения операций</span>
           <span id="consoleStatus" class="badge b-ok">ГОТОВ</span>
         </h3>
+        <div id="progWrap" class="prog-box hidden">
+          <div class="prog-top">
+            <div><b id="progPct" style="font-size:16px;color:#fff;">0%</b> · <span id="progHint" style="color:var(--muted);">Подготовка...</span></div>
+            <div style="color:var(--muted);font-family:monospace;">
+              ⏱ <span id="progElapsed">00:00</span> <span id="progEta"></span>
+            </div>
+          </div>
+          <div class="prog-track"><div id="progFill" class="prog-fill"></div></div>
+          <div id="installStepper" class="stepper hidden">
+            <div class="step-pill" data-st="0">0. Проверка</div>
+            <div class="step-pill" data-st="1">1. Защита ОС</div>
+            <div class="step-pill" data-st="2">2. mTLS ключи</div>
+            <div class="step-pill" data-st="3">3. БД Patroni</div>
+            <div class="step-pill" data-st="4">4. Хранилище S3</div>
+            <div class="step-pill" data-st="5">5. SFTPGo & SSL</div>
+          </div>
+        </div>
         <pre id="consoleOut" class="console">Выберите операцию на любой вкладке — здесь отобразится полный вывод в реальном времени.</pre>
       </div>
     </section>
@@ -443,6 +480,17 @@
     document.getElementById("loginView").classList.add("hidden");
     document.getElementById("appView").classList.remove("hidden");
     await loadOverview(false);
+    // Автоподхват активной фоновой задачи даже после обновления страницы (F5)!
+    try {
+      const tl = await api("/api/v1/tasks");
+      const running = (tl.tasks || []).find(x => x.status === "running");
+      if (running && !activeTaskId) {
+        activeTaskId = running.id;
+        pollOffset = 0;
+        document.getElementById("consoleOut").textContent = "";
+        pollTask();
+      }
+    } catch (_) {}
   }
 
   async function loadOverview(live = false) {
@@ -721,6 +769,60 @@
     }
   }
 
+  function fmtTime(sec) {
+    const m = String(Math.floor(sec / 60)).padStart(2, "0");
+    const s = String(sec % 60).padStart(2, "0");
+    return `${m}:${s}`;
+  }
+
+  function estimateProgress(logText, label, status, elapsedSec) {
+    if (status === "success") return { pct: 100, stage: 6, hint: "Все операции успешно завершены!", eta: "" };
+    const isInstall = /установк|install|DR/i.test(label || "") || logText.includes("Стадия ");
+    let pct = 4, stage = -1, hint = "Инициализация операции...";
+
+    if (isInstall) {
+      const rules = [
+        [/Стадия 0:|Preflight Check/, 6, 0, "Проверка серверов, сети и дисков..."],
+        [/3\/7 — RTT-матрица/, 10, 0, "Замер задержек (RTT) между дата-центрами (~40 сек)..."],
+        [/5\/7 — Дисковое/, 15, 0, "Проверка и подготовка дискового пространства..."],
+        [/Стадия 1:|01-host-hardening/, 20, 1, "Настройка ядра, chrony, fail2ban и файрвола UFW..."],
+        [/Стадия 1 завершена/, 34, 1, "Все хосты защищены, переход к криптографии..."],
+        [/Стадия 2:|02-pki-secrets/, 36, 2, "Генерация Root CA и взаимных mTLS-сертификатов узлов..."],
+        [/Стадия 2 завершена/, 49, 2, "Сертификаты mTLS и SSH-ключи развернуты"],
+        [/Стадия 3:|03-bootstrap-db/, 52, 3, "Подготовка образов PostgreSQL 16 + Patroni (~1–2 мин на узел)..."],
+        [/Подготовка образа Patroni.*node2/, 58, 3, "Сборка образа БД на node2 (~1 мин)..."],
+        [/Подготовка образа Patroni.*node3/, 63, 3, "Сборка образа БД на node3 (~1 мин)..."],
+        [/Запуск etcd/, 68, 3, "Формирование кворума etcd между дата-центрами..."],
+        [/Запуск Patroni Primary/, 71, 3, "Инициализация лидера PostgreSQL и клонирование реплик..."],
+        [/Запуск HAProxy|Стадия 3 завершена/, 75, 3, "Кластер БД PostgreSQL и HAProxy запущены"],
+        [/Стадия 4:|04-bootstrap-swfs/, 77, 4, "Запуск распределенного хранилища SeaweedFS..."],
+        [/Запуск SeaweedFS Filers/, 82, 4, "Подключение Filer и S3-шлюзов к кластеру БД..."],
+        [/Создание S3 бакетов/, 86, 4, "Настройка бакетов /work и неизменяемого архива /worm (COMPLIANCE)..."],
+        [/Стадия 4 завершена/, 89, 4, "Распределенное хранилище S3 + WORM готово"],
+        [/Стадия 5:|05-edge-ssl-backup/, 91, 5, "Выпуск SSL-сертификата и инициализация SFTPGo..."],
+        [/Запуск SFTPGo/, 95, 5, "Запуск файловых шлюзов SFTP / FTPS / WebClient на всех узлах..."],
+        [/Провижининг Virtual Folders|Проверка бэкапов/, 98, 5, "Финальная привязка S3-хранилища и проверка кластера..."],
+      ];
+      for (const [re, p, st, h] of rules) {
+        if (re.test(logText)) { pct = p; stage = st; hint = h; }
+      }
+      // Плавная подкрутка на долгих шагах (например docker build), чтобы полоска не замирала
+      pct = Math.min(99, pct + Math.min(4, Math.floor((elapsedSec % 60) / 15)));
+    } else {
+      const linesCount = logText.split("\n").length;
+      pct = Math.min(95, 10 + linesCount * 3);
+      const lastLine = logText.trim().split("\n").pop() || "";
+      hint = lastLine.slice(0, 90) || "Выполнение команды...";
+    }
+
+    let eta = "";
+    if (status === "running" && isInstall && pct >= 8 && pct < 98 && elapsedSec > 10) {
+      const remSec = Math.max(15, Math.round((elapsedSec * (100 - pct)) / pct));
+      eta = `· Осталось ~${remSec > 90 ? Math.ceil(remSec / 60) + " мин" : remSec + " сек"}`;
+    }
+    return { pct, stage, hint, eta, isInstall };
+  }
+
   async function pollTask() {
     if (!activeTaskId) return;
     try {
@@ -734,14 +836,35 @@
       document.getElementById("consoleTitle").textContent = t.label;
       const stEl = document.getElementById("consoleStatus");
       const badge = document.getElementById("taskBadge");
+
+      const prog = estimateProgress(out.textContent, t.label, t.status, t.elapsed_sec || 0);
+      document.getElementById("progWrap").classList.remove("hidden");
+      document.getElementById("progPct").textContent = `${prog.pct}%`;
+      document.getElementById("progHint").textContent = prog.hint;
+      document.getElementById("progElapsed").textContent = fmtTime(t.elapsed_sec || 0);
+      document.getElementById("progEta").textContent = prog.eta;
+      document.getElementById("progFill").style.width = `${prog.pct}%`;
+
+      const stepper = document.getElementById("installStepper");
+      stepper.classList.toggle("hidden", !prog.isInstall);
+      if (prog.isInstall) {
+        stepper.querySelectorAll(".step-pill").forEach(el => {
+          const idx = Number(el.dataset.st);
+          el.className = "step-pill" + (idx < prog.stage ? " done" : (idx === prog.stage ? " active" : ""));
+        });
+      }
+
       if (t.status === "running") {
-        stEl.className = "badge b-warn"; stEl.textContent = "ВЫПОЛНЯЕТСЯ...";
+        document.getElementById("notInstalledBanner").classList.add("hidden");
+        stEl.className = "badge b-warn"; stEl.textContent = `ВЫПОЛНЯЕТСЯ (${prog.pct}%)`;
+        badge.textContent = `RUN ${prog.pct}%`;
         badge.classList.remove("hidden");
         setTimeout(pollTask, 1000);
       } else {
+        activeTaskId = null;
         badge.classList.add("hidden");
         stEl.className = t.status === "success" ? "badge b-ok" : "badge b-err";
-        stEl.textContent = t.status === "success" ? "УСПЕШНО" : "ОШИБКА";
+        stEl.textContent = t.status === "success" ? "УСПЕШНО (100%)" : "ОШИБКА";
         loadOverview(false);
       }
     } catch (_) {

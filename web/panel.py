@@ -499,6 +499,7 @@ class PanelHandler(BaseHTTPRequestHandler):
                     "label": t["label"],
                     "status": t["status"],
                     "rc": t["rc"],
+                    "elapsed_sec": int(time.time() - t["started"]),
                     "next_offset": offset + len(chunk),
                     "lines": chunk,
                 }
