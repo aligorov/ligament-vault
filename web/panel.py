@@ -198,6 +198,7 @@ def bootstrap_remote_vps_ssh(ip, ssh_port, root_password, pubkey):
         f"touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys && "
         f"(grep -Fqx {qpub} /root/.ssh/authorized_keys || echo {qpub} >> /root/.ssh/authorized_keys) && "
         f"(command -v docker >/dev/null 2>&1 || (curl -fsSL https://get.docker.com | sh && systemctl enable --now docker)) && "
+        f"apt-get clean >/dev/null 2>&1 || true && "
         f"echo VPS_BOOTSTRAP_OK"
     )
     base_ssh = [

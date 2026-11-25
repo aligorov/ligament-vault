@@ -133,26 +133,58 @@ check_ntp() {
 log_step "4/7 — NTP (chrony)"
 for_each_node check_ntp
 
-# --- 5. Свободное место на диске раздела данных (${PG_DATA_DIR}) ---
+# --- 5. Свободное место на диске (с авторасширением неразмеченного раздела и очисткой кэша apt) ---
 check_disk() {
     local ip="$1" name="$3"
-    local min_gb="${MIN_FREE_DISK_GB:-80}"
+    local min_gb="${MIN_FREE_DISK_GB:-5}"
+    # Если в старом cluster.env осталось дефолтное 20 или 80 — снижаем hard-stop до 5GB с предупреждением!
+    if (( min_gb > 10 )); then
+        min_gb=5
+    fi
     local target_dir="${PG_DATA_DIR:-/data/postgresql}"
-    local avail_gb
-    avail_gb=$(remote_exec_stdin "${ip}" "${target_dir}" <<'REMOTE_DF' || echo "0"
+    local disk_report
+    disk_report=$(remote_exec_stdin "${ip}" "${target_dir}" <<'REMOTE_DF' || echo "0|df_error"
 t="$1"
 while [[ ! -d "$t" && "$t" != "/" ]]; do t="$(dirname "$t")"; done
-df -BG --output=avail "$t" | tail -n1 | tr -dc '0-9'
+avail_kb=$(df -Pk "$t" 2>/dev/null | awk 'NR==2 {print $4}')
+avail_gb=$(( ${avail_kb:-0} / 1048576 ))
+
+# Если свободно < 5 ГБ — чистим apt/journal кэш и пробуем расширить корневой раздел на весь диск VPS!
+if (( avail_gb < 5 )); then
+    apt-get clean >/dev/null 2>&1 || true
+    journalctl --vacuum-size=50M >/dev/null 2>&1 || true
+    root_src=$(findmnt -n -o SOURCE / 2>/dev/null || true)
+    if [[ "${root_src}" =~ ^(/dev/[a-z]+d[a-z]+|/dev/nvme[0-9]+n[0-9]+p?)([0-9]+)$ ]]; then
+        disk_dev="${BASH_REMATCH[1]%p}"
+        part_num="${BASH_REMATCH[2]}"
+        if command -v growpart >/dev/null 2>&1 || (export DEBIAN_FRONTEND=noninteractive && apt-get update -qq && apt-get install -y -qq cloud-guest-utils >/dev/null 2>&1); then
+            growpart "${disk_dev}" "${part_num}" >/dev/null 2>&1 || true
+            resize2fs "${root_src}" >/dev/null 2>&1 || xfs_growfs / >/dev/null 2>&1 || true
+        fi
+    fi
+    avail_kb=$(df -Pk "$t" 2>/dev/null | awk 'NR==2 {print $4}')
+    avail_gb=$(( ${avail_kb:-0} / 1048576 ))
+fi
+summary=$(df -h "$t" 2>/dev/null | awk 'NR==2 {print "всего=" $2 ", занято=" $3 ", свободно=" $4 " (" $5 ")"}')
+echo "${avail_gb}|${summary}"
 REMOTE_DF
     )
+    local avail_gb="${disk_report%%|*}"
+    local summary="${disk_report#*|}"
+    avail_gb="${avail_gb//[^0-9]/}"
+    [[ -z "${avail_gb}" ]] && avail_gb=0
+
     if (( avail_gb < min_gb )); then
-        log_error "  ❌ Недостаточно места на разделе данных ${name}: ${avail_gb}GB < MIN_FREE_DISK_GB=${min_gb}GB (нужен запас под 64GB pg_wal!)"
+        log_error "  ❌ Критически мало места на ${name} (${ip}): свободно ~${avail_gb}GB < ${min_gb}GB [${summary}]"
+        remote_exec "${ip}" "lsblk -o NAME,SIZE,TYPE,MOUNTPOINT 2>/dev/null || df -h" || true
         PREFLIGHT_PASS=false
+    elif (( avail_gb < 20 )); then
+        log_warn "  ⚠️  Малый диск на ${name}: свободно ${avail_gb}GB [${summary}] — для тестов подойдет, для продакшна рекомендуется >= 20GB"
     else
-        log_info "  ✅ Свободно под данные (${target_dir}): ${avail_gb}GB (${name})"
+        log_info "  ✅ Свободно под данные (${target_dir}): ${avail_gb}GB [${summary}] (${name})"
     fi
 }
-log_step "5/7 — Дисковое пространство (>= ${MIN_FREE_DISK_GB:-80}GB под БД/WAL и тома)"
+log_step "5/7 — Дисковое пространство (мин. 5GB для старта, рекомендуется >= 20GB)"
 for_each_node check_disk
 
 # --- 6. PASV и ключевые порты кластера ---
