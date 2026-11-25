@@ -391,7 +391,7 @@ main() {
             local psub="${cmd_args[0]:-status}"
             case "${psub}" in
                 status)
-                    log_info "Веб-панель: https://<SERVER_IP>:${PANEL_PORT:-8443} (логин: ${SFTPGO_ADMIN_USERNAME:-admin}, пароль: ${SFTPGO_ADMIN_PASSWORD:-не задан})"
+                    log_info "Веб-панель: https://<SERVER_IP>:${PANEL_PORT:-9443} (логин: ${SFTPGO_ADMIN_USERNAME:-admin}, пароль: ${SFTPGO_ADMIN_PASSWORD:-не задан})"
                     [[ "${DRY_RUN}" != "true" ]] && command -v systemctl >/dev/null 2>&1 && systemctl status ligament-vault-ui.service --no-pager || true
                     ;;
                 start|stop|restart)

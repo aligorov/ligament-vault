@@ -704,7 +704,7 @@ class PanelHandler(BaseHTTPRequestHandler):
 
 def main():
     cenv = read_env_dict(os.path.join(CONFIG_ROOT, "cluster.env"))
-    port = int(os.environ.get("PANEL_PORT") or cenv.get("PANEL_PORT") or 8443)
+    port = int(os.environ.get("PANEL_PORT") or cenv.get("PANEL_PORT") or 9443)
     bind_addr = os.environ.get("PANEL_BIND", "0.0.0.0")
     crt, key = ensure_tls_cert()
 
@@ -712,6 +712,7 @@ def main():
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.load_cert_chain(certfile=crt, keyfile=key)
 
+    ThreadingHTTPServer.allow_reuse_address = True
     srv = ThreadingHTTPServer((bind_addr, port), PanelHandler)
     srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
     print(f"[Ligament Vault UI] HTTPS панель запущена на https://{bind_addr}:{port}", flush=True)

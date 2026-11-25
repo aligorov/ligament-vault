@@ -1,21 +1,17 @@
 #!/usr/bin/env bash
 # ============================================================================
-# Ligament Vault — Единый однострочный установщик и запуск Веб-панели (:8443)
+# Ligament Vault — Единый однострочный установщик и запуск Веб-панели (:9443)
 # ============================================================================
-# Установка на чистый Ubuntu 22.04 / 24.04 LTS (от root):
+# Установка на Ubuntu 22.04 / 24.04 LTS (от root):
 #
 #   curl -fsSL https://raw.githubusercontent.com/aligorov/ligament-vault/main/install.sh | sudo bash
-#
-# Неинтерактивный режим с авторазвертыванием кластера:
-#   NODES="1.1.1.1 2.2.2.2 3.3.3.3" DOMAIN="files.example.com" \
-#     curl -fsSL https://raw.githubusercontent.com/aligorov/ligament-vault/main/install.sh | sudo -E bash
 # ============================================================================
 
 set -euo pipefail
 
 REPO_URL="${REPO_URL:-https://github.com/aligorov/ligament-vault.git}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/ligament-vault-ctl}"
-PANEL_PORT="${PANEL_PORT:-8443}"
+PANEL_PORT="${PANEL_PORT:-9443}"
 
 GREEN='\033[0;32m'
 CYAN='\033[0;36m'
@@ -29,7 +25,7 @@ warn() { echo -e "${YELLOW}[ВНИМАНИЕ]${NC} $*" >&2; }
 err()  { echo -e "${RED}[ОШИБКА]${NC} $*" >&2; exit 1; }
 
 if [[ "${DRY_RUN:-false}" == "true" ]]; then
-    info "[DRY-RUN] Установка зависимостей -> клонирование ${REPO_URL} в ${INSTALL_DIR} -> генерация секретов -> запуск systemd сервиса ligament-vault-ui (:8443)"
+    info "[DRY-RUN] Установка зависимостей -> клонирование ${REPO_URL} в ${INSTALL_DIR} -> генерация секретов -> запуск systemd сервиса ligament-vault-ui (:${PANEL_PORT})"
     exit 0
 fi
 
@@ -39,7 +35,7 @@ fi
 info "1/5 — Проверка системных пакетов и Docker..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq git curl jq age openssl python3 python3-yaml openssh-client sshpass ca-certificates
+apt-get install -y -qq git curl jq age openssl python3 python3-yaml openssh-client sshpass iproute2 ca-certificates
 
 if ! command -v docker >/dev/null 2>&1; then
     info "Установка Docker Engine + Compose..."
@@ -50,7 +46,8 @@ fi
 # 2. Клонирование / обновление репозитория и глобальная команда ligactl
 info "2/5 — Загрузка Ligament Vault в ${INSTALL_DIR}..."
 if [[ -d "${INSTALL_DIR}/.git" ]]; then
-    git -C "${INSTALL_DIR}" pull --ff-only
+    git -C "${INSTALL_DIR}" fetch --quiet origin main
+    git -C "${INSTALL_DIR}" reset --hard origin/main >/dev/null
 else
     rm -rf "${INSTALL_DIR}"
     git clone --depth 1 "${REPO_URL}" "${INSTALL_DIR}"
@@ -70,7 +67,16 @@ PUBKEY=$(cat /root/.ssh/id_ed25519.pub)
 touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys
 grep -Fqx "${PUBKEY}" /root/.ssh/authorized_keys || echo "${PUBKEY}" >> /root/.ssh/authorized_keys
 
-# 4. Автоконфигурация cluster.env и криптостойких секретов (без ручного редактирования!)
+# Автоподбор свободного порта (если 9443 или старый 8443 занят другим сервисом, например awg-api!)
+systemctl stop ligament-vault-ui.service 2>/dev/null || true
+for cand_port in "${PANEL_PORT}" 9443 9444 10443 18443; do
+    if ! ss -H -tln "sport = :${cand_port}" 2>/dev/null | grep -q .; then
+        PANEL_PORT="${cand_port}"
+        break
+    fi
+done
+
+# 4. Автоконфигурация cluster.env и криптостойких секретов
 info "4/5 — Генерация конфигурации и шифрованных секретов..."
 PUBLIC_IP=$(curl -4 -fsSL --max-time 4 https://ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')
 
@@ -93,14 +99,20 @@ if [[ ! -f "${INSTALL_DIR}/cluster.env" ]]; then
     if [[ -n "${DOMAIN:-}" ]]; then
         sed -i "s|DOMAIN=\"files.company.com\"|DOMAIN=\"${DOMAIN}\"|g" "${INSTALL_DIR}/cluster.env"
     fi
-    sed -i "s|PANEL_PORT=8443|PANEL_PORT=${PANEL_PORT}|g" "${INSTALL_DIR}/cluster.env"
+fi
+
+# Гарантированно записываем свободный PANEL_PORT в cluster.env (включая миграцию со старого 8443!)
+if grep -q '^PANEL_PORT=' "${INSTALL_DIR}/cluster.env"; then
+    sed -i "s|^PANEL_PORT=.*|PANEL_PORT=${PANEL_PORT}|g" "${INSTALL_DIR}/cluster.env"
+else
+    echo "PANEL_PORT=${PANEL_PORT}" >> "${INSTALL_DIR}/cluster.env"
 fi
 
 if [[ ! -f "${INSTALL_DIR}/secrets.env" && ! -f "${INSTALL_DIR}/secrets.env.age" ]]; then
     "${INSTALL_DIR}/ligactl" secrets init
 fi
 
-# 5. Запуск HTTPS Веб-панели управления (:8443) через systemd
+# 5. Запуск HTTPS Веб-панели управления через systemd + проверка /api/v1/health
 info "5/5 — Запуск HTTPS Веб-панели управления (порт ${PANEL_PORT}/tcp)..."
 cat > /etc/systemd/system/ligament-vault-ui.service <<EOF
 [Unit]
@@ -131,9 +143,26 @@ systemctl restart ligament-vault-ui.service
 
 if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
     ufw allow "${PANEL_PORT}/tcp" comment "ligament-vault:web-panel" >/dev/null 2>&1 || true
+elif command -v iptables >/dev/null 2>&1 && iptables -S INPUT 2>/dev/null | grep -Eq '^-P INPUT DROP|-j DROP|-j REJECT'; then
+    iptables -C INPUT -p tcp --dport "${PANEL_PORT}" -j ACCEPT 2>/dev/null || \
+        iptables -I INPUT 1 -p tcp --dport "${PANEL_PORT}" -j ACCEPT 2>/dev/null || true
 fi
 
-# Извлекаем пароль администратора для вывода в консоль
+# Проверяем, что именно наша панель поднялась на выбранном порту
+PANEL_OK=false
+for _ in 1 2 3 4 5 6; do
+    if curl -ksf --max-time 2 "https://127.0.0.1:${PANEL_PORT}/api/v1/health" 2>/dev/null | grep -Eq '"ok":[[:space:]]*true'; then
+        PANEL_OK=true
+        break
+    fi
+    sleep 1
+done
+
+if [[ "${PANEL_OK}" != "true" ]]; then
+    journalctl -u ligament-vault-ui.service -n 25 --no-pager >&2 || true
+    err "Веб-панель не ответила на https://127.0.0.1:${PANEL_PORT}/api/v1/health"
+fi
+
 ADMIN_PASS=$(
     export SCRIPT_DIR="${INSTALL_DIR}"
     cd "${INSTALL_DIR}"
@@ -151,13 +180,11 @@ echo -e "${CYAN}${BOLD}║${NC}  🌐 Веб-интерфейс:  ${GREEN}${BOLD
 echo -e "${CYAN}${BOLD}║${NC}  👤 Логин:          ${BOLD}admin${NC}"
 echo -e "${CYAN}${BOLD}║${NC}  🔑 Пароль:         ${YELLOW}${BOLD}${ADMIN_PASS}${NC}"
 echo -e "${CYAN}${BOLD}╠══════════════════════════════════════════════════════════════════════════╣${NC}"
-echo -e "${CYAN}${BOLD}║${NC}  Откройте ссылку в браузере -> укажите IP серверов 2 и 3 ->             ${CYAN}${BOLD}║${NC}"
-echo -e "${CYAN}${BOLD}║${NC}  нажмите «Развернуть кластер» (все остальное произойдет автоматически). ${CYAN}${BOLD}║${NC}"
-echo -e "${CYAN}${BOLD}║${NC}  CLI также доступен глобально: ${BOLD}ligactl status | ligactl user ...${NC}       ${CYAN}${BOLD}║${NC}"
+echo -e "${CYAN}${BOLD}║${NC}  Откройте ссылку в браузере -> подключите остальные VPS по SSH ->        ${CYAN}${BOLD}║${NC}"
+echo -e "${CYAN}${BOLD}║${NC}  нажмите «Объединить в кластер и установить всё».                        ${CYAN}${BOLD}║${NC}"
 echo -e "${CYAN}${BOLD}╚══════════════════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 
-# Если переданы реальные NODES без FIXME — сразу запускаем установку кластера!
 if [[ -n "${NODES:-}" ]]; then
     info "Обнаружена переменная NODES — запускаем автоматическое развертывание кластера..."
     "${INSTALL_DIR}/ligactl" install --yes

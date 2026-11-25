@@ -354,7 +354,7 @@ harden_node_ufw() {
         "${SWFS_ADMIN_PORT:-12535}" "${SWFS_ADMIN_GRPC_PORT:-22535}" \
         "${SWFS_MASTER_METRICS_PORT:-9324}" "${SWFS_VOLUME_METRICS_PORT:-9325}" "${SWFS_FILER_METRICS_PORT:-9326}" \
         "${SFTPGO_TELEMETRY_PORT:-10000}" \
-        "${PANEL_PORT:-8443}" \
+        "${PANEL_PORT:-9443}" \
         "${ARBITER_IP:-}" "${peer_ips}" <<'REMOTE_UFW'
 set -euo pipefail
 SLUG="$1"
