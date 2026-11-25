@@ -617,6 +617,9 @@ class PanelHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/v1/users":
+            if not os.path.exists(os.path.join(CONFIG_ROOT, ".cluster_installed")):
+                self.send_json(400, {"error": "Кластер еще устанавливается (или не развернут). Откройте вкладку «Консоль задач», дождитесь завершения Стадии 5 и повторите."})
+                return
             uname = str(body.get("username", "")).strip()
             profile = str(body.get("profile", "dual")).strip()
             quota_gb = str(body.get("quota_gb", "0")).strip() or "0"
@@ -638,7 +641,10 @@ class PanelHandler(BaseHTTPRequestHandler):
 
             res = subprocess.run(cmd, cwd=REPO_DIR, env={**os.environ, "CONFIG_ROOT": CONFIG_ROOT}, capture_output=True, text=True, timeout=30)
             if res.returncode != 0:
-                self.send_json(400, {"error": res.stderr.strip() or res.stdout.strip()})
+                raw_err = (res.stderr.strip() or res.stdout.strip())
+                if "ConnectionRefusedError" in raw_err or "Errno 111" in raw_err:
+                    raw_err = "Сервис SFTPGo (127.0.0.1:8081) еще не запущен на активном узле — проверьте статус кластера во вкладке «Консоль задач»."
+                self.send_json(400, {"error": raw_err.splitlines()[-1] if raw_err else "Ошибка создания клиента"})
                 return
             out_pw = pw
             if generated_pw:
@@ -678,6 +684,7 @@ class PanelHandler(BaseHTTPRequestHandler):
                 "backup-incr": ("Инкрементальный бэкап БД + SeaweedFS", ["bash", os.path.join(REPO_DIR, "scripts/ops/backup-job.sh"), "incr"]),
                 "backup-full": ("Полный бэкап БД + SeaweedFS", ["bash", os.path.join(REPO_DIR, "scripts/ops/backup-job.sh"), "full"]),
                 "upgrade": ("Rolling-обновление кластера", [ligactl, "upgrade", "--yes"]),
+                "self-update": ("Обновление Ligament Vault с GitHub", ["bash", "-c", f"git -C '{REPO_DIR}' pull --ff-only && echo '✅ Код обновлен! Перезапускаем веб-панель...' && (nohup bash -c 'sleep 1 && systemctl restart ligament-vault-ui' >/dev/null 2>&1 &)"]),
             }
             if action == "scale-add":
                 ip = str(body.get("ip", "")).strip()

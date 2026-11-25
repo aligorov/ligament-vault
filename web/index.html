@@ -137,6 +137,7 @@
       <button class="tab-btn" onclick="switchTab('console', this)">Консоль задач <span id="taskBadge" class="badge b-warn hidden">RUN</span></button>
     </div>
     <div style="display:flex;gap:8px;align-items:center;">
+      <button class="btn btn-sec btn-sm" onclick="runTask('self-update')" title="Подтянуть свежую версию с GitHub">⬇️ Обновить панель</button>
       <a id="webClientLink" href="#" target="_blank" class="btn btn-sec btn-sm">Файловый клиент (:443) ↗</a>
       <button class="btn btn-sec btn-sm" onclick="logout()">Выйти</button>
     </div>
@@ -515,10 +516,13 @@
       card.innerHTML = `<b>✅ Клиент ${res.username} создан!</b><br/>` +
         (res.password ? `Пароль: <code>${res.password}</code><br/>` : "") +
         `SFTP: <code>sftp -P 2022 ${res.username}@${location.hostname}</code> | Web: <code>https://${location.hostname}/web/client/login</code>`;
+      card.className = "msg b-ok";
       card.classList.remove("hidden");
       loadUsers();
     } catch (err) {
-      alert("Ошибка: " + err.message);
+      card.textContent = "❌ " + err.message;
+      card.className = "msg b-err";
+      card.classList.remove("hidden");
     }
   };
 
