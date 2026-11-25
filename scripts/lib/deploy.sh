@@ -467,6 +467,10 @@ BASE_DIR="$1"; SSH_PORT="$2"; SFTP_TMP="$3"; SFTP_DATA="$4"; SWFS_DIR="$5"; PG_D
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq chrony fail2ban ufw jq curl python3 python3-yaml netcat-openbsd conntrack iproute2
+if ! command -v docker >/dev/null 2>&1; then
+    curl -fsSL https://get.docker.com | sh
+    systemctl enable --now docker
+fi
 
 systemctl enable --now chrony
 

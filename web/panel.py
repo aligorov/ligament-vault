@@ -181,10 +181,85 @@ def ensure_tls_cert():
 
 
 def get_orchestrator_pubkey():
+    if os.environ.get("ORCHESTRATOR_PUBKEY"):
+        return os.environ["ORCHESTRATOR_PUBKEY"].strip()
     for candidate in ("/root/.ssh/id_ed25519.pub", os.path.expanduser("~/.ssh/id_ed25519.pub")):
         if os.path.exists(candidate):
             return open(candidate, "r", encoding="utf-8").read().strip()
     return ""
+
+
+def bootstrap_remote_vps_ssh(ip, ssh_port, root_password, pubkey):
+    """Разово подключается к новому VPS по паролю (или существующему ключу),
+    прописывает SSH-ключ оркестратора и ставит Docker при необходимости."""
+    qpub = shlex.quote(pubkey)
+    remote_cmd = (
+        f"mkdir -p /root/.ssh && chmod 700 /root/.ssh && "
+        f"touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys && "
+        f"(grep -Fqx {qpub} /root/.ssh/authorized_keys || echo {qpub} >> /root/.ssh/authorized_keys) && "
+        f"(command -v docker >/dev/null 2>&1 || (curl -fsSL https://get.docker.com | sh && systemctl enable --now docker)) && "
+        f"echo VPS_BOOTSTRAP_OK"
+    )
+    base_ssh = [
+        "ssh", "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "ConnectTimeout=10", "-p", str(ssh_port), f"root@{ip}", remote_cmd,
+    ]
+    # 1. Сначала пробуем без пароля (если ключ уже был добавлен)
+    r_key = subprocess.run(
+        ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=8", "-p", str(ssh_port), f"root@{ip}", remote_cmd],
+        capture_output=True, text=True, timeout=180,
+    )
+    if r_key.returncode == 0 and "VPS_BOOTSTRAP_OK" in r_key.stdout:
+        return True, "Узел подключен по SSH-ключу, Docker готов"
+
+    if not root_password:
+        return False, "Ключ еще не прописан на целевом VPS — укажите пароль root для автоматического подключения"
+
+    # 2. Через sshpass -e (пароль передается через env в памяти, не светится в ps aux!)
+    if shutil_which("sshpass"):
+        r_pw = subprocess.run(
+            ["sshpass", "-e", *base_ssh],
+            env={**os.environ, "SSHPASS": root_password},
+            capture_output=True, text=True, timeout=180,
+        )
+        if r_pw.returncode == 0 and "VPS_BOOTSTRAP_OK" in r_pw.stdout:
+            return True, "SSH-ключ автоматически установлен по паролю, Docker готов"
+        return False, (r_pw.stderr or r_pw.stdout or "Ошибка подключения по SSH").strip()
+
+    # 3. Fallback через stdlib pty (если sshpass не установлен)
+    import pty
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.execvp("ssh", base_ssh)
+    output = b""
+    pw_sent = False
+    deadline = time.time() + 180
+    while time.time() < deadline:
+        try:
+            chunk = os.read(fd, 4096)
+            if not chunk:
+                break
+            output += chunk
+            low = output.lower()
+            if (b"password:" in low) and not pw_sent:
+                os.write(fd, (root_password + "\n").encode("utf-8"))
+                pw_sent = True
+        except OSError:
+            break
+    os.close(fd)
+    _, status = os.waitpid(pid, 0)
+    decoded = output.decode("utf-8", "replace")
+    if os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0 and "VPS_BOOTSTRAP_OK" in decoded:
+        return True, "SSH-ключ установлен, Docker готов"
+    return False, "Не удалось подключиться по SSH (проверьте IP, порт и пароль root)"
+
+
+def shutil_which(cmd):
+    for p in os.environ.get("PATH", "").split(os.pathsep):
+        full = os.path.join(p, cmd)
+        if os.path.isfile(full) and os.access(full, os.X_OK):
+            return full
+    return None
 
 
 def start_async_task(label, argv):
@@ -463,6 +538,62 @@ class PanelHandler(BaseHTTPRequestHandler):
             return
 
         body = self.read_body_json()
+
+        if path == "/api/v1/nodes/connect":
+            ip = str(body.get("ip", "")).strip()
+            ssh_port = int(body.get("ssh_port") or 22)
+            root_pw = str(body.get("password", ""))
+            dc_input = str(body.get("dc", "")).strip()
+            auto_join = bool(body.get("auto_join", False))
+
+            if not re.match(r"^[0-9]{1,3}(\.[0-9]{1,3}){3}$", ip):
+                self.send_json(400, {"error": "Укажите корректный IPv4 адрес VPS"})
+                return
+            pubkey = get_orchestrator_pubkey()
+            if not pubkey:
+                self.send_json(500, {"error": "На главном сервере не найден SSH-ключ (/root/.ssh/id_ed25519.pub)"})
+                return
+
+            if os.environ.get("DRY_RUN") == "true":
+                ok, msg = True, "[DRY-RUN] VPS подключен"
+            else:
+                ok, msg = bootstrap_remote_vps_ssh(ip, ssh_port, root_pw, pubkey)
+            if not ok:
+                self.send_json(400, {"error": msg})
+                return
+
+            cenv_path = os.path.join(CONFIG_ROOT, "cluster.env")
+            cenv = read_env_dict(cenv_path)
+            existing = [e for e in cenv.get("CLUSTER_NODES", "").split() if "FIXME" not in e]
+            installed = os.path.exists(os.path.join(CONFIG_ROOT, ".cluster_installed"))
+
+            # Если кластер уже установлен и включен auto_join — запускаем живой scale add!
+            if installed and auto_join:
+                next_idx = len(existing) + 1
+                dc = dc_input or f"dc{next_idx}"
+                role = str(body.get("role", "edge")).strip() or "edge"
+                ligactl = os.path.join(REPO_DIR, "ligactl")
+                tid, err = start_async_task(
+                    f"Ввод нового VPS {ip} ({dc}) в работающий кластер",
+                    [ligactl, "scale", "add", "--ip", ip, "--dc", dc, "--role", role, "--yes"],
+                )
+                if err:
+                    self.send_json(409, {"error": err})
+                    return
+                self.send_json(200, {"ok": True, "message": msg, "task_id": tid, "joined_live": True})
+                return
+
+            # Иначе добавляем узел в список CLUSTER_NODES для первичного объединения в кластер
+            already_ips = {e.split(":")[0] for e in existing}
+            if ip not in already_ips:
+                next_idx = len(existing) + 1
+                dc = dc_input or f"dc{next_idx}"
+                name = f"node{next_idx}"
+                existing.append(f"{ip}:{dc}:{name}")
+                update_env_file(cenv_path, {"CLUSTER_NODES": " ".join(existing), "ADMIN_SSH_PORT": str(ssh_port)})
+
+            self.send_json(200, {"ok": True, "message": msg, "cluster_nodes": " ".join(existing), "joined_live": False})
+            return
 
         if path == "/api/v1/config":
             allowed_cluster = (

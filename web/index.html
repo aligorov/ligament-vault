@@ -238,49 +238,70 @@
 
     <!-- ВКЛАДКА 3: МАСТЕР УСТАНОВКИ И МАСШТАБИРОВАНИЕ -->
     <section id="tab-setup" class="hidden">
-      <div class="card">
-        <h3>Шаг 1. Доступ по SSH к нодам кластера</h3>
-        <p style="color:var(--muted);font-size:13px;">На текущей машине ключ уже добавлен автоматически. Выполните эту команду на остальных VPS (`node2`, `node3`), чтобы оркестратор мог развернуть кластер:</p>
-        <div id="sshKeyCmd" class="code-copy">Загрузка ключа...</div>
-        <div class="btn-row">
-          <button class="btn btn-sec btn-sm" onclick="copyText(document.getElementById('sshKeyCmd').innerText)">📋 Скопировать команду</button>
+      <div class="grid grid-2">
+        <div class="card" style="border-color:#3556a8;">
+          <h3>Шаг 1. Подключить другие VPS по SSH (авто-ключ + Docker)</h3>
+          <p style="color:var(--muted);font-size:13px;margin-bottom:10px;">
+            Укажите IP и разовый пароль <code>root</code> от второго, третьего (или нового) VPS — панель сама пропишет SSH-ключ, установит Docker и подготовит сервер к объединению в кластер.
+          </p>
+          <form id="connectVpsForm">
+            <label>IP адрес удаленного VPS</label>
+            <input id="vpsIp" placeholder="198.51.100.20" required />
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+              <div>
+                <label>SSH порт</label>
+                <input id="vpsPort" type="number" value="22" required />
+              </div>
+              <div>
+                <label>Код ДЦ (авто, если пусто)</label>
+                <input id="vpsDc" placeholder="dc2 / dc3" />
+              </div>
+            </div>
+            <label>Пароль root (используется 1 раз в памяти и не сохраняется)</label>
+            <input id="vpsPass" type="password" placeholder="Пароль root от хостера (или пусто, если ключ уже там)" />
+            <label style="display:flex;align-items:center;gap:8px;margin-top:12px;color:var(--text);">
+              <input id="vpsAutoJoin" type="checkbox" checked style="width:auto;" />
+              Если кластер уже развернут — сразу ввести этот VPS в живой кластер
+            </label>
+            <div class="btn-row">
+              <button type="submit" id="btnConnectVps" class="btn">+ Подключить VPS по SSH</button>
+            </div>
+            <div id="vpsConnectMsg" class="msg b-ok hidden"></div>
+          </form>
+        </div>
+
+        <div class="card">
+          <h3>Шаг 2. Объединить все подключенные VPS в кластер</h3>
+          <p style="color:var(--muted);font-size:13px;margin-bottom:8px;">
+            Минимум 3 VPS для отказоустойчивого кворума (1-й сервер уже добавлен автоматически).
+          </p>
+          <label>Список серверов кластера (<code>IP:dc:node</code>)</label>
+          <input id="cfgNodes" placeholder="203.0.113.10:dc1:node1 198.51.100.20:dc2:node2 192.0.2.30:dc3:node3" />
+          <label>Домен кластера (или оставьте как есть для работы по IP)</label>
+          <input id="cfgDomain" placeholder="files.company.com" />
+          <label>Cloudflare DNS API Token (опц., для авто-SSL Let's Encrypt и DNS Failover)</label>
+          <input id="cfgCfToken" type="password" placeholder="Опционально" />
+          <label>IP внешнего сервера-арбитра (опц., для мониторинга и авто-Failover)</label>
+          <input id="cfgArbiter" placeholder="Опционально" />
+          <div class="btn-row">
+            <button class="btn btn-sec" onclick="saveAndRun('preflight')">Проверить связь и RTT</button>
+            <button class="btn btn-ok" onclick="saveAndRun('install')">🚀 Объединить в кластер и установить всё</button>
+            <button class="btn btn-sec" onclick="runTask('install-resume')">Продолжить (--resume)</button>
+          </div>
+          <hr style="border:none;border-top:1px solid var(--card-border);margin:16px 0;" />
+          <div class="btn-row" style="margin-top:0;">
+            <button class="btn btn-sec btn-sm" onclick="runTask('pki-rotate')">🔐 Ротация mTLS PKI</button>
+            <button class="btn btn-sec btn-sm" onclick="runTask('upgrade')">⬆️ Обновить образы кластера</button>
+          </div>
         </div>
       </div>
 
-      <div class="grid grid-2">
-        <div class="card">
-          <h3>Шаг 2. Топология и установка в 1 клик</h3>
-          <label>Узлы кластера (минимум 3: <code>IP:dc1:node1 IP:dc2:node2 IP:dc3:node3</code>)</label>
-          <input id="cfgNodes" placeholder="203.0.113.10:dc1:node1 198.51.100.20:dc2:node2 192.0.2.30:dc3:node3" />
-          <label>Домен кластера</label>
-          <input id="cfgDomain" placeholder="files.company.com" />
-          <label>Cloudflare DNS API Token (опц., для авто-SSL Let's Encrypt и DNS Failover)</label>
-          <input id="cfgCfToken" type="password" placeholder="Оставьте пустым, если SSL еще не нужен" />
-          <label>IP внешнего сервера-арбитра (опц., для Prometheus и авто-Failover)</label>
-          <input id="cfgArbiter" placeholder="198.51.100.99" />
-          <div class="btn-row">
-            <button class="btn btn-sec" onclick="saveAndRun('preflight')">1. Проверить серверы (Preflight)</button>
-            <button class="btn btn-ok" onclick="saveAndRun('install')">2. Развернуть кластер</button>
-            <button class="btn btn-sec" onclick="runTask('install-resume')">Продолжить (--resume)</button>
-          </div>
-        </div>
-
-        <div class="card">
-          <h3>Масштабирование и обслуживание (Day-2)</h3>
-          <label>Добавить новую ноду — IP адрес</label>
-          <input id="scaleIp" placeholder="203.0.113.44" />
-          <label>Код дата-центра (например, dc4)</label>
-          <input id="scaleDc" value="dc4" />
-          <label>Роль нового узла</label>
-          <select id="scaleRole">
-            <option value="edge">Edge + Storage (рекомендуется для 4-й ноды)</option>
-            <option value="quorum">Quorum Voter (для 5-й ноды кворума)</option>
-          </select>
-          <div class="btn-row">
-            <button class="btn" onclick="scaleAdd()">+ Добавить узел в кластер</button>
-            <button class="btn btn-sec" onclick="runTask('pki-rotate')">🔐 Ротация mTLS PKI</button>
-            <button class="btn btn-sec" onclick="runTask('upgrade')">⬆️ Обновить образы</button>
-          </div>
+      <div class="card">
+        <h3>Ручной способ (если парольный вход root отключен у хостера)</h3>
+        <p style="color:var(--muted);font-size:13px;">Если на новом VPS отключен вход по паролю, выполните там одну команду и затем нажмите «Подключить VPS» без пароля:</p>
+        <div id="sshKeyCmd" class="code-copy">Загрузка ключа...</div>
+        <div class="btn-row">
+          <button class="btn btn-sec btn-sm" onclick="copyText(document.getElementById('sshKeyCmd').innerText)">📋 Скопировать команду</button>
         </div>
       </div>
     </section>
@@ -538,12 +559,48 @@
     else alert("Настройки сохранены");
   }
 
-  async function scaleAdd() {
-    const ip = document.getElementById("scaleIp").value.trim();
-    const dc = document.getElementById("scaleDc").value.trim();
-    const role = document.getElementById("scaleRole").value;
-    await runTask("scale-add", { ip, dc, role });
-  }
+  document.getElementById("connectVpsForm").onsubmit = async (e) => {
+    e.preventDefault();
+    const btn = document.getElementById("btnConnectVps");
+    const msg = document.getElementById("vpsConnectMsg");
+    msg.classList.add("hidden");
+    btn.disabled = true;
+    btn.textContent = "Подключение к VPS и установка Docker...";
+    try {
+      const res = await api("/api/v1/nodes/connect", {
+        method: "POST",
+        body: JSON.stringify({
+          ip: document.getElementById("vpsIp").value.trim(),
+          ssh_port: document.getElementById("vpsPort").value.trim(),
+          dc: document.getElementById("vpsDc").value.trim(),
+          password: document.getElementById("vpsPass").value,
+          auto_join: document.getElementById("vpsAutoJoin").checked,
+        }),
+      });
+      document.getElementById("vpsIp").value = "";
+      document.getElementById("vpsDc").value = "";
+      document.getElementById("vpsPass").value = "";
+      if (res.joined_live && res.task_id) {
+        activeTaskId = res.task_id;
+        pollOffset = 0;
+        document.getElementById("consoleOut").textContent = "";
+        document.querySelectorAll(".tab-btn")[4].click();
+        pollTask();
+      } else {
+        msg.className = "msg b-ok";
+        msg.textContent = "✅ " + res.message;
+        msg.classList.remove("hidden");
+        await loadOverview(false);
+      }
+    } catch (err) {
+      msg.className = "msg b-err";
+      msg.textContent = "❌ " + err.message;
+      msg.classList.remove("hidden");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "+ Подключить VPS по SSH";
+    }
+  };
 
   async function runTask(action, extra = {}) {
     try {

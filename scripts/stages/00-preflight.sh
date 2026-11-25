@@ -175,16 +175,24 @@ REMOTE_PASV
 log_step "6/7 — Проверка FTPS PASV-портов"
 for_each_node check_pasv_ports
 
-# --- 7. Docker и ядро ---
+# --- 7. Docker и ядро (с автоустановкой Docker на чистых удаленных VPS!) ---
 check_docker_kernel() {
     local ip="$1" name="$3"
     local info
-    info=$(remote_exec "${ip}" "docker --version 2>/dev/null && docker compose version 2>/dev/null && uname -r" || echo "FAIL")
-    if [[ "${info}" == *"FAIL"* ]]; then
-        log_error "  ❌ Docker или docker compose plugin отсутствует на ${name}"
+    info=$(remote_exec "${ip}" "docker --version 2>/dev/null && docker compose version 2>/dev/null && uname -r" || echo "MISSING")
+    if [[ "${info}" == *"MISSING"* ]]; then
+        log_info "  ⚙️  Docker не найден на ${name} (${ip}) — устанавливаем автоматически..."
+        if remote_exec "${ip}" "export DEBIAN_FRONTEND=noninteractive; curl -fsSL https://get.docker.com | sh >/dev/null 2>&1 && systemctl enable --now docker >/dev/null 2>&1"; then
+            info=$(remote_exec "${ip}" "docker --version 2>/dev/null && docker compose version 2>/dev/null && uname -r" || echo "FAIL")
+        else
+            info="FAIL"
+        fi
+    fi
+    if [[ "${info}" == *"FAIL"* || "${info}" == *"MISSING"* ]]; then
+        log_error "  ❌ Не удалось установить/проверить Docker на ${name} (${ip})"
         PREFLIGHT_PASS=false
     else
-        log_info "  ✅ Docker + Compose OK на ${name} ($(echo "${info}" | tail -n1))"
+        log_info "  ✅ Docker + Compose готовы на ${name} ($(echo "${info}" | tail -n1))"
     fi
 }
 log_step "7/7 — Docker, Compose и ядро"

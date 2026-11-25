@@ -39,7 +39,7 @@ fi
 info "1/5 — Проверка системных пакетов и Docker..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq git curl jq age openssl python3 python3-yaml openssh-client ca-certificates
+apt-get install -y -qq git curl jq age openssl python3 python3-yaml openssh-client sshpass ca-certificates
 
 if ! command -v docker >/dev/null 2>&1; then
     info "Установка Docker Engine + Compose..."
@@ -87,7 +87,7 @@ if [[ ! -f "${INSTALL_DIR}/cluster.env" ]]; then
             IDX=$((IDX + 1))
         done
     else
-        NODE_LIST="${PUBLIC_IP}:dc1:node1 FIXME_IP2:dc2:node2 FIXME_IP3:dc3:node3"
+        NODE_LIST="${PUBLIC_IP}:dc1:node1"
     fi
     sed -i "s|FIXME_IP1:dc1:node1 FIXME_IP2:dc2:node2 FIXME_IP3:dc3:node3|${NODE_LIST}|g" "${INSTALL_DIR}/cluster.env"
     if [[ -n "${DOMAIN:-}" ]]; then
