@@ -55,7 +55,7 @@ ${PATRONI_SLOTS_YAML}
         max_replication_slots: 10
         max_slot_wal_keep_size: "${PG_MAX_SLOT_WAL_KEEP_SIZE}"
         wal_log_hints: "on"
-        wal_keep_size: "256MB"
+        wal_keep_size: "128MB"
         archive_mode: "on"
         archive_command: "pgbackrest --stanza=${CLUSTER_SLUG} archive-push %p"
         restore_command: 'pgbackrest --stanza=${CLUSTER_SLUG} archive-get %f "%p"'

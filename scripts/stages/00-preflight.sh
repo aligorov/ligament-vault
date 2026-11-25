@@ -136,10 +136,10 @@ for_each_node check_ntp
 # --- 5. Свободное место на диске (с авторасширением неразмеченного раздела и очисткой кэша apt) ---
 check_disk() {
     local ip="$1" name="$3"
-    local min_gb="${MIN_FREE_DISK_GB:-5}"
-    # Если в старом cluster.env осталось дефолтное 20 или 80 — снижаем hard-stop до 5GB с предупреждением!
-    if (( min_gb > 10 )); then
-        min_gb=5
+    local min_gb="${MIN_FREE_DISK_GB:-2}"
+    # Игнорируем завышенный старый порог 20/80GB из ранних cluster.env — весь стек весит ~1GB!
+    if (( min_gb > 5 )); then
+        min_gb=2
     fi
     local target_dir="${PG_DATA_DIR:-/data/postgresql}"
     local disk_report
@@ -184,7 +184,7 @@ REMOTE_DF
         log_info "  ✅ Свободно под данные (${target_dir}): ${avail_gb}GB [${summary}] (${name})"
     fi
 }
-log_step "5/7 — Дисковое пространство (мин. 5GB для старта, рекомендуется >= 20GB)"
+log_step "5/7 — Дисковое пространство (мин. 2GB для старта стека)"
 for_each_node check_disk
 
 # --- 6. PASV и ключевые порты кластера ---

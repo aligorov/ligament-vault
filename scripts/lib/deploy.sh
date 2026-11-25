@@ -150,7 +150,7 @@ export_node_render_vars() {
     export SFTPGO_TEMP_PATH="${SFTPGO_TEMP_PATH:-/data/sftpgo-temp}"
     export ETCD_METRICS_PORT="${ETCD_METRICS_PORT:-2381}"
     export SFTPGO_TELEMETRY_PORT="${SFTPGO_TELEMETRY_PORT:-10000}"
-    export PG_MAX_SLOT_WAL_KEEP_SIZE="${PG_MAX_SLOT_WAL_KEEP_SIZE:-4GB}"
+    export PG_MAX_SLOT_WAL_KEEP_SIZE="${PG_MAX_SLOT_WAL_KEEP_SIZE:-2GB}"
 
     if [[ -n "${ARBITER_IP:-}" ]]; then
         export SFTPGO_TELEMETRY_BIND="0.0.0.0"
