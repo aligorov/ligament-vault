@@ -783,7 +783,9 @@ REMOTE_CSR
 
         remote_copy "${node_cert_dir}/${role}.crt" "${ip}:${REMOTE_BASE_DIR}/certs/${name}/${role}.crt"
         local extra_chown=""
-        [[ "${role}" == swfs-* ]] && extra_chown="chown 1000:1000 '${REMOTE_BASE_DIR}/certs/${name}/${role}.key' && "
+        if [[ "${role}" == swfs-* || "${role}" == "pg-client" ]]; then
+            extra_chown="chown 1000:1000 '${REMOTE_BASE_DIR}/certs/${name}/${role}.key' && "
+        fi
         remote_exec "${ip}" "${extra_chown}rm -f '/tmp/${role}.csr' && chmod 644 '${REMOTE_BASE_DIR}/certs/${name}/${role}.crt'"
     done
     log_info "  ✅ Сертификаты для ${name} развернуты в ${REMOTE_BASE_DIR}/certs/${name}"

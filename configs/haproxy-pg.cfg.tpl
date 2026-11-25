@@ -29,7 +29,7 @@ backend pg_primary_backend
     option httpchk
     http-check send meth GET uri /primary ver HTTP/1.1 hdr Host patroni
     http-check expect status 200
-    default-server inter 3s fall 3 rise 2 maxconn 128 on-marked-down shutdown-sessions
+    default-server inter 2s fall 2 rise 1 maxconn 128 on-marked-down shutdown-sessions
 
 ${HAPROXY_PG_SERVERS}
 

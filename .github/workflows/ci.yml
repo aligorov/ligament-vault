@@ -143,8 +143,8 @@ jobs:
               chmod 644 "${CERT_OUT}/${role}.crt"
           done
           chmod 600 "${CERT_OUT}"/*.key
-          sudo chown 1000:1000 "${CERT_OUT}"/swfs-*.key || true
-          chmod 644 "${CERT_OUT}"/etcd-*.key "${CERT_OUT}"/pg-*.key
+          sudo chown 1000:1000 "${CERT_OUT}"/swfs-*.key "${CERT_OUT}/pg-client.key" || true
+          chmod 644 "${CERT_OUT}"/etcd-*.key "${CERT_OUT}/pg-server.key"
 
           mkdir -p "${WORKDIR}/repo/certs/ssl" "${WORKDIR}/repo/ssh-host-keys" "${WORKDIR}/repo/hooks"
           openssl req -x509 -nodes -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -days 7 \
@@ -253,7 +253,11 @@ jobs:
               docker compose logs swfs-master swfs-volume || true
               exit 1
           fi
-          docker compose up -d swfs-filer swfs-s3
+          docker compose up -d swfs-filer swfs-s3 || {
+              docker compose ps -a || true
+              docker compose logs swfs-filer swfs-s3 swfs-master swfs-volume || true
+              exit 1
+          }
           S3_OK=false
           for _ in $(seq 1 30); do
               if nc -z 127.0.0.1 8333 >/dev/null 2>&1; then
