@@ -49,7 +49,7 @@ ensure_age_key() {
     chmod 700 "$(dirname "${age_key}")"
     age-keygen -o "${age_key}" >/dev/null 2>&1
     chmod 600 "${age_key}"
-    log_info "Сгенерирован новый мастер-ключ age: ${age_key} (сохраните резервную копию в менеджере паролей!)"
+    log_info "Сгенерирован новый мастер-ключ age: ${age_key} (сохраните резервную копию в менеджере паролей!)" >&2
     echo "${age_key}"
 }
 
