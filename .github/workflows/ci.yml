@@ -1,0 +1,65 @@
+name: Ligament Vault CI
+
+on:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+
+jobs:
+  validate-and-dry-run:
+    name: ShellCheck, Template Validation & Dry-Run Matrix
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies (age, shellcheck, python3-yaml)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq age shellcheck python3-yaml jq
+
+      - name: Syntax check (bash -n & sh -n)
+        run: |
+          chmod +x ligactl clusterctl scripts/lib/*.sh scripts/stages/*.sh scripts/ops/*.sh scripts/verify/*.sh scripts/hooks/*.sh
+          for f in ligactl clusterctl scripts/lib/*.sh scripts/stages/*.sh scripts/ops/*.sh scripts/verify/*.sh; do
+            bash -n "$f"
+          done
+          sh -n scripts/hooks/ligament-2fa-hook.sh
+
+      - name: ShellCheck static analysis
+        run: |
+          shellcheck -x -S warning ligactl clusterctl scripts/lib/*.sh scripts/stages/*.sh scripts/ops/*.sh scripts/verify/*.sh scripts/hooks/*.sh
+
+      - name: Render templates (JSON/TOML/YAML) & full CLI --dry-run matrix
+        run: |
+          WORKDIR="$(mktemp -d)"
+          cp -R . "${WORKDIR}/repo"
+          cd "${WORKDIR}/repo"
+
+          cp cluster.env.example cluster.env
+          sed -i 's/FIXME_IP1:dc1:node1 FIXME_IP2:dc2:node2 FIXME_IP3:dc3:node3/10.0.1.10:dc1:node1 10.0.2.10:dc2:node2 10.0.3.10:dc3:node3/' cluster.env
+          sed -i 's/ARBITER_IP=""/ARBITER_IP="198.51.100.50"/' cluster.env
+          chmod 600 cluster.env
+
+          export AGE_KEY_FILE="${WORKDIR}/age.key"
+          ./ligactl secrets init
+          ./ligactl secrets status
+
+          ./ligactl preflight --dry-run
+          ./ligactl install --dry-run --yes
+          ./ligactl sync-config --dry-run
+          ./ligactl user add --username alice --profile dual --quota-gb 50 --generate-password --require-2fa --dry-run
+          ./ligactl user list --dry-run
+          ./ligactl pki status --dry-run
+          ./ligactl pki rotate --all --dry-run --yes
+          ./ligactl verify --sprint 1 --dry-run
+          ./ligactl verify --disruptive --dry-run --yes
+          ./ligactl status --json --dry-run
+          ./ligactl scale add --ip 10.0.4.10 --dc dc4 --dry-run --yes
+          ./ligactl scale replace --old node2 --new-ip 10.0.2.99 --dry-run --yes
+          ./ligactl scale expand-disk --node node1 --dir /mnt/nvme2 --max-volumes 10 --dry-run
+          ./ligactl upgrade --dry-run --yes
+          ./ligactl dr restore --latest --dry-run --yes
+          ./ligactl lab up --dry-run
+
+          python3 -m json.tool configs/grafana/ligament-vault-dashboard.json >/dev/null

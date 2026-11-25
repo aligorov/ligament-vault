@@ -1,0 +1,38 @@
+# Секреты и окружение (открытый текст запрещен в Git; *.age можно версионировать)
+cluster.env
+cluster.env.bak.*
+secrets.env
+*.env.decrypted
+environments/*/cluster.env
+environments/*/cluster.env.bak.*
+environments/*/secrets.env
+
+# PKI, SSL и SSH host keys (кроме зашифрованных *.age при желании хранить в репо)
+.pki/
+.ssl/
+certs/
+ssh-host-keys/
+environments/*/.pki/
+environments/*/.ssl/
+environments/*/certs/
+environments/*/ssh-host-keys/
+
+# Состояние оркестратора, журнал транзакций и отрендеренные конфиги
+.state/
+.arbiter_state/
+.rendered/
+.rollback_state
+.rollback_state.versions
+.cluster_installed
+.quorum_nodes
+.quorum_nodes.bak
+environments/*/.state/
+environments/*/.rendered/
+environments/*/.rollback_state*
+environments/*/.cluster_installed
+environments/*/.quorum_nodes*
+
+# Временные файлы и логи
+*.log
+*.tmp
+.DS_Store

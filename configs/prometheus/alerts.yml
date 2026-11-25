@@ -1,0 +1,169 @@
+# ============================================================================
+# prometheus/alerts.yml — Правила алертов Ligament Vault
+# ============================================================================
+# Устанавливается на внешний Арбитр (Prometheus + Alertmanager).
+# Используются актуальные метрики Patroni (>=3.3), etcd v3.5, SeaweedFS, SFTPGo и node_exporter.
+# ============================================================================
+
+groups:
+  # --- PostgreSQL / Patroni ---
+  - name: patroni_alerts
+    rules:
+      - alert: PatroniDown
+        expr: patroni_postgres_running == 0 or up{job="patroni"} == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Patroni/PostgreSQL не отвечает на {{ $labels.instance }}"
+
+      - alert: PatroniNoLeader
+        expr: sum(patroni_master) == 0 and sum(patroni_primary) == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Patroni: нет активного Primary-лидера в кластере"
+
+      - alert: PatroniReplicaLagHigh
+        expr: (max(patroni_xlog_location) - on(instance) group_left() patroni_xlog_received_location) > 10485760
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Лаг репликации WAL > 10MB на {{ $labels.instance }}"
+
+      - alert: PgDataDiskUsageHigh
+        expr: (1 - (node_filesystem_avail_bytes{mountpoint=~"/|/data.*"} / node_filesystem_size_bytes{mountpoint=~"/|/data.*"})) > 0.70
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Заполнение диска БД/данных > 70% на {{ $labels.instance }} ({{ $labels.mountpoint }})"
+
+  # --- etcd ---
+  - name: etcd_alerts
+    rules:
+      - alert: EtcdNoLeader
+        expr: etcd_server_has_leader == 0
+        for: 15s
+        labels:
+          severity: critical
+        annotations:
+          summary: "etcd: потерян лидер на {{ $labels.instance }}"
+
+      - alert: EtcdHighFsyncDuration
+        expr: histogram_quantile(0.99, rate(etcd_disk_wal_fsync_duration_seconds_bucket[5m])) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "etcd: высокая задержка fsync (>500ms) на {{ $labels.instance }}"
+
+  # --- SeaweedFS ---
+  - name: seaweedfs_alerts
+    rules:
+      - alert: SwfsComponentDown
+        expr: up{job=~"swfs-.*"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "SeaweedFS компонент {{ $labels.job }} недоступен на {{ $labels.instance }}"
+
+      - alert: SwfsVolumeSpaceLow
+        expr: seaweedfs_volumeServer_disk_free_bytes / seaweedfs_volumeServer_disk_total_bytes < 0.15
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SeaweedFS Volume: <15% свободного места на {{ $labels.instance }}"
+
+  # --- SFTPGo Edge & Бэкапы ---
+  - name: edge_and_backup_alerts
+    rules:
+      - alert: SftpgoEdgeDown
+        expr: up{job="sftpgo"} == 0
+        for: 45s
+        labels:
+          severity: critical
+        annotations:
+          summary: "SFTPGo недоступен на {{ $labels.instance }}"
+
+      - alert: BackupFailed
+        expr: ligament_backup_last_status == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Ошибка выполнения последнего бэкапа Ligament Vault ({{ $labels.instance }})"
+
+      - alert: BackupStale
+        expr: (time() - ligament_backup_last_success_timestamp_seconds) > 28800
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Свежий бэкап отсутствует более 8 часов ({{ $labels.instance }})"
+
+      - alert: InternalPkiExpiringSoon
+        expr: ligament_pki_min_days_remaining < 21
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Внутренний mTLS-сертификат истекает менее чем через 21 день ({{ $value }} дн.) — запустите ./ligactl pki rotate"
+
+  # --- SSL / Blackbox ---
+  - name: ssl_alerts
+    rules:
+      - alert: SslCertExpiringSoon
+        expr: (probe_ssl_earliest_cert_expiry - time()) / 86400 < 14
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SSL-сертификат истекает через {{ $value | printf \"%.1f\" }} дн. ({{ $labels.instance }})"
+
+      - alert: SslCertExpiryCritical
+        expr: (probe_ssl_earliest_cert_expiry - time()) / 86400 < 3
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "КРИТИЧНО: SSL-сертификат истекает через {{ $value | printf \"%.1f\" }} дн. ({{ $labels.instance }})!"
+
+      - alert: WebEndpointDown
+        expr: probe_success{job="blackbox-ssl-expiry"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "HTTPS endpoint {{ $labels.instance }} недоступен через Blackbox"
+
+  # --- Хост и время ---
+  - name: host_alerts
+    rules:
+      - alert: HostDiskSpaceLow
+        expr: (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes) < 0.10
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Диск <10% на {{ $labels.instance }}:{{ $labels.mountpoint }}"
+
+      - alert: HostHighCpuUsage
+        expr: 100 - (avg by(instance) (irate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 90
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CPU >90% на {{ $labels.instance }}"
+
+      - alert: NtpClockDrift
+        expr: abs(node_timex_offset_seconds) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "NTP: рассинхронизация >50ms на {{ $labels.instance }}"

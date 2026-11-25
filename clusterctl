@@ -1,0 +1,437 @@
+#!/usr/bin/env bash
+# ============================================================================
+# clusterctl / ligactl — Единый CLI-оркестратор Ligament Vault
+# ============================================================================
+# Использование: ./ligactl [--env <name>] <команда> [опции]
+#
+# Команды Day-0 (установка и секреты):
+#   secrets         Управление секретами (init/encrypt/decrypt/edit/status через age)
+#   preflight       Проверка готовности VPS (RTT, диски, SSH, NTP, PASV)
+#   install         Послойная установка кластера (6 стадий: 0..5, поддержка --resume)
+#   sync-config     Обновление конфигов и UFW с проверкой синтаксиса и reload
+#   pin-versions    Получить реальные @sha256 дайджесты образов в versions.env
+#
+# Команды Day-1 (приемка и песочница):
+#   verify          Прогон приемочных тестов (--sprint 1 / --disruptive)
+#   lab             Локальный стенд из 3 VM на Lima/Multipass (up/down/verify/status)
+#
+# Команды Day-2 (эксплуатация, клиенты, PKI и DR):
+#   user            Управление SFTP/Web клиентами и квотами (add/list/disable/rotate-key)
+#   pki             Статус и бесшовная ротация mTLS сертификатов (status/rotate)
+#   scale           Масштабирование (add/replace/remove/expand-disk)
+#   upgrade         Rolling-обновление по versions.env
+#   rollback        Откат на .rollback_state дайджесты
+#   dr              Аварийное восстановление кластера из внешнего S3 (restore/verify-backup)
+#   status          Сводный статус кластера (--json / --strict)
+#   unlock          Снятие зависшей блокировки операций (--force)
+# ============================================================================
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export SCRIPT_DIR
+
+CLI_NAME="${CLI_INVOKED_AS:-$(basename "$0")}"
+export CLI_NAME
+
+LIB_DIR="${SCRIPT_DIR}/scripts/lib"
+STAGES_DIR="${SCRIPT_DIR}/scripts/stages"
+OPS_DIR="${SCRIPT_DIR}/scripts/ops"
+VERIFY_DIR="${SCRIPT_DIR}/scripts/verify"
+
+# shellcheck source=scripts/lib/common.sh
+source "${LIB_DIR}/common.sh"
+# shellcheck source=scripts/lib/deploy.sh
+source "${LIB_DIR}/deploy.sh"
+
+DRY_RUN="${DRY_RUN:-false}"
+AUTO_YES="${AUTO_YES:-false}"
+VERBOSE="${VERBOSE:-false}"
+RESUME_OP="${RESUME_OP:-false}"
+ENV_NAME="${ENV_NAME:-}"
+
+parse_global_flags() {
+    local args=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --dry-run)  DRY_RUN=true; shift ;;
+            --yes)      AUTO_YES=true; shift ;;
+            --resume)   RESUME_OP=true; shift ;;
+            --verbose)  VERBOSE=true; set -x; shift ;;
+            --env)
+                [[ $# -ge 2 ]] || { log_error "Флаг --env требует имя окружения"; exit 1; }
+                ENV_NAME="$2"
+                shift 2
+                ;;
+            --help|-h)
+                show_help "${args[0]:-}"
+                exit 0
+                ;;
+            *)
+                args+=("$1")
+                shift
+                ;;
+        esac
+    done
+    REMAINING_ARGS=("${args[@]+"${args[@]}"}")
+}
+
+resolve_config_root() {
+    if [[ -n "${ENV_NAME}" ]]; then
+        export CONFIG_ROOT="${SCRIPT_DIR}/environments/${ENV_NAME}"
+    else
+        export CONFIG_ROOT="${CONFIG_ROOT:-${SCRIPT_DIR}}"
+    fi
+}
+
+load_env() {
+    local env_file="${CONFIG_ROOT}/cluster.env"
+    if [[ ! -f "${env_file}" ]]; then
+        log_error "Файл ${env_file} не найден. Скопируйте: cp cluster.env.example '${env_file}'"
+        exit 1
+    fi
+    load_cluster_env "${CONFIG_ROOT}"
+    if ! has_secrets_configured; then
+        log_warn "Секреты не найдены (${CONFIG_ROOT}/secrets.env.age или secrets.env). Сгенерируйте: ./${CLI_NAME} secrets init"
+    fi
+}
+
+show_help() {
+    local cmd="${1:-}"
+    case "${cmd}" in
+        secrets)
+            echo "Использование: ./${CLI_NAME} secrets <init|encrypt|decrypt|edit|status> [опции]"
+            ;;
+        preflight)
+            echo "Использование: ./${CLI_NAME} preflight [--dry-run]"
+            echo "  Проверяет SSH, RTT-матрицу (hard stop > ${RTT_HARD_STOP:-250}ms), NTP, диски, PASV-порты, Docker."
+            ;;
+        install)
+            echo "Использование: ./${CLI_NAME} install [--dry-run] [--yes] [--resume] [--stage N]"
+            echo "  Послойная установка: 00-preflight -> 01-hardening -> 02-pki -> 03-db -> 04-swfs -> 05-edge"
+            ;;
+        sync-config)
+            echo "Использование: ./${CLI_NAME} sync-config [--dry-run] [--skip-ufw]"
+            echo "  Рендеринг и валидация конфигов, бесшовный sync UFW, hot-reload."
+            ;;
+        pin-versions)
+            echo "Использование: ./${CLI_NAME} pin-versions [--dry-run]"
+            echo "  Снимает актуальные @sha256 дайджесты с registry и обновляет versions.env."
+            ;;
+        publish-image)
+            echo "Использование: ./${CLI_NAME} publish-image [--repo aligorov/ligament_vault_patroni] [--tag 16] [--multiarch]"
+            echo "  Собирает Dockerfile.patroni и публикует образ в Docker Hub с фиксацией дайджеста."
+            ;;
+        user)
+            echo "Использование: ./${CLI_NAME} user <add|list|inspect|disable|enable|set-quota|rotate-key|disconnect> [опции]"
+            ;;
+        pki)
+            echo "Использование: ./${CLI_NAME} pki <status|rotate> [--node <name>|--all] [--dry-run]"
+            ;;
+        scale)
+            echo "Использование: ./${CLI_NAME} scale <add|replace|remove|expand-disk> [опции]"
+            ;;
+        upgrade)
+            echo "Использование: ./${CLI_NAME} upgrade [--dry-run] [--yes] [--resume] [--component all|etcd|patroni|swfs|sftpgo]"
+            ;;
+        rollback)
+            echo "Использование: ./${CLI_NAME} rollback [--dry-run] [--yes]"
+            ;;
+        dr)
+            echo "Использование: ./${CLI_NAME} dr <restore|verify-backup> [--target-time '<TS>'|--latest] [--dry-run]"
+            ;;
+        lab)
+            echo "Использование: ./${CLI_NAME} lab <up|down|status|verify> [--provider auto|lima|multipass]"
+            ;;
+        status)
+            echo "Использование: ./${CLI_NAME} status [--json] [--strict]"
+            ;;
+        verify)
+            echo "Использование: ./${CLI_NAME} verify [--sprint 1] [--disruptive] [--dry-run] [--yes]"
+            ;;
+        *)
+            cat <<EOF
+${CLI_NAME} — Единый CLI-оркестратор Ligament Vault
+
+Использование: ./${CLI_NAME} [--env <name>] <команда> [опции]
+
+Day-0 (Секреты и Установка):
+  secrets        Управление секретами через age в RAM (init/encrypt/decrypt/edit/status)
+  preflight      Проверка готовности VPS (Спринт 0)
+  install        Послойная установка кластера (Стадии 0–5, флаг --resume)
+  sync-config    Обновление конфигов и UFW без рестарта БД/томов
+  pin-versions   Фиксация реальных @sha256 дайджестов в versions.env
+  publish-image  Сборка Dockerfile.patroni и публикация в Docker Hub
+
+Day-1 (Приемка и Локальный стенд):
+  verify         Приемочные тесты Day-1 (S3/WORM Spike + Health + Chaos)
+  lab            Локальная песочница из 3 VM на Lima/Multipass (up/down/verify)
+
+Day-2 (Эксплуатация, Клиенты, PKI и DR):
+  user           Управление клиентами SFTPGo (/work + /worm, квоты, ключи, 2FA)
+  pki            Мониторинг и бесшовная ротация mTLS сертификатов (status/rotate)
+  scale          Масштабирование (add/replace/remove/expand-disk)
+  upgrade        Rolling-обновление по versions.env
+  rollback       Откат на .rollback_state
+  dr             Автоматическое восстановление кластера из внешнего S3 (restore)
+  status         Сводный статус кластера (--json / --strict)
+  unlock         Сброс зависшей блокировки операций (--force)
+
+Глобальные флаги:
+  --env <name>   Работать с изолированным окружением environments/<name>/
+  --resume       Продолжить прерванную операцию с последнего чекпоинта
+  --dry-run      Показать план без выполнения
+  --yes          Пропустить подтверждения
+  --verbose      Подробный вывод
+  --help         Справка
+EOF
+            ;;
+    esac
+}
+
+guardrail_check() {
+    if [[ -f "${CONFIG_ROOT}/.cluster_installed" && "${RESUME_OP}" != "true" ]]; then
+        log_warn "Кластер уже установлен (найден ${CONFIG_ROOT}/.cluster_installed)."
+        log_warn "Для живого кластера используйте 'sync-config', 'scale' или 'upgrade' (либо --resume)."
+        confirm_action "Продолжить install на живом кластере?" || exit 0
+    fi
+}
+
+cmd_sync_config() {
+    local skip_ufw=false
+    for arg in "$@"; do
+        case "${arg}" in
+            --skip-ufw) skip_ufw=true ;;
+            *)          log_error "Неизвестный флаг sync-config: ${arg}"; exit 1 ;;
+        esac
+    done
+
+    acquire_ops_lock "sync-config"
+    trap 'release_ops_lock' EXIT
+
+    log_step "1/4 — Рендеринг и локальная валидация конфигов (${PROJECT_NAME})"
+    render_node_cb() { render_node_configs "$1" "$2" "$3" "$4" "existing"; }
+    for_each_node render_node_cb
+
+    log_step "2/4 — Доставка конфигов и проверка HAProxy на нодах"
+    push_and_validate_cb() {
+        local ip="$1" dc="$2" name="$3" idx="$4"
+        push_node_configs "${ip}" "${dc}" "${name}" "${idx}"
+        remote_exec "${ip}" "docker run --rm -v '${REMOTE_BASE_DIR}/configs/haproxy-pg.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro' '${HAPROXY_IMAGE}' haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg >/dev/null"
+    }
+    for_each_node push_and_validate_cb
+
+    if [[ "${skip_ufw}" != "true" ]]; then
+        log_step "3/4 — Бесшовная синхронизация UFW (с внешним 120s rollback)"
+        for_each_node harden_node_ufw
+    else
+        log_info "3/4 — Пропуск UFW (--skip-ufw)"
+    fi
+
+    log_step "4/4 — Безопасный reload HAProxy, SFTPGo (SIGHUP) и Patroni"
+    reload_cb() {
+        local ip="$1" dc="$2" name="$3" idx="$4"
+        log_info "  Reload сервисов на ${name} (${ip})..."
+        remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d --no-deps haproxy"
+        remote_exec "${ip}" "docker kill -s HUP \$(docker ps -qf name=sftpgo) 2>/dev/null || (cd '${REMOTE_BASE_DIR}' && docker compose up -d --no-deps sftpgo)"
+    }
+    for_each_node reload_cb
+
+    local primary_ip
+    primary_ip=$(find_patroni_primary_ip || get_node_ip 1)
+    remote_exec "${primary_ip}" "docker exec \$(docker ps -qf name=patroni) patronictl reload '${CLUSTER_SLUG}' --force" >/dev/null 2>&1 || true
+
+    log_info "✅ Конфигурации ${PROJECT_NAME} синхронизированы без рестарта БД и томов"
+}
+
+cmd_pin_versions() {
+    local vars=("SFTPGO" "SEAWEEDFS" "ETCD" "HAPROXY" "LEGO" "PROMETHEUS" "ALERTMANAGER" "NODE_EXPORTER" "BLACKBOX_EXPORTER")
+    local vfile="${SCRIPT_DIR}/versions.env"
+
+    log_step "Фиксация @sha256 дайджестов в versions.env"
+    for prefix in "${vars[@]}"; do
+        local img_var="${prefix}_IMAGE"
+        local dig_var="${prefix}_DIGEST"
+        local img="${!img_var}"
+        if [[ "${DRY_RUN}" == "true" ]]; then
+            log_info "[DRY-RUN] docker manifest inspect / pull ${img} -> ${dig_var}"
+            continue
+        fi
+        log_info "Проверка ${img}..."
+        docker pull -q "${img}" >/dev/null
+        local repo_digest
+        repo_digest=$(docker inspect --format='{{index .RepoDigests 0}}' "${img}" 2>/dev/null | awk -F'@' '{print $2}')
+        if [[ "${repo_digest}" == sha256:* ]]; then
+            python3 - "${vfile}" "${dig_var}" "${repo_digest}" <<'PYEOF'
+import re, sys
+path, key, val = sys.argv[1], sys.argv[2], sys.argv[3]
+text = open(path, "r", encoding="utf-8").read()
+text = re.sub(rf'^{key}=".*"', f'{key}="{val}"', text, flags=re.M)
+open(path, "w", encoding="utf-8").write(text)
+PYEOF
+            log_info "  ✅ ${dig_var}=${repo_digest}"
+        else
+            log_warn "  ⚠️  Не удалось получить RepoDigest для ${img}"
+        fi
+    done
+}
+
+main() {
+    parse_global_flags "$@"
+    resolve_config_root
+
+    local cmd="${REMAINING_ARGS[0]:-}"
+    local cmd_args=("${REMAINING_ARGS[@]:1}")
+
+    if [[ -z "${cmd}" ]]; then
+        show_help
+        exit 1
+    fi
+
+    export DRY_RUN AUTO_YES VERBOSE RESUME_OP ENV_NAME
+
+    case "${cmd}" in
+        secrets)
+            bash "${OPS_DIR}/secrets-manager.sh" "${cmd_args[@]+"${cmd_args[@]}"}"
+            return 0
+            ;;
+        lab)
+            bash "${OPS_DIR}/test-lab.sh" "${cmd_args[@]+"${cmd_args[@]}"}"
+            return 0
+            ;;
+        pin-versions)
+            # shellcheck source=versions.env
+            source "${SCRIPT_DIR}/versions.env"
+            cmd_pin_versions "${cmd_args[@]+"${cmd_args[@]}"}"
+            return 0
+            ;;
+        publish-image)
+            bash "${OPS_DIR}/dockerhub-publish.sh" "${cmd_args[@]+"${cmd_args[@]}"}"
+            return 0
+            ;;
+        *)
+            load_env
+            ;;
+    esac
+
+    case "${cmd}" in
+        unlock)
+            if [[ " ${cmd_args[*]+"${cmd_args[*]}"} " != *" --force "* ]]; then
+                confirm_action "Принудительно снять блокировку операций кластера?" || exit 0
+            fi
+            force_unlock_ops
+            ;;
+        preflight)
+            log_info "═══ ${PROJECT_NAME}: Preflight Check (Спринт 0) ═══"
+            bash "${STAGES_DIR}/00-preflight.sh" "${cmd_args[@]+"${cmd_args[@]}"}"
+            ;;
+        install)
+            log_info "═══ ${PROJECT_NAME}: Установка кластера ═══"
+            acquire_ops_lock "install"
+            trap 'release_ops_lock' EXIT
+            local start_stage=0 end_stage=5 stage_set=false
+            for i in "${!cmd_args[@]}"; do
+                if [[ "${cmd_args[$i]}" == "--stage" ]]; then
+                    start_stage="${cmd_args[$((i+1))]}"
+                    end_stage="${start_stage}"
+                    stage_set=true
+                fi
+            done
+            [[ "${stage_set}" == "false" ]] && guardrail_check
+            init_op_checkpoints "install"
+
+            for stage in $(seq "${start_stage}" "${end_stage}"); do
+                local pattern
+                pattern=$(printf "%s/%02d-*.sh" "${STAGES_DIR}" "${stage}")
+                # shellcheck disable=SC2206
+                local matched=( ${pattern} )
+                if [[ -f "${matched[0]:-}" ]]; then
+                    local sname
+                    sname=$(basename "${matched[0]}" .sh)
+                    log_info "──── Стадия ${stage}: ${sname} ────"
+                    run_checkpoint "install" "stage-${stage}-${sname}" bash "${matched[0]}" "${cmd_args[@]+"${cmd_args[@]}"}"
+                else
+                    log_error "Стадия ${stage} не найдена"
+                    exit 1
+                fi
+            done
+            if [[ "${stage_set}" == "false" && "${DRY_RUN}" != "true" ]]; then
+                touch "${CONFIG_ROOT}/.cluster_installed"
+                clear_op_checkpoints "install"
+            fi
+            log_info "✅ Установка завершена. Следующий шаг: ./${CLI_NAME} verify --sprint 1"
+            ;;
+        sync-config)
+            log_info "═══ ${PROJECT_NAME}: Синхронизация конфигурации ═══"
+            cmd_sync_config "${cmd_args[@]+"${cmd_args[@]}"}"
+            ;;
+        verify)
+            log_info "═══ ${PROJECT_NAME}: Приемочные тесты Day-1 ═══"
+            local sprint=""
+            for i in "${!cmd_args[@]}"; do
+                if [[ "${cmd_args[$i]}" == "--sprint" ]]; then
+                    sprint="${cmd_args[$((i+1))]}"
+                fi
+            done
+            if [[ -n "${sprint}" ]]; then
+                case "${sprint}" in
+                    1) bash "${VERIFY_DIR}/sprint1-s3-worm.sh" ;;
+                    *) bash "${VERIFY_DIR}/cluster-health.sh" ;;
+                esac
+            else
+                bash "${VERIFY_DIR}/sprint1-s3-worm.sh"
+                bash "${VERIFY_DIR}/cluster-health.sh"
+                bash "${VERIFY_DIR}/chaos-dr-test.sh" "${cmd_args[@]+"${cmd_args[@]}"}"
+            fi
+            ;;
+        user)
+            bash "${OPS_DIR}/user-manager.sh" "${cmd_args[@]+"${cmd_args[@]}"}"
+            ;;
+        pki)
+            acquire_ops_lock "pki"
+            trap 'release_ops_lock' EXIT
+            bash "${OPS_DIR}/pki-rotate.sh" "${cmd_args[@]+"${cmd_args[@]}"}"
+            ;;
+        scale)
+            log_info "═══ ${PROJECT_NAME}: Масштабирование кластера ═══"
+            acquire_ops_lock "scale"
+            trap 'release_ops_lock' EXIT
+            bash "${OPS_DIR}/scale-cluster.sh" "${cmd_args[@]+"${cmd_args[@]}"}"
+            ;;
+        upgrade)
+            log_info "═══ ${PROJECT_NAME}: Rolling Upgrade ═══"
+            acquire_ops_lock "upgrade"
+            trap 'release_ops_lock' EXIT
+            bash "${OPS_DIR}/upgrade-cluster.sh" "${cmd_args[@]+"${cmd_args[@]}"}"
+            ;;
+        rollback)
+            log_info "═══ ${PROJECT_NAME}: Откат версий ═══"
+            acquire_ops_lock "rollback"
+            trap 'release_ops_lock' EXIT
+            if [[ ! -f "${CONFIG_ROOT}/.rollback_state" ]]; then
+                log_error "Файл ${CONFIG_ROOT}/.rollback_state не найден. Нечего откатывать."
+                exit 1
+            fi
+            bash "${OPS_DIR}/upgrade-cluster.sh" --rollback "${cmd_args[@]+"${cmd_args[@]}"}"
+            ;;
+        dr)
+            log_info "═══ ${PROJECT_NAME}: Disaster Recovery ═══"
+            acquire_ops_lock "dr"
+            trap 'release_ops_lock' EXIT
+            bash "${OPS_DIR}/dr-restore.sh" "${cmd_args[@]+"${cmd_args[@]}"}"
+            ;;
+        status)
+            if [[ " ${cmd_args[*]+"${cmd_args[*]}"} " != *" --json "* ]]; then
+                log_info "═══ ${PROJECT_NAME}: Статус кластера ═══"
+            fi
+            bash "${VERIFY_DIR}/cluster-health.sh" "${cmd_args[@]+"${cmd_args[@]}"}"
+            ;;
+        *)
+            log_error "Неизвестная команда: ${cmd}"
+            show_help
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

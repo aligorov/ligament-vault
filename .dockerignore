@@ -1,0 +1,19 @@
+# Исключаем все локальные конфиги, ключи и git-историю из контекста сборки Dockerfile.patroni
+.git
+.github
+.pki
+.ssl
+.state
+.rendered
+.arbiter_state
+certs
+ssh-host-keys
+environments
+configs
+scripts
+*.md
+*.env
+*.env.*
+clusterctl
+ligactl
+docker-compose.yml.tpl

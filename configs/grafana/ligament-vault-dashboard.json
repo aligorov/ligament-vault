@@ -1,0 +1,84 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "title": "PostgreSQL Primary Nodes",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "targets": [{ "expr": "sum(patroni_primary) or sum(patroni_master)", "refId": "A" }]
+    },
+    {
+      "id": 2,
+      "title": "etcd Quorum Leaders",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "targets": [{ "expr": "sum(etcd_server_has_leader)", "refId": "A" }]
+    },
+    {
+      "id": 3,
+      "title": "Public SSL Days Remaining",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "targets": [{ "expr": "min((probe_ssl_earliest_cert_expiry - time()) / 86400)", "refId": "A" }]
+    },
+    {
+      "id": 4,
+      "title": "Internal mTLS Min Days Remaining",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "targets": [{ "expr": "min(ligament_pki_min_days_remaining)", "refId": "A" }]
+    },
+    {
+      "id": 5,
+      "title": "Backup Age (Hours Since Last Success)",
+      "type": "gauge",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 4 },
+      "targets": [{ "expr": "(time() - max(ligament_backup_last_success_timestamp_seconds)) / 3600", "refId": "A" }]
+    },
+    {
+      "id": 6,
+      "title": "Patroni WAL Replication Lag (Bytes)",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 4 },
+      "targets": [{ "expr": "max(patroni_xlog_location) - on(instance) group_left() patroni_xlog_received_location", "legendFormat": "{{instance}}", "refId": "A" }]
+    },
+    {
+      "id": 7,
+      "title": "etcd WAL fsync p99 Latency (s)",
+      "type": "timeseries",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 4 },
+      "targets": [{ "expr": "histogram_quantile(0.99, rate(etcd_disk_wal_fsync_duration_seconds_bucket[5m]))", "legendFormat": "{{instance}}", "refId": "A" }]
+    },
+    {
+      "id": 8,
+      "title": "SeaweedFS Volume Disk Free (%)",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 10 },
+      "targets": [{ "expr": "100 * (seaweedfs_volumeServer_disk_free_bytes / seaweedfs_volumeServer_disk_total_bytes)", "legendFormat": "{{instance}}", "refId": "A" }]
+    },
+    {
+      "id": 9,
+      "title": "SFTPGo Edge Up & Host CPU (%)",
+      "type": "timeseries",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 10 },
+      "targets": [
+        { "expr": "up{job=\"sftpgo\"} * 100", "legendFormat": "sftpgo up {{instance}}", "refId": "A" },
+        { "expr": "100 - (avg by(instance) (irate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)", "legendFormat": "CPU % {{instance}}", "refId": "B" }
+      ]
+    }
+  ],
+  "refresh": "15s",
+  "schemaVersion": 39,
+  "tags": ["ligament-vault", "sftpgo", "seaweedfs", "patroni"],
+  "templating": { "list": [] },
+  "time": { "from": "now-6h", "to": "now" },
+  "title": "Ligament Vault — Geo-Cluster Overview",
+  "uid": "ligament-vault-main",
+  "version": 1
+}

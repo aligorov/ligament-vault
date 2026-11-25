@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# ============================================================================
+# ligactl — Основной CLI-оркестратор Ligament Vault
+# ============================================================================
+set -euo pipefail
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export CLI_INVOKED_AS="ligactl"
+exec "${DIR}/clusterctl" "$@"

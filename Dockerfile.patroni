@@ -1,0 +1,78 @@
+# ============================================================================
+# Dockerfile.patroni — PostgreSQL 16 + Patroni (>=3.3) + etcd3 + pgbackrest
+# ============================================================================
+# Сборка выполняется автоматически на каждой ноде в 03-bootstrap-db.sh
+# или локально: docker build -t local/patroni-pg16:latest -f Dockerfile.patroni .
+# ============================================================================
+
+FROM postgres:16-bookworm
+
+LABEL maintainer="ligament-infra"
+LABEL description="PG16 + Patroni + etcd3 client + pgbackrest для Ligament Vault"
+
+# --- Системные зависимости и gosu для безопасного сброса привилегий ---
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    python3-psycopg2 \
+    python3-etcd \
+    python3-urllib3 \
+    python3-certifi \
+    python3-dateutil \
+    python3-yaml \
+    pgbackrest \
+    gosu \
+    curl \
+    jq \
+    dnsutils \
+    iputils-ping \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# --- Patroni ---
+RUN python3 -m pip install --no-cache-dir --break-system-packages \
+    patroni[etcd3]==3.3.* \
+    python-etcd \
+    && patroni --version
+
+# --- Каталоги pgbackrest и рабочий entrypoint ---
+# Entrypoint подготавливает приватные ключи PG для UID postgres (chmod 600),
+# чтобы PostgreSQL не падал из-за host-bind прав root:root, и запускает patroni через gosu.
+RUN mkdir -p /etc/pgbackrest /var/log/pgbackrest /var/lib/pgbackrest /run/pg-certs \
+    && chown -R postgres:postgres /var/log/pgbackrest /var/lib/pgbackrest /run/pg-certs \
+    && cat <<'EOF' > /usr/local/bin/patroni-entrypoint.sh
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Копируем сертификаты и patroni.yml в /run/pg-certs с правами postgres:postgres (0600)
+if [[ -d /certs ]]; then
+    mkdir -p /run/pg-certs
+    cp -L /certs/*.crt /certs/*.key /run/pg-certs/ 2>/dev/null || true
+    chown -R postgres:postgres /run/pg-certs
+    chmod 644 /run/pg-certs/*.crt 2>/dev/null || true
+    chmod 600 /run/pg-certs/*.key 2>/dev/null || true
+fi
+if [[ -f /etc/patroni/patroni.yml ]]; then
+    cp -L /etc/patroni/patroni.yml /run/pg-certs/patroni.yml
+    chown postgres:postgres /run/pg-certs/patroni.yml
+    chmod 600 /run/pg-certs/patroni.yml
+fi
+
+# Права на каталог данных и логи pgbackrest
+if [[ -n "${PATRONI_POSTGRESQL_DATA_DIR:-}" ]]; then
+    mkdir -p "$(dirname "${PATRONI_POSTGRESQL_DATA_DIR}")" "${PATRONI_POSTGRESQL_DATA_DIR}"
+    chown -R postgres:postgres "$(dirname "${PATRONI_POSTGRESQL_DATA_DIR}")"
+    chmod 700 "${PATRONI_POSTGRESQL_DATA_DIR}"
+fi
+chown -R postgres:postgres /var/log/pgbackrest /var/lib/pgbackrest
+
+exec gosu postgres patroni /run/pg-certs/patroni.yml
+EOF
+RUN chmod +x /usr/local/bin/patroni-entrypoint.sh
+
+# --- Healthcheck ---
+HEALTHCHECK --interval=10s --timeout=5s --retries=3 \
+    CMD curl -sf http://127.0.0.1:8008/health || exit 1
+
+ENTRYPOINT ["/usr/local/bin/patroni-entrypoint.sh"]
+CMD ["/etc/patroni/patroni.yml"]

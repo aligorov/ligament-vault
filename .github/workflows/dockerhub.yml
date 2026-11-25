@@ -1,0 +1,89 @@
+name: Publish Patroni Image (Docker Hub & GHCR)
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "Dockerfile.patroni"
+      - ".dockerignore"
+      - ".github/workflows/dockerhub.yml"
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    name: Build & Push linux/amd64 Patroni PG16 Image
+    runs-on: ubuntu-24.04
+    env:
+      DOCKERHUB_REPO: aligorov/ligament_vault_patroni
+      GHCR_REPO: ghcr.io/${{ github.repository_owner }}/ligament_vault_patroni
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry (GHCR)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub (when DOCKERHUB_TOKEN secret is configured)
+        if: env.DOCKERHUB_TOKEN != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME || github.repository_owner }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
+
+      - name: Prepare image tags
+        id: meta
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          TAGS="${GHCR_REPO}:16,${GHCR_REPO}:16-${SHORT_SHA},${GHCR_REPO}:latest"
+          if [ -n "${DOCKERHUB_TOKEN}" ]; then
+            TAGS="${TAGS},${DOCKERHUB_REPO}:16,${DOCKERHUB_REPO}:16-${SHORT_SHA},${DOCKERHUB_REPO}:latest"
+            echo "dockerhub_enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "dockerhub_enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push Patroni + PG16 + pgBackRest image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.patroni
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke-test built image locally on runner
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.patroni
+          platforms: linux/amd64
+          load: true
+          tags: local-smoke/patroni:16
+          cache-from: type=gha
+
+      - name: Verify Patroni, PostgreSQL 16 & pgBackRest binaries inside container
+        run: |
+          docker run --rm --entrypoint "" local-smoke/patroni:16 bash -c "
+            postgres --version &&
+            patroni --version &&
+            pgbackrest version &&
+            gosu --version
+          "

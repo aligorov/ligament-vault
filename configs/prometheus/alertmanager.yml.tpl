@@ -1,0 +1,19 @@
+# ============================================================================
+# alertmanager.yml.tpl — Маршрутизация алертов Арбитра (Ligament Vault)
+# ============================================================================
+
+global:
+  resolve_timeout: 5m
+
+route:
+  group_by: ["alertname", "severity"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  receiver: "default-webhook"
+
+receivers:
+  - name: "default-webhook"
+    webhook_configs:
+      - url: "${ALERT_WEBHOOK_URL}"
+        send_resolved: true
