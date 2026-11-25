@@ -345,6 +345,8 @@ jobs:
               raise RuntimeError("DefaultRetention not confirmed")
           PYEOF
 
+          docker exec "$(docker ps -qf name=swfs-filer)" weed filer.backup -h 2>&1 | head -n 30 || true
+
           docker compose up -d swfs-admin swfs-worker
           SWFS_ADMIN_OK=false
           for _ in $(seq 1 20); do
@@ -357,6 +359,16 @@ jobs:
           if [[ "${SWFS_ADMIN_OK}" != "true" ]]; then
               docker compose ps -a || true
               docker compose logs swfs-admin swfs-worker || true
+              exit 1
+          fi
+          sleep 3
+          if ! docker ps -f name=swfs-worker --format '{{.State}}' | grep -qx 'running'; then
+              docker compose ps -a || true
+              docker compose logs swfs-worker || true
+              exit 1
+          fi
+          if docker compose logs swfs-worker 2>&1 | grep -qE "flag provided but not defined|Default Usage"; then
+              docker compose logs swfs-worker || true
               exit 1
           fi
 

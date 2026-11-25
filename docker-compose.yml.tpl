@@ -233,11 +233,9 @@ ${SWFS_VOLUME_MOUNTS}
     logging: *default-logging
     command: >-
       admin
-      -ip=${NODE_IP}
       -port=${SWFS_ADMIN_PORT}
       -port.grpc=${SWFS_ADMIN_GRPC_PORT}
-      -port.legacy=0
-      -masters=${SWFS_MASTER_PEERS}
+      -master=${SWFS_MASTER_PEERS}
       -adminPassword=${SWFS_ADMIN_PASSWORD}
       -dataDir=/admin-data
     volumes:
@@ -261,9 +259,9 @@ ${SWFS_VOLUME_MOUNTS}
     command: >-
       worker
       -admin=${SWFS_ADMIN_IP}:${SWFS_ADMIN_PORT}
-      -jobType=all
+      -capabilities=vacuum,ec,remote,replication,balance
       -workingDir=/worker-data
-      -maxExecute=2
+      -maxConcurrent=2
     volumes:
       - swfs-worker-data:/worker-data
       - ./configs/seaweedfs:/etc/seaweedfs:ro
