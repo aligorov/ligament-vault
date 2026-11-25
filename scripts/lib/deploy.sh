@@ -313,11 +313,13 @@ mkdir -p "${BASE_DIR}/configs/seaweedfs" "${BASE_DIR}/certs/ssl" "${BASE_DIR}/ss
          "${SFTP_TMP}" "${SFTP_DATA}/data" "${SFTP_DATA}/backups" "${PG_DIR}" "${ETCD_DIR}" "${SWFS_MDIR}"
 for vd in ${VOL_DIRS}; do
     mkdir -p "${vd}"
+    chown -R 1000:1000 "${vd}"
 done
 chmod 755 "${BASE_DIR}" "${BASE_DIR}/configs" "${BASE_DIR}/configs/seaweedfs" \
           "${BASE_DIR}/certs" "${BASE_DIR}/certs/ssl" "${BASE_DIR}/ssh-host-keys" "${BASE_DIR}/hooks"
-chown -R 1000:1000 "${SFTP_TMP}" "${SFTP_DATA}" "${BASE_DIR}/hooks"
-chmod 700 "${ETCD_DIR}" "${SWFS_MDIR}"
+chown -R 1000:1000 "${SFTP_TMP}" "${SFTP_DATA}" "${SWFS_MDIR}" "${BASE_DIR}/hooks"
+chmod 700 "${ETCD_DIR}"
+chmod 750 "${SWFS_MDIR}"
 REMOTE_DIRS
 
     remote_copy "${out}/docker-compose.yml" "${ip}:${REMOTE_BASE_DIR}/docker-compose.yml"
@@ -341,9 +343,9 @@ REMOTE_DIRS
         chmod 755 '${REMOTE_BASE_DIR}' '${REMOTE_BASE_DIR}/configs' '${REMOTE_BASE_DIR}/configs/seaweedfs' \
                   '${REMOTE_BASE_DIR}/certs' '${REMOTE_BASE_DIR}/certs/ssl' '${REMOTE_BASE_DIR}/ssh-host-keys' '${REMOTE_BASE_DIR}/hooks' && \
         chmod 644 '${REMOTE_BASE_DIR}/docker-compose.yml' '${REMOTE_BASE_DIR}/configs/haproxy-pg.cfg' && \
-        chmod 600 '${REMOTE_BASE_DIR}/configs/patroni.yml' '${REMOTE_BASE_DIR}/configs/pgbackrest.conf' \
-                  '${REMOTE_BASE_DIR}/configs/seaweedfs/security.toml' '${REMOTE_BASE_DIR}/configs/seaweedfs/filer.toml' \
-                  '${REMOTE_BASE_DIR}/configs/seaweedfs/replication.toml' '${REMOTE_BASE_DIR}/configs/seaweedfs/s3.json' && \
+        chmod 600 '${REMOTE_BASE_DIR}/configs/patroni.yml' '${REMOTE_BASE_DIR}/configs/pgbackrest.conf' && \
+        chown 1000:1000 '${REMOTE_BASE_DIR}/configs/seaweedfs/'*.toml '${REMOTE_BASE_DIR}/configs/seaweedfs/s3.json' && \
+        chmod 600 '${REMOTE_BASE_DIR}/configs/seaweedfs/'*.toml '${REMOTE_BASE_DIR}/configs/seaweedfs/s3.json' && \
         chown 1000:1000 '${REMOTE_BASE_DIR}/configs/sftpgo.json' '${REMOTE_BASE_DIR}/configs/revoked_user_certs.json' \
                         '${REMOTE_BASE_DIR}/hooks/ligament-2fa.env' && \
         chmod 600 '${REMOTE_BASE_DIR}/configs/sftpgo.json' '${REMOTE_BASE_DIR}/hooks/ligament-2fa.env' && \
@@ -780,7 +782,9 @@ REMOTE_CSR
         fi
 
         remote_copy "${node_cert_dir}/${role}.crt" "${ip}:${REMOTE_BASE_DIR}/certs/${name}/${role}.crt"
-        remote_exec "${ip}" "rm -f '/tmp/${role}.csr' && chmod 644 '${REMOTE_BASE_DIR}/certs/${name}/${role}.crt'"
+        local extra_chown=""
+        [[ "${role}" == swfs-* ]] && extra_chown="chown 1000:1000 '${REMOTE_BASE_DIR}/certs/${name}/${role}.key' && "
+        remote_exec "${ip}" "${extra_chown}rm -f '/tmp/${role}.csr' && chmod 644 '${REMOTE_BASE_DIR}/certs/${name}/${role}.crt'"
     done
     log_info "  ✅ Сертификаты для ${name} развернуты в ${REMOTE_BASE_DIR}/certs/${name}"
 }

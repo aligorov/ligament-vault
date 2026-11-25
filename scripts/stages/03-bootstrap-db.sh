@@ -39,10 +39,26 @@ start_etcd_cb() {
 for_each_node start_etcd_cb
 
 NODE1_IP=$(get_node_ip 1)
+NODE1_NAME=$(get_node_name 1)
+ETCD_ALL_ENDPOINTS=$(get_node_entries | head -n 3 | awk -F: -v p="${ETCD_CLIENT_PORT:-2379}" '{print "https://" $1 ":" p}' | paste -sd, -)
+
 wait_for_remote_health "${NODE1_IP}" "etcd quorum" \
-    "docker exec \$(docker ps -qf name=etcd) etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key endpoint health" \
+    "docker exec \$(docker ps -qf name=etcd) etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key endpoint health && curl -sf --cacert '${REMOTE_BASE_DIR}/certs/${NODE1_NAME}/ca.crt' --cert '${REMOTE_BASE_DIR}/certs/${NODE1_NAME}/etcd-client.crt' --key '${REMOTE_BASE_DIR}/certs/${NODE1_NAME}/etcd-client.key' https://127.0.0.1:${ETCD_CLIENT_PORT:-2379}/version | grep -qE '\"etcdcluster\":\"3\\.[456]'" \
     30 3 \
     "cd '${REMOTE_BASE_DIR}' && docker compose logs --tail 50 etcd || true"
+
+if [[ "${DRY_RUN:-false}" != "true" ]]; then
+    log_info "Проверка всех участников etcd (${ETCD_ALL_ENDPOINTS}):"
+    remote_exec "${NODE1_IP}" "
+        CID=\$(docker ps -qf name=etcd)
+        curl -skf --cacert '${REMOTE_BASE_DIR}/certs/${NODE1_NAME}/ca.crt' --cert '${REMOTE_BASE_DIR}/certs/${NODE1_NAME}/etcd-client.crt' --key '${REMOTE_BASE_DIR}/certs/${NODE1_NAME}/etcd-client.key' https://127.0.0.1:${ETCD_CLIENT_PORT:-2379}/version || true
+        echo ''
+        docker exec \"\${CID}\" etcdctl --endpoints='${ETCD_ALL_ENDPOINTS}' --dial-timeout=5s --command-timeout=8s \
+            --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key endpoint health -w table || true
+        docker exec \"\${CID}\" etcdctl --endpoints='${ETCD_ALL_ENDPOINTS}' --dial-timeout=5s --command-timeout=8s \
+            --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key endpoint status -w table || true
+    " || true
+fi
 
 log_step "Запуск Patroni Primary -> Replicas"
 if [[ "${DRY_RUN:-false}" != "true" && ! -f "$(state_root)/.cluster_installed" ]]; then

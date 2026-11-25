@@ -147,6 +147,9 @@ PUB_C=$(openssl x509 -in "${CERT_DIR}/${ROLE}.crt.new" -pubkey -noout 2>/dev/nul
 [[ "${PUB_K}" == "${PUB_C}" ]] || { echo "Key/Cert mismatch for ${ROLE}!" >&2; exit 1; }
 openssl verify -CAfile "${CERT_DIR}/ca.crt" "${CERT_DIR}/${ROLE}.crt.new" >/dev/null
 chmod 644 "${CERT_DIR}/${ROLE}.crt.new"
+if [[ "${ROLE}" == swfs-* ]]; then
+    chown 1000:1000 "${CERT_DIR}/${ROLE}.key.new"
+fi
 mv -f "${CERT_DIR}/${ROLE}.key.new" "${CERT_DIR}/${ROLE}.key"
 mv -f "${CERT_DIR}/${ROLE}.crt.new" "${CERT_DIR}/${ROLE}.crt"
 REMOTE_SWAP

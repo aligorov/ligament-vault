@@ -124,7 +124,6 @@ services:
       -metricsPort=${SWFS_MASTER_METRICS_PORT}
       -peers=${SWFS_MASTER_PEERS}
       -defaultReplication=${SWFS_DEFAULT_REPLICATION}
-      -volumeGrowthCount=${SWFS_VOLUME_GROWTH_COUNT}
       -mdir=/master-data
       -electionTimeout=10s
     volumes:

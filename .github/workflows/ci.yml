@@ -127,7 +127,7 @@ jobs:
           export SFTPGO_TEMP_PATH="${WORKDIR}/data/sftpgo-temp"
           export HTTPS_PORT=8444
           mkdir -p "${ETCD_DATA_DIR}" "${PG_DATA_DIR}" "${SWFS_MASTER_DIR}" "${SWFS_VOLUME_DIR}" "${SFTPGO_DATA_DIR}/data" "${SFTPGO_DATA_DIR}/backups" "${SFTPGO_TEMP_PATH}"
-          sudo chown -R 1000:1000 "${SFTPGO_DATA_DIR}" "${SFTPGO_TEMP_PATH}"
+          sudo chown -R 1000:1000 "${SFTPGO_DATA_DIR}" "${SFTPGO_TEMP_PATH}" "${SWFS_MASTER_DIR}" "${SWFS_VOLUME_DIR}"
 
           ensure_ca_exists
           CA_DIR="${WORKDIR}/repo/.pki/ca"
@@ -142,7 +142,9 @@ jobs:
               _sign_csr_with_active_ca "${CA_DIR}" "${CERT_OUT}/${role}.csr" "${CERT_OUT}/${role}.crt" "${SAN}"
               chmod 644 "${CERT_OUT}/${role}.crt"
           done
-          sudo chmod 644 "${CERT_OUT}"/*.key
+          chmod 600 "${CERT_OUT}"/*.key
+          sudo chown 1000:1000 "${CERT_OUT}"/swfs-*.key || true
+          chmod 644 "${CERT_OUT}"/etcd-*.key "${CERT_OUT}"/pg-*.key
 
           mkdir -p "${WORKDIR}/repo/certs/ssl" "${WORKDIR}/repo/ssh-host-keys" "${WORKDIR}/repo/hooks"
           openssl req -x509 -nodes -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -days 7 \
@@ -171,8 +173,8 @@ jobs:
           cp "${RDIR}"/seaweedfs/* "${WORKDIR}/repo/configs/seaweedfs/"
           chmod 755 "${WORKDIR}" "${WORKDIR}/repo" "${WORKDIR}/repo/configs" "${WORKDIR}/repo/configs/seaweedfs" "${WORKDIR}/repo/certs" "${CERT_OUT}" "${WORKDIR}/repo/certs/ssl" "${WORKDIR}/repo/ssh-host-keys" "${WORKDIR}/repo/hooks"
           chmod 644 "${WORKDIR}/repo/configs/haproxy-pg.cfg" "${WORKDIR}/repo/docker-compose.yml"
-          sudo chown 1000:1000 "${WORKDIR}/repo/configs/sftpgo.json" "${WORKDIR}/repo/configs/revoked_user_certs.json"
-          ls -la "${WORKDIR}/repo/configs"
+          chmod 600 "${WORKDIR}/repo/configs/seaweedfs/"*.toml "${WORKDIR}/repo/configs/seaweedfs/s3.json"
+          sudo chown 1000:1000 "${WORKDIR}/repo/configs/sftpgo.json" "${WORKDIR}/repo/configs/revoked_user_certs.json" "${WORKDIR}/repo/configs/seaweedfs/"*.toml "${WORKDIR}/repo/configs/seaweedfs/s3.json"
 
           cleanup() {
               docker compose -f "${WORKDIR}/repo/docker-compose.yml" down -v || true
