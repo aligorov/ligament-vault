@@ -169,7 +169,10 @@ jobs:
           cp "${RDIR}/sftpgo.json" "${WORKDIR}/repo/configs/sftpgo.json"
           cp "${RDIR}/revoked_user_certs.json" "${WORKDIR}/repo/configs/revoked_user_certs.json"
           cp "${RDIR}"/seaweedfs/* "${WORKDIR}/repo/configs/seaweedfs/"
+          chmod 755 "${WORKDIR}" "${WORKDIR}/repo" "${WORKDIR}/repo/configs" "${WORKDIR}/repo/configs/seaweedfs" "${WORKDIR}/repo/certs" "${CERT_OUT}" "${WORKDIR}/repo/certs/ssl" "${WORKDIR}/repo/ssh-host-keys" "${WORKDIR}/repo/hooks"
+          chmod 644 "${WORKDIR}/repo/configs/haproxy-pg.cfg" "${WORKDIR}/repo/docker-compose.yml"
           sudo chown 1000:1000 "${WORKDIR}/repo/configs/sftpgo.json" "${WORKDIR}/repo/configs/revoked_user_certs.json"
+          ls -la "${WORKDIR}/repo/configs"
 
           cleanup() {
               docker compose -f "${WORKDIR}/repo/docker-compose.yml" down -v || true

@@ -269,6 +269,7 @@ EOF
         cp "${SCRIPT_DIR}/scripts/hooks/ligament-2fa-hook.sh" "${out}/hooks/ligament-2fa-hook.sh"
         chmod 755 "${out}/hooks/ligament-2fa-hook.sh"
     fi
+    umask_saved=$(umask)
     umask 077
     cat > "${out}/hooks/ligament-2fa.env" <<EOF
 LIGAMENT_2FA_ENABLED="${LIGAMENT_2FA_ENABLED:-false}"
@@ -279,6 +280,7 @@ LIGAMENT_2FA_FAIL_OPEN="${LIGAMENT_2FA_FAIL_OPEN:-false}"
 CLUSTER_SLUG="${CLUSTER_SLUG}"
 EOF
     chmod 600 "${out}/hooks/ligament-2fa.env"
+    umask "${umask_saved}"
 
     validate_json_file "${out}/sftpgo.json"
     validate_json_file "${out}/seaweedfs/s3.json"
@@ -312,6 +314,8 @@ mkdir -p "${BASE_DIR}/configs/seaweedfs" "${BASE_DIR}/certs/ssl" "${BASE_DIR}/ss
 for vd in ${VOL_DIRS}; do
     mkdir -p "${vd}"
 done
+chmod 755 "${BASE_DIR}" "${BASE_DIR}/configs" "${BASE_DIR}/configs/seaweedfs" \
+          "${BASE_DIR}/certs" "${BASE_DIR}/certs/ssl" "${BASE_DIR}/ssh-host-keys" "${BASE_DIR}/hooks"
 chown -R 1000:1000 "${SFTP_TMP}" "${SFTP_DATA}" "${BASE_DIR}/hooks"
 chmod 700 "${ETCD_DIR}" "${SWFS_MDIR}"
 REMOTE_DIRS
@@ -334,6 +338,9 @@ REMOTE_DIRS
     remote_copy "${out}/hooks/ligament-2fa.env" "${ip}:${REMOTE_BASE_DIR}/hooks/ligament-2fa.env"
 
     remote_exec "${ip}" "
+        chmod 755 '${REMOTE_BASE_DIR}' '${REMOTE_BASE_DIR}/configs' '${REMOTE_BASE_DIR}/configs/seaweedfs' \
+                  '${REMOTE_BASE_DIR}/certs' '${REMOTE_BASE_DIR}/certs/ssl' '${REMOTE_BASE_DIR}/ssh-host-keys' '${REMOTE_BASE_DIR}/hooks' && \
+        chmod 644 '${REMOTE_BASE_DIR}/docker-compose.yml' '${REMOTE_BASE_DIR}/configs/haproxy-pg.cfg' && \
         chmod 600 '${REMOTE_BASE_DIR}/configs/patroni.yml' '${REMOTE_BASE_DIR}/configs/pgbackrest.conf' \
                   '${REMOTE_BASE_DIR}/configs/seaweedfs/security.toml' '${REMOTE_BASE_DIR}/configs/seaweedfs/filer.toml' \
                   '${REMOTE_BASE_DIR}/configs/seaweedfs/replication.toml' '${REMOTE_BASE_DIR}/configs/seaweedfs/s3.json' && \
