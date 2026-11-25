@@ -230,7 +230,7 @@ cmd_sync_config() {
 
     log_step "4/4 — Безопасный reload HAProxy, SFTPGo (SIGHUP) и Patroni"
     reload_cb() {
-        local ip="$1" dc="$2" name="$3" idx="$4"
+        local ip="$1" name="$3"
         log_info "  Reload сервисов на ${name} (${ip})..."
         remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d --no-deps haproxy"
         remote_exec "${ip}" "docker kill -s HUP \$(docker ps -qf name=sftpgo) 2>/dev/null || (cd '${REMOTE_BASE_DIR}' && docker compose up -d --no-deps sftpgo)"
@@ -386,6 +386,22 @@ main() {
             ;;
         user)
             bash "${OPS_DIR}/user-manager.sh" "${cmd_args[@]+"${cmd_args[@]}"}"
+            ;;
+        panel)
+            local psub="${cmd_args[0]:-status}"
+            case "${psub}" in
+                status)
+                    log_info "Веб-панель: https://<SERVER_IP>:${PANEL_PORT:-8443} (логин: ${SFTPGO_ADMIN_USERNAME:-admin}, пароль: ${SFTPGO_ADMIN_PASSWORD:-не задан})"
+                    [[ "${DRY_RUN}" != "true" ]] && command -v systemctl >/dev/null 2>&1 && systemctl status ligament-vault-ui.service --no-pager || true
+                    ;;
+                start|stop|restart)
+                    run_or_dry systemctl "${psub}" ligament-vault-ui.service
+                    ;;
+                *)
+                    log_error "Использование: ./${CLI_NAME} panel <status|start|stop|restart>"
+                    exit 1
+                    ;;
+            esac
             ;;
         pki)
             acquire_ops_lock "pki"

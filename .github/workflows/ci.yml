@@ -8,7 +8,7 @@ on:
 
 jobs:
   validate-and-dry-run:
-    name: ShellCheck, Template Validation & Dry-Run Matrix
+    name: ShellCheck, Web UI, Template Validation & Dry-Run Matrix
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
@@ -19,23 +19,26 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq age shellcheck python3-yaml jq
 
-      - name: Syntax check (bash -n & sh -n)
+      - name: Syntax check (bash -n, sh -n, python py_compile)
         run: |
-          chmod +x ligactl clusterctl scripts/lib/*.sh scripts/stages/*.sh scripts/ops/*.sh scripts/verify/*.sh scripts/hooks/*.sh
-          for f in ligactl clusterctl scripts/lib/*.sh scripts/stages/*.sh scripts/ops/*.sh scripts/verify/*.sh; do
+          chmod +x install.sh ligactl clusterctl web/panel.py scripts/lib/*.sh scripts/stages/*.sh scripts/ops/*.sh scripts/verify/*.sh scripts/hooks/*.sh
+          for f in install.sh ligactl clusterctl scripts/lib/*.sh scripts/stages/*.sh scripts/ops/*.sh scripts/verify/*.sh; do
             bash -n "$f"
           done
           sh -n scripts/hooks/ligament-2fa-hook.sh
+          python3 -m py_compile web/panel.py
 
       - name: ShellCheck static analysis
         run: |
-          shellcheck -x -S warning ligactl clusterctl scripts/lib/*.sh scripts/stages/*.sh scripts/ops/*.sh scripts/verify/*.sh scripts/hooks/*.sh
+          shellcheck -x -S warning install.sh ligactl clusterctl scripts/lib/*.sh scripts/stages/*.sh scripts/ops/*.sh scripts/verify/*.sh scripts/hooks/*.sh
 
-      - name: Render templates (JSON/TOML/YAML) & full CLI --dry-run matrix
+      - name: Render templates, test Web Panel HTTPS API & full CLI --dry-run matrix
         run: |
           WORKDIR="$(mktemp -d)"
           cp -R . "${WORKDIR}/repo"
           cd "${WORKDIR}/repo"
+
+          DRY_RUN=true ./install.sh
 
           cp cluster.env.example cluster.env
           sed -i 's/FIXME_IP1:dc1:node1 FIXME_IP2:dc2:node2 FIXME_IP3:dc3:node3/10.0.1.10:dc1:node1 10.0.2.10:dc2:node2 10.0.3.10:dc3:node3/' cluster.env
@@ -45,6 +48,16 @@ jobs:
           export AGE_KEY_FILE="${WORKDIR}/age.key"
           ./ligactl secrets init
           ./ligactl secrets status
+
+          # Live HTTPS integration test of Web Panel (:18443)
+          PANEL_PORT=18443 PANEL_BIND=127.0.0.1 PANEL_ADMIN_PASSWORD="ci-test-password-123" python3 web/panel.py &
+          PANEL_PID=$!
+          trap 'kill "${PANEL_PID}" 2>/dev/null || true' EXIT
+          sleep 2
+          curl -ksf https://127.0.0.1:18443/api/v1/health | jq -e '.ok == true'
+          curl -ksf https://127.0.0.1:18443/ | grep -q "Ligament Vault"
+          curl -ksf -H "Authorization: Bearer ci-test-password-123" https://127.0.0.1:18443/api/v1/overview | jq -e '.config.CLUSTER_SLUG == "ligament-vault"'
+          kill "${PANEL_PID}"
 
           ./ligactl preflight --dry-run
           ./ligactl install --dry-run --yes
@@ -61,6 +74,7 @@ jobs:
           ./ligactl scale expand-disk --node node1 --dir /mnt/nvme2 --max-volumes 10 --dry-run
           ./ligactl upgrade --dry-run --yes
           ./ligactl dr restore --latest --dry-run --yes
+          ./ligactl publish-image --dry-run
           ./ligactl lab up --dry-run
 
           python3 -m json.tool configs/grafana/ligament-vault-dashboard.json >/dev/null

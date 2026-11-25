@@ -354,6 +354,7 @@ harden_node_ufw() {
         "${SWFS_ADMIN_PORT:-12535}" "${SWFS_ADMIN_GRPC_PORT:-22535}" \
         "${SWFS_MASTER_METRICS_PORT:-9324}" "${SWFS_VOLUME_METRICS_PORT:-9325}" "${SWFS_FILER_METRICS_PORT:-9326}" \
         "${SFTPGO_TELEMETRY_PORT:-10000}" \
+        "${PANEL_PORT:-8443}" \
         "${ARBITER_IP:-}" "${peer_ips}" <<'REMOTE_UFW'
 set -euo pipefail
 SLUG="$1"
@@ -364,8 +365,8 @@ PG_PORT="${11}"; PATRONI_PORT="${12}"
 SWFS_M="${13}"; SWFS_V="${14}"; SWFS_F="${15}"
 SWFS_A="${16}"; SWFS_AG="${17}"
 MET_M="${18}"; MET_V="${19}"; MET_F="${20}"
-SFTP_TEL="${21}"
-ARBITER_IP="${22}"; PEER_IPS="${23}"
+SFTP_TEL="${21}"; PANEL_P="${22}"
+ARBITER_IP="${23}"; PEER_IPS="${24}"
 
 SWFS_MG=$((SWFS_M + 10000))
 SWFS_VG=$((SWFS_V + 10000))
@@ -387,6 +388,7 @@ ufw default deny incoming >/dev/null
 ufw default allow outgoing >/dev/null
 
 ufw allow from "${ADMIN_SSH_NET}" to any port "${ADMIN_SSH_PORT}" proto tcp comment "${SLUG}:admin-ssh" >/dev/null
+ufw allow from "${ADMIN_SSH_NET}" to any port "${PANEL_P}" proto tcp comment "${SLUG}:web-panel" >/dev/null
 
 ufw allow "${SFTP_PORT}/tcp" comment "${SLUG}:public-sftp" >/dev/null
 ufw allow "${FTPS_PORT}/tcp" comment "${SLUG}:public-ftps" >/dev/null

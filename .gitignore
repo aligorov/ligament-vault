@@ -33,6 +33,8 @@ environments/*/.cluster_installed
 environments/*/.quorum_nodes*
 
 # Временные файлы и логи
+__pycache__/
+*.pyc
 *.log
 *.tmp
 .DS_Store

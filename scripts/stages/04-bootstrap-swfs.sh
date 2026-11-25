@@ -31,7 +31,7 @@ for_each_node ensure_swfs_configs_cb
 # 1. Masters (профиль quorum)
 log_step "Запуск SeaweedFS Masters"
 start_master_cb() {
-    local ip="$1" dc="$2" name="$3" idx="$4"
+    local ip="$1" name="$3" idx="$4"
     if ! is_quorum_node "${idx}" "${name}"; then
         log_info "  Пропуск Master на ${name} (edge-нода)"
         return 0
@@ -45,7 +45,7 @@ wait_for_remote_health "${NODE1_IP}" "SeaweedFS Master Leader" \
 # 2. Volume Servers
 log_step "Запуск SeaweedFS Volume Servers"
 start_volume_cb() {
-    local ip="$1" dc="$2" name="$3" idx="$4"
+    local ip="$1" dc="$2" name="$3"
     log_info "  Старт swfs-volume на ${name} (-dataCenter=${dc})..."
     remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d swfs-volume"
     wait_for_remote_health "${ip}" "SWFS Volume ${name}" "curl -sf http://127.0.0.1:${SWFS_VOLUME_PORT:-8082}/healthz || curl -sf http://127.0.0.1:${SWFS_VOLUME_PORT:-8082}/status" 20 2
@@ -55,7 +55,7 @@ for_each_node start_volume_cb
 # 3. Filer ([postgres2] verify-full) + S3 Gateway (127.0.0.1:8333)
 log_step "Запуск SeaweedFS Filers и S3 Gateways"
 start_filer_s3_cb() {
-    local ip="$1" dc="$2" name="$3" idx="$4"
+    local ip="$1" name="$3"
     log_info "  Старт swfs-filer и swfs-s3 на ${name}..."
     remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d swfs-filer swfs-s3"
     # Проверяем /healthz или порт метрик (GET / закрыт JWT -> 401!)
@@ -178,7 +178,7 @@ fi
 wait_for_remote_health "${admin_ip}" "SWFS Admin" "nc -z 127.0.0.1 ${SWFS_ADMIN_PORT:-12535}" 20 2
 
 start_worker_cb() {
-    local ip="$1" dc="$2" name="$3" idx="$4"
+    local ip="$1" name="$3"
     log_info "  Старт swfs-worker на ${name}..."
     remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d swfs-worker"
 }

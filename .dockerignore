@@ -1,4 +1,4 @@
-# Исключаем все локальные конфиги, ключи и git-историю из контекста сборки Dockerfile.patroni
+# Исключаем локальные конфиги, веб-панель, ключи и git-историю из контекста сборки Dockerfile.patroni
 .git
 .github
 .pki
@@ -11,9 +11,11 @@ ssh-host-keys
 environments
 configs
 scripts
+web
 *.md
 *.env
 *.env.*
+install.sh
 clusterctl
 ligactl
 docker-compose.yml.tpl

@@ -28,7 +28,7 @@ for_each_node render_and_push_cb
 
 log_step "Запуск etcd (кворум)"
 start_etcd_cb() {
-    local ip="$1" dc="$2" name="$3" idx="$4"
+    local ip="$1" name="$3" idx="$4"
     if ! is_quorum_node "${idx}" "${name}"; then
         log_info "  Пропуск etcd на ${name} (edge-нода)"
         return 0
