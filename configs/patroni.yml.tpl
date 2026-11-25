@@ -10,6 +10,7 @@ namespace: /${CLUSTER_SLUG}/
 
 # --- etcd DCS (mTLS) ---
 etcd3:
+  protocol: https
   hosts: ${ETCD_HOSTS}
   cacert: /run/pg-certs/ca.crt
   cert: /run/pg-certs/etcd-client.crt
@@ -29,7 +30,6 @@ restapi:
 ttl: 60
 loop_wait: 10
 retry_timeout: 15
-primary_start_timeout: 60
 failsafe_mode: true
 
 # --- Инициализация кластера (только на первой стартующей ноде) ---
@@ -38,6 +38,7 @@ bootstrap:
     ttl: 60
     loop_wait: 10
     retry_timeout: 15
+    primary_start_timeout: 60
     maximum_lag_on_failover: 1048576
     synchronous_mode: false           # Включается только после замера в Sprint 2
     synchronous_mode_strict: false
@@ -57,7 +58,7 @@ ${PATRONI_SLOTS_YAML}
         wal_log_hints: "on"
         wal_keep_size: "128MB"
         archive_mode: "on"
-        archive_command: "pgbackrest --stanza=${CLUSTER_SLUG} archive-push %p"
+        archive_command: "${PG_ARCHIVE_COMMAND}"
         restore_command: 'pgbackrest --stanza=${CLUSTER_SLUG} archive-get %f "%p"'
         # --- SSL ---
         ssl: "on"
@@ -72,6 +73,7 @@ ${PATRONI_SLOTS_YAML}
   pg_hba:
     - local all all trust
     - hostssl all all 0.0.0.0/0 scram-sha-256
+    - hostssl all all ::1/128 scram-sha-256
     - hostssl replication replicator 0.0.0.0/0 scram-sha-256
 
   users:

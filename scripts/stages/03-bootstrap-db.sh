@@ -41,29 +41,60 @@ for_each_node start_etcd_cb
 NODE1_IP=$(get_node_ip 1)
 wait_for_remote_health "${NODE1_IP}" "etcd quorum" \
     "docker exec \$(docker ps -qf name=etcd) etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key endpoint health" \
-    30 3
+    30 3 \
+    "cd '${REMOTE_BASE_DIR}' && docker compose logs --tail 50 etcd || true"
 
 log_step "Запуск Patroni Primary -> Replicas"
+if [[ "${DRY_RUN:-false}" != "true" && ! -f "$(state_root)/.cluster_installed" ]]; then
+    remote_exec_stdin "${NODE1_IP}" "${PG_DATA_DIR}" "${ETCD_CLIENT_PORT:-2379}" "/${CLUSTER_SLUG}/${CLUSTER_SLUG}" <<'REMOTE_PREP_PRIMARY'
+set -euo pipefail
+PG_DIR="$1"; EC_PORT="$2"; PATRONI_PREFIX="$3"
+if [[ ! -f "${PG_DIR}/data/PG_VERSION" ]]; then
+    if [[ -d "${PG_DIR}/data" ]]; then
+        find "${PG_DIR}/data" -mindepth 1 -delete 2>/dev/null || true
+    fi
+    ETCD_CID=$(docker ps -qf name=etcd)
+    if [[ -n "${ETCD_CID}" ]]; then
+        docker exec "${ETCD_CID}" etcdctl --endpoints="https://127.0.0.1:${EC_PORT}" \
+            --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key \
+            del --prefix "${PATRONI_PREFIX}" >/dev/null 2>&1 || true
+    fi
+fi
+REMOTE_PREP_PRIMARY
+fi
+
 log_info "Старт Patroni Primary на $(get_node_name 1) (${NODE1_IP})..."
-remote_exec "${NODE1_IP}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d patroni"
+remote_exec "${NODE1_IP}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d --force-recreate patroni"
 wait_for_remote_health "${NODE1_IP}" "Patroni Primary /primary" \
-    "curl -sf http://127.0.0.1:${PATRONI_API_PORT:-8008}/primary" 40 3
+    "curl -sf http://127.0.0.1:${PATRONI_API_PORT:-8008}/primary" 60 3 \
+    "cd '${REMOTE_BASE_DIR}' && docker compose logs --tail 60 patroni || true; curl -s http://127.0.0.1:${PATRONI_API_PORT:-8008}/patroni || true"
 
 start_replica_cb() {
     local ip="$1" name="$3" idx="$4"
     if (( idx == 1 )); then return 0; fi
+    if [[ "${DRY_RUN:-false}" != "true" ]]; then
+        remote_exec_stdin "${ip}" "${PG_DATA_DIR}" <<'REMOTE_PREP_REPLICA'
+set -euo pipefail
+PG_DIR="$1"
+if [[ ! -f "${PG_DIR}/data/PG_VERSION" && -d "${PG_DIR}/data" ]]; then
+    find "${PG_DIR}/data" -mindepth 1 -delete 2>/dev/null || true
+fi
+REMOTE_PREP_REPLICA
+    fi
     log_info "Старт Patroni Replica на ${name} (${ip})..."
-    remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d patroni"
+    remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d --force-recreate patroni"
     wait_for_remote_health "${ip}" "Patroni Replica ${name} /replica" \
-        "curl -sf http://127.0.0.1:${PATRONI_API_PORT:-8008}/replica" 40 3
+        "curl -sf http://127.0.0.1:${PATRONI_API_PORT:-8008}/replica" 80 3 \
+        "cd '${REMOTE_BASE_DIR}' && docker compose logs --tail 60 patroni || true; curl -s http://127.0.0.1:${PATRONI_API_PORT:-8008}/patroni || true"
 }
 for_each_node start_replica_cb
 
 log_step "Запуск HAProxy (127.0.0.1:${HAPROXY_PG_PORT:-5433} -> PG Primary)"
 start_haproxy_cb() {
     local ip="$1" name="$3"
-    remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d haproxy"
-    wait_for_remote_health "${ip}" "HAProxy ${name}" "nc -z 127.0.0.1 ${HAPROXY_PG_PORT:-5433}" 15 2
+    remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d --force-recreate haproxy"
+    wait_for_remote_health "${ip}" "HAProxy ${name}" "nc -z 127.0.0.1 ${HAPROXY_PG_PORT:-5433}" 15 2 \
+        "cd '${REMOTE_BASE_DIR}' && docker compose logs --tail 40 haproxy || true"
 }
 for_each_node start_haproxy_cb
 

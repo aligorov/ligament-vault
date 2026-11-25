@@ -70,9 +70,10 @@ log_step "3/7 — Запуск SFTPGo и node-exporter на всех нодах"
 start_edge_cb() {
     local ip="$1" name="$3"
     log_info "  Старт SFTPGo и node-exporter на ${name} (${ip})..."
-    remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d sftpgo node-exporter"
+    remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d --force-recreate sftpgo node-exporter"
     wait_for_remote_health "${ip}" "SFTPGo ${name}" \
-        "docker exec \$(docker ps -qf name=sftpgo) sftpgo ping --config-file /etc/sftpgo/sftpgo.json" 25 2
+        "docker exec \$(docker ps -qf name=sftpgo) sftpgo ping --config-file /etc/sftpgo/sftpgo.json" 25 2 \
+        "cd '${REMOTE_BASE_DIR}' && docker compose logs --tail 50 sftpgo || true"
 }
 for_each_node start_edge_cb
 

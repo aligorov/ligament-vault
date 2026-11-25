@@ -540,7 +540,7 @@ find_patroni_primary_ip() {
 }
 
 wait_for_remote_health() {
-    local ip="$1" desc="$2" check_cmd="$3" attempts="${4:-30}" sleep_s="${5:-2}"
+    local ip="$1" desc="$2" check_cmd="$3" attempts="${4:-30}" sleep_s="${5:-2}" diag_cmd="${6:-}"
     if [[ "${DRY_RUN:-false}" == "true" ]]; then
         log_info "[DRY-RUN] wait_for_remote_health(${ip}): ${desc}"
         return 0
@@ -553,6 +553,10 @@ wait_for_remote_health() {
         sleep "${sleep_s}"
     done
     log_error "${ip}: таймаут ожидания (${desc})"
+    if [[ -n "${diag_cmd}" ]]; then
+        log_warn "Последние логи сервиса на ${ip}:"
+        remote_exec "${ip}" "${diag_cmd}" >&2 || true
+    fi
     return 1
 }
 

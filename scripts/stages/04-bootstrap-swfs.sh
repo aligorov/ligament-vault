@@ -40,7 +40,8 @@ start_master_cb() {
 }
 for_each_node start_master_cb
 wait_for_remote_health "${NODE1_IP}" "SeaweedFS Master Leader" \
-    "curl -sf http://127.0.0.1:${SWFS_MASTER_PORT:-9333}/cluster/status | jq -e '.Leader != \"\"'" 30 3
+    "curl -sf http://127.0.0.1:${SWFS_MASTER_PORT:-9333}/cluster/status | jq -e '.Leader != \"\"'" 30 3 \
+    "cd '${REMOTE_BASE_DIR}' && docker compose logs --tail 50 swfs-master || true"
 
 # 2. Volume Servers
 log_step "Запуск SeaweedFS Volume Servers"
@@ -48,7 +49,8 @@ start_volume_cb() {
     local ip="$1" dc="$2" name="$3"
     log_info "  Старт swfs-volume на ${name} (-dataCenter=${dc})..."
     remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d swfs-volume"
-    wait_for_remote_health "${ip}" "SWFS Volume ${name}" "curl -sf http://127.0.0.1:${SWFS_VOLUME_PORT:-8082}/healthz || curl -sf http://127.0.0.1:${SWFS_VOLUME_PORT:-8082}/status" 20 2
+    wait_for_remote_health "${ip}" "SWFS Volume ${name}" "curl -sf http://127.0.0.1:${SWFS_VOLUME_PORT:-8082}/healthz || curl -sf http://127.0.0.1:${SWFS_VOLUME_PORT:-8082}/status" 20 2 \
+        "cd '${REMOTE_BASE_DIR}' && docker compose logs --tail 40 swfs-volume || true"
 }
 for_each_node start_volume_cb
 
@@ -60,8 +62,10 @@ start_filer_s3_cb() {
     remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d swfs-filer swfs-s3"
     # Проверяем /healthz или порт метрик (GET / закрыт JWT -> 401!)
     wait_for_remote_health "${ip}" "SWFS Filer ${name}" \
-        "curl -sf http://127.0.0.1:${SWFS_FILER_PORT:-8888}/healthz || curl -sf http://127.0.0.1:${SWFS_FILER_METRICS_PORT:-9326}/metrics >/dev/null" 25 2
-    wait_for_remote_health "${ip}" "SWFS S3 ${name}" "nc -z 127.0.0.1 ${SWFS_S3_PORT:-8333}" 20 2
+        "curl -sf http://127.0.0.1:${SWFS_FILER_PORT:-8888}/healthz || curl -sf http://127.0.0.1:${SWFS_FILER_METRICS_PORT:-9326}/metrics >/dev/null" 25 2 \
+        "cd '${REMOTE_BASE_DIR}' && docker compose logs --tail 40 swfs-filer || true"
+    wait_for_remote_health "${ip}" "SWFS S3 ${name}" "nc -z 127.0.0.1 ${SWFS_S3_PORT:-8333}" 20 2 \
+        "cd '${REMOTE_BASE_DIR}' && docker compose logs --tail 40 swfs-s3 || true"
 }
 for_each_node start_filer_s3_cb
 

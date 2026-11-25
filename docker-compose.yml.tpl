@@ -102,9 +102,9 @@ services:
         condition: service_started
     healthcheck:
       test: ["CMD", "haproxy", "-c", "-f", "/usr/local/etc/haproxy/haproxy.cfg"]
-      interval: 30s
-      timeout: 5s
-      retries: 2
+      interval: 5s
+      timeout: 3s
+      retries: 3
 
   # ════════════════════════════════════════════════════════════════════════
   # SeaweedFS Master (профиль quorum)

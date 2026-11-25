@@ -213,6 +213,12 @@ export_node_render_vars() {
     BACKUP_S3_HOST="${BACKUP_S3_HOST#http://}"
     BACKUP_S3_HOST="${BACKUP_S3_HOST%%/*}"
 
+    if [[ -n "${BACKUP_S3_ACCESS_KEY:-}" && "${BACKUP_S3_ACCESS_KEY}" != *FIXME* ]]; then
+        export PG_ARCHIVE_COMMAND="pgbackrest --stanza=${CLUSTER_SLUG} archive-push %p"
+    else
+        export PG_ARCHIVE_COMMAND="/bin/true"
+    fi
+
     local profiles=()
     if is_quorum_node "${idx}" "${name}"; then
         profiles+=("quorum")
@@ -832,27 +838,63 @@ distribute_ssl_to_node() {
 
 build_patroni_image_on_node() {
     local ip="$1" dc="$2" name="$3" idx="$4"
-    local target_ref
+    local target_ref df_hash
     target_ref=$(resolve_image_ref "${PATRONI_PG_IMAGE}" "${PATRONI_PG_DIGEST:-}")
+    df_hash=$(sha256sum "${SCRIPT_DIR}/Dockerfile.patroni" 2>/dev/null | awk '{print $1}' || shasum -a 256 "${SCRIPT_DIR}/Dockerfile.patroni" | awk '{print $1}')
     log_info "Подготовка образа Patroni (${target_ref}) на ${name} (${ip})..."
+    local cached
+    cached=$(remote_exec_stdin "${ip}" "${PATRONI_PG_IMAGE}" "${REMOTE_BASE_DIR}/build-patroni" "${df_hash}" <<'REMOTE_CACHE_CHK' || echo "MISS"
+IMG="$1"; BUILD_DIR="$2"; DF_HASH="$3"
+HASH_FILE="${BUILD_DIR}/.built.sha256"
+if docker image inspect "${IMG}" >/dev/null 2>&1; then
+    cur_hash=""
+    if [[ -f "${HASH_FILE}" ]]; then
+        cur_hash=$(cat "${HASH_FILE}" 2>/dev/null || true)
+    elif [[ -f "${BUILD_DIR}/Dockerfile.patroni" ]]; then
+        cur_hash=$(sha256sum "${BUILD_DIR}/Dockerfile.patroni" 2>/dev/null | awk '{print $1}' || true)
+    fi
+    if [[ "${cur_hash}" == "${DF_HASH}" ]]; then
+        printf "%s\n" "${DF_HASH}" > "${HASH_FILE}"
+        echo "HIT"
+        exit 0
+    fi
+fi
+echo "MISS"
+REMOTE_CACHE_CHK
+    )
+    if [[ "${cached}" == *"HIT"* && "${DRY_RUN:-false}" != "true" ]]; then
+        log_info "  ✅ Образ ${PATRONI_PG_IMAGE} уже собран и актуален на ${name} — пропуск пересборки"
+        return 0
+    fi
+
     remote_exec "${ip}" "mkdir -p '${REMOTE_BASE_DIR}/build-patroni'"
     remote_copy "${SCRIPT_DIR}/Dockerfile.patroni" "${ip}:${REMOTE_BASE_DIR}/build-patroni/Dockerfile.patroni"
-    remote_exec "${ip}" "
-        if docker image inspect '${PATRONI_PG_IMAGE}' >/dev/null 2>&1; then
-            docker tag '${PATRONI_PG_IMAGE}' 'local/patroni-pg16:rollback' || true
-        fi
-        if [[ '${PATRONI_PG_IMAGE}' != local/* ]] && docker pull -q '${target_ref}' >/dev/null 2>&1; then
-            echo 'Pulled ${target_ref} from registry'
-        elif docker pull -q 'ghcr.io/aligorov/ligament_vault_patroni:16' >/dev/null 2>&1; then
-            docker tag 'ghcr.io/aligorov/ligament_vault_patroni:16' '${PATRONI_PG_IMAGE}'
-            echo 'Pulled ghcr.io/aligorov/ligament_vault_patroni:16'
-        else
-            echo 'Registry pull unavailable — building ${PATRONI_PG_IMAGE} locally from Dockerfile.patroni (1-2 min)...'
-            cd '${REMOTE_BASE_DIR}/build-patroni' && docker build --no-cache --progress=plain -t '${PATRONI_PG_IMAGE}' -f Dockerfile.patroni . 2>&1 | grep -E '^#[0-9]+ \[[0-9]+/[0-9]+\]|^Step [0-9]+/|Successfully tagged|DONE' || true
-            docker builder prune -af >/dev/null 2>&1 || true
-            docker image prune -f >/dev/null 2>&1 || true
-        fi
-    "
+    remote_exec_stdin "${ip}" "${PATRONI_PG_IMAGE}" "${target_ref}" "${REMOTE_BASE_DIR}/build-patroni" "${df_hash}" <<'REMOTE_BUILD'
+set -euo pipefail
+IMG="$1"; TARGET_REF="$2"; BUILD_DIR="$3"; DF_HASH="$4"
+HASH_FILE="${BUILD_DIR}/.built.sha256"
+
+if docker image inspect "${IMG}" >/dev/null 2>&1; then
+    docker tag "${IMG}" "local/patroni-pg16:rollback" >/dev/null 2>&1 || true
+fi
+
+if [[ "${IMG}" != local/* ]] && docker pull -q "${TARGET_REF}" >/dev/null 2>&1; then
+    echo "Pulled ${TARGET_REF} from registry"
+    printf "%s\n" "${DF_HASH}" > "${HASH_FILE}"
+elif docker pull -q "ghcr.io/aligorov/ligament_vault_patroni:16" >/dev/null 2>&1; then
+    docker tag "ghcr.io/aligorov/ligament_vault_patroni:16" "${IMG}"
+    echo "Pulled ghcr.io/aligorov/ligament_vault_patroni:16"
+    printf "%s\n" "${DF_HASH}" > "${HASH_FILE}"
+else
+    echo "Registry pull unavailable — building ${IMG} locally from Dockerfile.patroni (1-2 min)..."
+    cd "${BUILD_DIR}"
+    docker build --no-cache --progress=plain -t "${IMG}" -f Dockerfile.patroni . 2>&1 | \
+        awk '/^#[0-9]+ \[[0-9]+\/[0-9]+\]|^Step [0-9]+\/|Successfully|DONE|ERROR|failed to solve/ {print; fflush()}'
+    printf "%s\n" "${DF_HASH}" > "${HASH_FILE}"
+    docker builder prune -af >/dev/null 2>&1 || true
+    docker image prune -f >/dev/null 2>&1 || true
+fi
+REMOTE_BUILD
 }
 
 cloudflare_dns_update() {
