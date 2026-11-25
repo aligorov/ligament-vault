@@ -137,7 +137,7 @@ jobs:
           SAN="IP:${HOST_IP},IP:127.0.0.1,DNS:node1,DNS:localhost"
           ACTIVE_CA_KEY="${CA_DIR}/ca.key"
           for role in "${PKI_ROLES[@]}"; do
-              openssl ecparam -genkey -name prime256v1 -out "${CERT_OUT}/${role}.key" 2>/dev/null
+              openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:prime256v1 -out "${CERT_OUT}/${role}.key" 2>/dev/null
               openssl req -new -sha256 -key "${CERT_OUT}/${role}.key" -out "${CERT_OUT}/${role}.csr" -subj "/CN=${role}/O=Ligament"
               _sign_csr_with_active_ca "${CA_DIR}" "${CERT_OUT}/${role}.csr" "${CERT_OUT}/${role}.crt" "${SAN}"
               chmod 644 "${CERT_OUT}/${role}.crt"

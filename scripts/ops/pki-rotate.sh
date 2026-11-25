@@ -121,7 +121,7 @@ rotate_single_node_files() {
 set -euo pipefail
 CERT_DIR="$1"; ROLE="$2"
 mkdir -p "${CERT_DIR}"
-openssl ecparam -genkey -name prime256v1 -out "${CERT_DIR}/${ROLE}.key.new" 2>/dev/null
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:prime256v1 -out "${CERT_DIR}/${ROLE}.key.new" 2>/dev/null
 chmod 600 "${CERT_DIR}/${ROLE}.key.new"
 openssl req -new -sha256 -key "${CERT_DIR}/${ROLE}.key.new" -out "/tmp/${ROLE}.csr" -subj "/CN=${ROLE}/O=Ligament"
 REMOTE_NEW_CSR

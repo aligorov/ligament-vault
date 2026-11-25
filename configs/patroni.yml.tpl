@@ -11,7 +11,8 @@ namespace: /${CLUSTER_SLUG}/
 # --- etcd DCS (mTLS) ---
 etcd3:
   protocol: https
-  hosts: ${ETCD_HOSTS}
+  hosts: ${ETCD_PATRONI_HOSTS}
+  use_proxies: ${ETCD_PATRONI_USE_PROXIES}
   cacert: /run/pg-certs/ca.crt
   cert: /run/pg-certs/etcd-client.crt
   key: /run/pg-certs/etcd-client.key

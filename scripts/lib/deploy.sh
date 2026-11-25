@@ -200,9 +200,16 @@ export_node_render_vars() {
     export SWFS_VOLUME_MOUNTS="${vol_mounts}"
     export SWFS_VOLUME_MAX="${SWFS_VOLUME_MAX_OVERRIDE:-${vol_max}}"
 
-    export ETCD_INITIAL_CLUSTER ETCD_HOSTS SWFS_MASTER_PEERS PG_HOSTS HAPROXY_PG_SERVERS PATRONI_SLOTS_YAML
+    export ETCD_INITIAL_CLUSTER ETCD_HOSTS ETCD_PATRONI_HOSTS ETCD_PATRONI_USE_PROXIES SWFS_MASTER_PEERS PG_HOSTS HAPROXY_PG_SERVERS PATRONI_SLOTS_YAML
     ETCD_INITIAL_CLUSTER=$(build_etcd_cluster_string)
     ETCD_HOSTS=$(build_etcd_hosts)
+    if is_quorum_node "${idx}" "${name}"; then
+        ETCD_PATRONI_HOSTS="${ip}:${ETCD_CLIENT_PORT:-2379}"
+        ETCD_PATRONI_USE_PROXIES="true"
+    else
+        ETCD_PATRONI_HOSTS="${ETCD_HOSTS}"
+        ETCD_PATRONI_USE_PROXIES="false"
+    fi
     SWFS_MASTER_PEERS=$(build_swfs_master_peers)
     PG_HOSTS=$(build_pg_hosts)
     HAPROXY_PG_SERVERS=$(build_haproxy_pg_servers)
@@ -351,6 +358,17 @@ REMOTE_DIRS
         chmod 600 '${REMOTE_BASE_DIR}/configs/sftpgo.json' '${REMOTE_BASE_DIR}/hooks/ligament-2fa.env' && \
         chmod 644 '${REMOTE_BASE_DIR}/configs/revoked_user_certs.json' && \
         chmod 755 '${REMOTE_BASE_DIR}/hooks/ligament-2fa-hook.sh' 2>/dev/null || true
+        if [[ -d '${REMOTE_BASE_DIR}/certs/${name}' ]]; then
+            chmod 755 '${REMOTE_BASE_DIR}/certs/${name}'
+            for kf in '${REMOTE_BASE_DIR}/certs/${name}'/*.key; do
+                [[ -f \"\${kf}\" ]] || continue
+                if grep -q 'BEGIN EC PARAMETERS' \"\${kf}\"; then
+                    openssl pkey -in \"\${kf}\" -out \"\${kf}.pk8\" 2>/dev/null && mv -f \"\${kf}.pk8\" \"\${kf}\"
+                fi
+                chmod 600 \"\${kf}\"
+            done
+            chown 1000:1000 '${REMOTE_BASE_DIR}/certs/${name}'/swfs-*.key '${REMOTE_BASE_DIR}/certs/${name}/pg-client.key' 2>/dev/null || true
+        fi
     "
 }
 
@@ -719,7 +737,7 @@ ensure_ca_exists() {
     fi
 
     log_info "Генерация Root CA (${PROJECT_NAME}, ECDSA P-256) локально на машине оператора..."
-    run_or_dry openssl ecparam -genkey -name prime256v1 -out "${ca_dir}/ca.key"
+    run_or_dry openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:prime256v1 -out "${ca_dir}/ca.key"
     run_or_dry openssl req -new -x509 -sha256 -key "${ca_dir}/ca.key" \
         -config "${ca_dir}/openssl-ca.cnf" -extensions v3_ca \
         -out "${ca_dir}/ca.crt" -days 3650 \
@@ -764,7 +782,7 @@ CERT_DIR="$1"; ROLE="$2"
 KEY="${CERT_DIR}/${ROLE}.key"
 CSR="/tmp/${ROLE}.csr"
 if [[ ! -f "${KEY}" ]]; then
-    openssl ecparam -genkey -name prime256v1 -out "${KEY}" 2>/dev/null
+    openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:prime256v1 -out "${KEY}" 2>/dev/null
 fi
 chmod 600 "${KEY}"
 openssl req -new -sha256 -key "${KEY}" -out "${CSR}" -subj "/CN=${ROLE}/O=Ligament"
