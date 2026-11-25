@@ -155,10 +155,25 @@ REMOTE_DF
 log_step "5/7 — Дисковое пространство (>= ${MIN_FREE_DISK_GB:-80}GB под БД/WAL и тома)"
 for_each_node check_disk
 
-# --- 6. PASV-порты ---
+# --- 6. PASV и ключевые порты кластера ---
 check_pasv_ports() {
     local ip="$1" name="$3"
     local pmin="${FTPS_PASV_MIN:-50000}" pmax="${FTPS_PASV_MAX:-50199}"
+    local conflicts
+    conflicts=$(remote_exec_stdin "${ip}" "${SFTP_PORT:-2022}" "${PG_PORT:-5432}" <<'REMOTE_PORTS' || echo ""
+sftp_p="$1"; pg_p="$2"
+for p in 443 "${sftp_p}" "${pg_p}" 2379 8888 9333; do
+    proc=$(ss -H -tlnp "sport = :${p}" 2>/dev/null | head -n1 || true)
+    if [[ -n "${proc}" ]] && ! echo "${proc}" | grep -qE "sftpgo|postgres|etcd|weed"; then
+        echo "${p}"
+    fi
+done
+REMOTE_PORTS
+    )
+    if [[ -n "${conflicts}" ]]; then
+        log_error "  ❌ На ${name} (${ip}) уже заняты порты другими сервисами: $(echo "${conflicts}" | tr '\n' ' ') (освободите их или используйте чистый VPS!)"
+        PREFLIGHT_PASS=false
+    fi
     local busy
     busy=$(remote_exec_stdin "${ip}" "${pmin}" "${pmax}" <<'REMOTE_PASV' || echo "0"
 pmin="$1"; pmax="$2"

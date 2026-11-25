@@ -41,7 +41,6 @@ else
             --email "${ACME_EMAIL:-admin@${DOMAIN}}" \
             --dns "${DNS_PROVIDER:-cloudflare}" \
             --domains "${DOMAIN}" \
-            --domains "*.${DOMAIN}" \
             --path /lego \
             run
     fi

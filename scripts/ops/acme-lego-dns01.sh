@@ -48,7 +48,6 @@ run_or_dry docker run --rm \
     --email "${ACME_EMAIL:-admin@${DOMAIN}}" \
     --dns "${DNS_PROVIDER:-cloudflare}" \
     --domains "${DOMAIN}" \
-    --domains "*.${DOMAIN}" \
     --path /lego \
     "${CMD}" ${FORCE_FLAG} --days 30
 

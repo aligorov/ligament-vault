@@ -277,10 +277,10 @@
           </p>
           <label>Список серверов кластера (<code>IP:dc:node</code>)</label>
           <input id="cfgNodes" placeholder="203.0.113.10:dc1:node1 198.51.100.20:dc2:node2 192.0.2.30:dc3:node3" />
-          <label>Домен кластера (или оставьте как есть для работы по IP)</label>
-          <input id="cfgDomain" placeholder="files.company.com" />
-          <label>Cloudflare DNS API Token (опц., для авто-SSL Let's Encrypt и DNS Failover)</label>
-          <input id="cfgCfToken" type="password" placeholder="Опционально" />
+          <label>Домен кластера (в Cloudflare: одна A-запись → IP node1, серое облачко <b>DNS only</b>)</label>
+          <input id="cfgDomain" placeholder="file.ligam.org" />
+          <label>Cloudflare DNS API Token (Profile → API Tokens → шаблон <b>Edit zone DNS</b> для зоны домена)</label>
+          <input id="cfgCfToken" type="password" placeholder="Вставьте токен для авто-выпуска SSL и авто-переключения IP при сбое" />
           <label>IP внешнего сервера-арбитра (опц., для мониторинга и авто-Failover)</label>
           <input id="cfgArbiter" placeholder="Опционально" />
           <div class="btn-row">
