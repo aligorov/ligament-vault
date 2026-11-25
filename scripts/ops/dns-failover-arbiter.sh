@@ -52,7 +52,7 @@ probe_edge_node() {
     if [[ "${DRY_RUN:-false}" == "true" ]]; then
         return 0
     fi
-    curl -sf --max-time 5 --insecure "https://${ip}:443/web/client/login" >/dev/null 2>&1 || return 1
+    curl -sf --max-time 5 --insecure "https://${ip}:${HTTPS_PORT:-443}/web/client/login" >/dev/null 2>&1 || return 1
     nc -z -w 4 "${ip}" "${SFTP_PORT:-2022}" >/dev/null 2>&1 || return 1
     return 0
 }

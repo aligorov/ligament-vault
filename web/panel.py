@@ -426,6 +426,7 @@ class PanelHandler(BaseHTTPRequestHandler):
                         "CLUSTER_SLUG": cenv.get("CLUSTER_SLUG", "ligament-vault"),
                         "CLUSTER_NODES": nodes_raw,
                         "DOMAIN": cenv.get("DOMAIN", ""),
+                        "HTTPS_PORT": cenv.get("HTTPS_PORT", "443"),
                         "SFTP_PORT": cenv.get("SFTP_PORT", "2022"),
                         "FTPS_PORT": cenv.get("FTPS_PORT", "21"),
                         "ADMIN_SSH_NET": cenv.get("ADMIN_SSH_NET", "0.0.0.0/0"),

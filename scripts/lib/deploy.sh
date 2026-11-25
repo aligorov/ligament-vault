@@ -150,6 +150,7 @@ export_node_render_vars() {
     export SFTPGO_TEMP_PATH="${SFTPGO_TEMP_PATH:-/data/sftpgo-temp}"
     export ETCD_METRICS_PORT="${ETCD_METRICS_PORT:-2381}"
     export SFTPGO_TELEMETRY_PORT="${SFTPGO_TELEMETRY_PORT:-10000}"
+    export HTTPS_PORT="${HTTPS_PORT:-443}"
     export PG_MAX_SLOT_WAL_KEEP_SIZE="${PG_MAX_SLOT_WAL_KEEP_SIZE:-2GB}"
 
     if [[ -n "${ARBITER_IP:-}" ]]; then
@@ -356,6 +357,7 @@ harden_node_ufw() {
         "${SWFS_MASTER_METRICS_PORT:-9324}" "${SWFS_VOLUME_METRICS_PORT:-9325}" "${SWFS_FILER_METRICS_PORT:-9326}" \
         "${SFTPGO_TELEMETRY_PORT:-10000}" \
         "${PANEL_PORT:-9443}" \
+        "${HTTPS_PORT:-443}" \
         "${ARBITER_IP:-}" "${peer_ips}" <<'REMOTE_UFW'
 set -euo pipefail
 SLUG="$1"
@@ -366,8 +368,8 @@ PG_PORT="${11}"; PATRONI_PORT="${12}"
 SWFS_M="${13}"; SWFS_V="${14}"; SWFS_F="${15}"
 SWFS_A="${16}"; SWFS_AG="${17}"
 MET_M="${18}"; MET_V="${19}"; MET_F="${20}"
-SFTP_TEL="${21}"; PANEL_P="${22}"
-ARBITER_IP="${23}"; PEER_IPS="${24}"
+SFTP_TEL="${21}"; PANEL_P="${22}"; HTTPS_P="${23}"
+ARBITER_IP="${24}"; PEER_IPS="${25}"
 
 SWFS_MG=$((SWFS_M + 10000))
 SWFS_VG=$((SWFS_V + 10000))
@@ -379,14 +381,43 @@ if [[ -f /run/ufw-rollback.pid ]]; then
 fi
 
 WAS_ACTIVE=false
+PRESERVE_PORTS=""
 if ufw status | grep -q "Status: active"; then
     WAS_ACTIVE=true
 else
+    # Запоминаем уже открытые на хосте публичные TCP/UDP порты (VPN awg0, 2FA, Nginx :80/:443/:8443 и т.д.), чтобы не сломать соседние сервисы!
+    PRESERVE_PORTS=$(python3 - <<'PYPORTS' 2>/dev/null || true
+import subprocess
+out = subprocess.check_output(["ss", "-H", "-tuln"], text=True, stderr=subprocess.DEVNULL)
+seen = set()
+for line in out.splitlines():
+    parts = line.split()
+    if len(parts) < 5:
+        continue
+    proto = "udp" if parts[0].startswith("udp") else "tcp"
+    addr = parts[4]
+    if addr.startswith(("127.", "[::1]", "169.254.")):
+        continue
+    port = addr.rsplit(":", 1)[-1]
+    if port.isdigit() and int(port) not in (53, 68):
+        seen.add(f"{port}/{proto}")
+print(" ".join(sorted(seen)))
+PYPORTS
+    )
     ufw --force reset >/dev/null 2>&1
+fi
+
+# Если на сервере включен IP forwarding (например, AmneziaWG / WireGuard / Docker routing) — не блокируем транзитный трафик!
+if [[ "$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo 0)" == "1" ]] && [[ -f /etc/default/ufw ]]; then
+    sed -i 's/^DEFAULT_FORWARD_POLICY=.*/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw || true
 fi
 
 ufw default deny incoming >/dev/null
 ufw default allow outgoing >/dev/null
+
+for p_proto in ${PRESERVE_PORTS}; do
+    ufw allow "${p_proto}" comment "${SLUG}:preserved-service" >/dev/null 2>&1 || true
+done
 
 ufw allow from "${ADMIN_SSH_NET}" to any port "${ADMIN_SSH_PORT}" proto tcp comment "${SLUG}:admin-ssh" >/dev/null
 ufw allow from "${ADMIN_SSH_NET}" to any port "${PANEL_P}" proto tcp comment "${SLUG}:web-panel" >/dev/null
@@ -394,7 +425,7 @@ ufw allow from "${ADMIN_SSH_NET}" to any port "${PANEL_P}" proto tcp comment "${
 ufw allow "${SFTP_PORT}/tcp" comment "${SLUG}:public-sftp" >/dev/null
 ufw allow "${FTPS_PORT}/tcp" comment "${SLUG}:public-ftps" >/dev/null
 ufw allow "${PASV_MIN}:${PASV_MAX}/tcp" comment "${SLUG}:public-pasv" >/dev/null
-ufw allow 443/tcp comment "${SLUG}:public-https" >/dev/null
+ufw allow "${HTTPS_P}/tcp" comment "${SLUG}:public-https" >/dev/null
 
 for PEER_IP in ${PEER_IPS}; do
     ufw allow from "${PEER_IP}" to any port "${ETCD_C},${ETCD_P}" proto tcp comment "${SLUG}:peer:${PEER_IP}" >/dev/null
@@ -547,9 +578,10 @@ install_arbiter_helper_on_node() {
         "${ETCD_CLIENT_PORT:-2379}" \
         "${SFTP_PORT:-2022}" \
         "${FTPS_PORT:-21}" \
+        "${HTTPS_PORT:-443}" \
         "${master_peers}" <<'REMOTE_ARB_HELPER'
 set -euo pipefail
-PUBKEY="$1"; BASE_DIR="$2"; SLUG="$3"; EC_PORT="$4"; SFTP_P="$5"; FTPS_P="$6"; MASTER_PEERS="$7"
+PUBKEY="$1"; BASE_DIR="$2"; SLUG="$3"; EC_PORT="$4"; SFTP_P="$5"; FTPS_P="$6"; HTTPS_P="$7"; MASTER_PEERS="$8"
 
 cat > /usr/local/bin/arbiter-helper.sh <<EOF
 #!/usr/bin/env bash
@@ -562,7 +594,7 @@ case "\${CMD}" in
     fence-edge)
         # Остановка SFTPGo + принудительный TCP RST активных сессий для мгновенного реконнекта клиентов!
         cd "${BASE_DIR}" && docker compose stop sftpgo || true
-        for p in "${SFTP_P}" "${FTPS_P}" 443; do
+        for p in "${SFTP_P}" "${FTPS_P}" "${HTTPS_P}"; do
             ss -K "sport = :\${p}" >/dev/null 2>&1 || true
             conntrack -D -p tcp --dport "\${p}" >/dev/null 2>&1 || true
         done

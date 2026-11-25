@@ -450,7 +450,11 @@
     const c = d.config;
     document.getElementById("hdrTitle").textContent = c.PROJECT_NAME || "Ligament Vault";
     const hostForClient = (c.DOMAIN && c.DOMAIN !== "files.company.com") ? c.DOMAIN : location.hostname;
-    document.getElementById("webClientLink").href = `https://${hostForClient}/web/client/login`;
+    const hport = c.HTTPS_PORT || "443";
+    const portSuffix = hport === "443" ? "" : `:${hport}`;
+    const linkEl = document.getElementById("webClientLink");
+    linkEl.href = `https://${hostForClient}${portSuffix}/web/client/login`;
+    linkEl.textContent = `Файловый клиент (:${hport}) ↗`;
 
     document.getElementById("notInstalledBanner").classList.toggle("hidden", d.installed);
     document.getElementById("cfgNodes").value = c.CLUSTER_NODES || "";

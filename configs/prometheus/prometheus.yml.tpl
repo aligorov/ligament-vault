@@ -51,7 +51,7 @@ scrape_configs:
       module: [http_2xx]
     static_configs:
       - targets:
-          - "https://${DOMAIN}/web/client/login"
+          - "https://${DOMAIN}:${HTTPS_PORT}/web/client/login"
     relabel_configs:
       - source_labels: [__address__]
         target_label: __param_target

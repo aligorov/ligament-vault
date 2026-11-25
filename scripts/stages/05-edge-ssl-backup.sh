@@ -114,6 +114,7 @@ if [[ -n "${ARBITER_IP:-}" ]]; then
         export PROM_TARGETS_SWFS_VOLUME="${t_swv}"
         export PROM_TARGETS_SWFS_FILER="${t_swf}"
         export PROM_TARGETS_SFTPGO="${t_sftp}"
+        export HTTPS_PORT="${HTTPS_PORT:-443}"
         export PROMETHEUS_IMAGE_REF ALERTMANAGER_IMAGE_REF BLACKBOX_IMAGE_REF
         PROMETHEUS_IMAGE_REF=$(resolve_image_ref "${PROMETHEUS_IMAGE}" "${PROMETHEUS_DIGEST:-}")
         ALERTMANAGER_IMAGE_REF=$(resolve_image_ref "${ALERTMANAGER_IMAGE}" "${ALERTMANAGER_DIGEST:-}")

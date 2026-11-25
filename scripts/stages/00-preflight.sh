@@ -122,9 +122,7 @@ check_rtt
 # --- 4. NTP / chrony ---
 check_ntp() {
     local ip="$1" name="$3"
-    local chrony_ok
-    chrony_ok=$(remote_exec "${ip}" "chronyc tracking 2>/dev/null | grep -c 'Leap status.*Normal'" || echo "0")
-    if (( chrony_ok >= 1 )); then
+    if remote_exec "${ip}" "chronyc tracking 2>/dev/null | grep -q 'Leap status.*Normal'" 2>/dev/null; then
         log_info "  ✅ chrony синхронизирован: ${name}"
     else
         log_warn "  ⚠️  chrony еще не настроен на ${name} (будет включен на Стадии 1)"
@@ -149,15 +147,20 @@ while [[ ! -d "$t" && "$t" != "/" ]]; do t="$(dirname "$t")"; done
 avail_kb=$(df -Pk "$t" 2>/dev/null | awk 'NR==2 {print $4}')
 avail_gb=$(( ${avail_kb:-0} / 1048576 ))
 
-# Если свободно < 5 ГБ — чистим apt/journal кэш и пробуем расширить корневой раздел на весь диск VPS!
-if (( avail_gb < 5 )); then
+# Если свободно < 2 ГБ — глубокая безопасная очистка кэша apt/docker/логов и расширение раздела!
+if (( avail_gb < 2 )); then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get autoremove --purge -y -qq >/dev/null 2>&1 || true
     apt-get clean >/dev/null 2>&1 || true
-    journalctl --vacuum-size=50M >/dev/null 2>&1 || true
+    rm -rf /var/lib/apt/lists/* /var/log/*.gz /var/log/*.[0-9] /tmp/* >/dev/null 2>&1 || true
+    journalctl --vacuum-size=20M >/dev/null 2>&1 || true
+    docker builder prune -af >/dev/null 2>&1 || true
+    docker image prune -f >/dev/null 2>&1 || true
     root_src=$(findmnt -n -o SOURCE / 2>/dev/null || true)
     if [[ "${root_src}" =~ ^(/dev/[a-z]+d[a-z]+|/dev/nvme[0-9]+n[0-9]+p?)([0-9]+)$ ]]; then
         disk_dev="${BASH_REMATCH[1]%p}"
         part_num="${BASH_REMATCH[2]}"
-        if command -v growpart >/dev/null 2>&1 || (export DEBIAN_FRONTEND=noninteractive && apt-get update -qq && apt-get install -y -qq cloud-guest-utils >/dev/null 2>&1); then
+        if command -v growpart >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq cloud-guest-utils >/dev/null 2>&1 && apt-get clean && rm -rf /var/lib/apt/lists/*); then
             growpart "${disk_dev}" "${part_num}" >/dev/null 2>&1 || true
             resize2fs "${root_src}" >/dev/null 2>&1 || xfs_growfs / >/dev/null 2>&1 || true
         fi
@@ -165,21 +168,24 @@ if (( avail_gb < 5 )); then
     avail_kb=$(df -Pk "$t" 2>/dev/null | awk 'NR==2 {print $4}')
     avail_gb=$(( ${avail_kb:-0} / 1048576 ))
 fi
+avail_mb=$(( ${avail_kb:-0} / 1024 ))
 summary=$(df -h "$t" 2>/dev/null | awk 'NR==2 {print "всего=" $2 ", занято=" $3 ", свободно=" $4 " (" $5 ")"}')
-echo "${avail_gb}|${summary}"
+echo "${avail_mb}|${summary}"
 REMOTE_DF
     )
-    local avail_gb="${disk_report%%|*}"
+    local avail_mb="${disk_report%%|*}"
     local summary="${disk_report#*|}"
-    avail_gb="${avail_gb//[^0-9]/}"
-    [[ -z "${avail_gb}" ]] && avail_gb=0
+    avail_mb="${avail_mb//[^0-9]/}"
+    [[ -z "${avail_mb}" ]] && avail_mb=0
+    local avail_gb=$(( avail_mb / 1024 ))
 
-    if (( avail_gb < min_gb )); then
-        log_error "  ❌ Критически мало места на ${name} (${ip}): свободно ~${avail_gb}GB < ${min_gb}GB [${summary}]"
-        remote_exec "${ip}" "lsblk -o NAME,SIZE,TYPE,MOUNTPOINT 2>/dev/null || df -h" || true
+    if (( avail_mb < 1500 )); then
+        log_error "  ❌ Критически мало места на ${name} (${ip}): свободно всего ${avail_mb}MB (< 1.5GB) [${summary}]"
+        log_error "     Топ-8 самых тяжелых папок на ${name} (удалите лишнее или расширьте диск VPS):"
+        remote_exec "${ip}" "du -xhd1 / 2>/dev/null | sort -hr | head -n 8; swapon --show 2>/dev/null || true" || true
         PREFLIGHT_PASS=false
-    elif (( avail_gb < 20 )); then
-        log_warn "  ⚠️  Малый диск на ${name}: свободно ${avail_gb}GB [${summary}] — для тестов подойдет, для продакшна рекомендуется >= 20GB"
+    elif (( avail_gb < 15 )); then
+        log_warn "  ⚠️  Компактный диск на ${name}: свободно ${avail_mb}MB [${summary}] — для запуска стека достаточно"
     else
         log_info "  ✅ Свободно под данные (${target_dir}): ${avail_gb}GB [${summary}] (${name})"
     fi
@@ -187,14 +193,16 @@ REMOTE_DF
 log_step "5/7 — Дисковое пространство (мин. 2GB для старта стека)"
 for_each_node check_disk
 
-# --- 6. PASV и ключевые порты кластера ---
+# --- 6. PASV и ключевые порты кластера (с автопереключением HTTPS_PORT=8444 если :443 занят чужим сайтом/VPN!) ---
+PORT_443_BUSY=false
 check_pasv_ports() {
     local ip="$1" name="$3"
     local pmin="${FTPS_PASV_MIN:-50000}" pmax="${FTPS_PASV_MAX:-50199}"
+    local cur_https="${HTTPS_PORT:-443}"
     local conflicts
-    conflicts=$(remote_exec_stdin "${ip}" "${SFTP_PORT:-2022}" "${PG_PORT:-5432}" <<'REMOTE_PORTS' || echo ""
-sftp_p="$1"; pg_p="$2"
-for p in 443 "${sftp_p}" "${pg_p}" 2379 8888 9333; do
+    conflicts=$(remote_exec_stdin "${ip}" "${SFTP_PORT:-2022}" "${PG_PORT:-5432}" "${cur_https}" <<'REMOTE_PORTS' || echo ""
+sftp_p="$1"; pg_p="$2"; https_p="$3"
+for p in "${https_p}" "${sftp_p}" "${pg_p}" 2379 8888 9333; do
     proc=$(ss -H -tlnp "sport = :${p}" 2>/dev/null | head -n1 || true)
     if [[ -n "${proc}" ]] && ! echo "${proc}" | grep -qE "sftpgo|postgres|etcd|weed"; then
         echo "${p}"
@@ -202,8 +210,16 @@ for p in 443 "${sftp_p}" "${pg_p}" 2379 8888 9333; do
 done
 REMOTE_PORTS
     )
-    if [[ -n "${conflicts}" ]]; then
-        log_error "  ❌ На ${name} (${ip}) уже заняты порты другими сервисами: $(echo "${conflicts}" | tr '\n' ' ') (освободите их или используйте чистый VPS!)"
+    local hard_conflicts=""
+    for cp in ${conflicts}; do
+        if [[ "${cp}" == "443" && "${cur_https}" == "443" ]]; then
+            PORT_443_BUSY=true
+        else
+            hard_conflicts+="${cp} "
+        fi
+    done
+    if [[ -n "${hard_conflicts}" ]]; then
+        log_error "  ❌ На ${name} (${ip}) заняты кластерные порты: ${hard_conflicts}"
         PREFLIGHT_PASS=false
     fi
     local busy
@@ -219,8 +235,21 @@ REMOTE_PASV
         log_info "  ✅ PASV-порты ${pmin}-${pmax} свободны: ${name}"
     fi
 }
-log_step "6/7 — Проверка FTPS PASV-портов"
+log_step "6/7 — Проверка портов и FTPS PASV"
 for_each_node check_pasv_ports
+
+if [[ "${PORT_443_BUSY}" == "true" ]]; then
+    export HTTPS_PORT=8444
+    ENV_TARGET="${CONFIG_ROOT:-${SCRIPT_DIR}}/cluster.env"
+    if [[ -f "${ENV_TARGET}" ]]; then
+        if grep -q '^HTTPS_PORT=' "${ENV_TARGET}"; then
+            sed -i.bak 's/^HTTPS_PORT=.*/HTTPS_PORT=8444/' "${ENV_TARGET}" && rm -f "${ENV_TARGET}.bak"
+        else
+            echo 'HTTPS_PORT=8444' >> "${ENV_TARGET}"
+        fi
+    fi
+    log_warn "  ⚠️  Порт 443 уже занят другими сервисами (2FA/VPN/Nginx) — файловый веб-клиент автоматически перенесен на порт :8444 (существующие сервисы на :443 сохранены!)"
+fi
 
 # --- 7. Docker и ядро (с автоустановкой Docker на чистых удаленных VPS!) ---
 check_docker_kernel() {

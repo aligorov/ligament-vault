@@ -86,8 +86,8 @@
   "httpd": {
     "bindings": [
       {
-        "_comment": "WebClient — публичный HTTPS :443 (WebAdmin и REST API выключены)",
-        "port": 443,
+        "_comment": "WebClient — публичный HTTPS (WebAdmin и REST API выключены)",
+        "port": ${HTTPS_PORT},
         "address": "",
         "enable_web_admin": false,
         "enable_web_client": true,
