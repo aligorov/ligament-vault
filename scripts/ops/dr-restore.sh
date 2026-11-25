@@ -50,7 +50,7 @@ dr_step_etcd_and_pg_restore() {
 
     log_step "DR 2/4 — Запуск чистого кворума etcd и восстановление PostgreSQL из pgBackRest"
     start_etcd_cb() {
-        local ip="$1" dc="$2" name="$3" idx="$4"
+        local ip="$1" name="$3" idx="$4"
         is_quorum_node "${idx}" "${name}" || return 0
         remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d etcd"
     }
@@ -89,7 +89,7 @@ dr_step_etcd_and_pg_restore() {
         "curl -sf http://127.0.0.1:${PATRONI_API_PORT:-8008}/primary" 45 3
 
     start_rep_cb() {
-        local ip="$1" dc="$2" name="$3" idx="$4"
+        local ip="$1" name="$3" idx="$4"
         if (( idx != 1 )); then
             remote_exec "${ip}" "rm -rf '${PG_DATA_DIR}/data' && mkdir -p '${PG_DATA_DIR}/data' && cd '${REMOTE_BASE_DIR}' && docker compose up -d patroni"
             wait_for_remote_health "${ip}" "Patroni Replica ${name}" "curl -sf http://127.0.0.1:${PATRONI_API_PORT:-8008}/replica" 60 3

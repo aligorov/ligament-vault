@@ -30,7 +30,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 check_node_health() {
-    local ip="$1" dc="$2" name="$3" idx="$4"
+    local ip="$1" dc="$2" name="$3"
 
     if [[ "${DRY_RUN:-false}" == "true" ]]; then
         if [[ "${JSON_OUT}" == "true" ]]; then

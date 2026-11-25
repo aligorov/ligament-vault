@@ -50,7 +50,7 @@ wait_for_remote_health "${NODE1_IP}" "Patroni Primary /primary" \
     "curl -sf http://127.0.0.1:${PATRONI_API_PORT:-8008}/primary" 40 3
 
 start_replica_cb() {
-    local ip="$1" dc="$2" name="$3" idx="$4"
+    local ip="$1" name="$3" idx="$4"
     if (( idx == 1 )); then return 0; fi
     log_info "Старт Patroni Replica на ${name} (${ip})..."
     remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d patroni"
@@ -61,7 +61,7 @@ for_each_node start_replica_cb
 
 log_step "Запуск HAProxy (127.0.0.1:${HAPROXY_PG_PORT:-5433} -> PG Primary)"
 start_haproxy_cb() {
-    local ip="$1" dc="$2" name="$3" idx="$4"
+    local ip="$1" name="$3"
     remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d haproxy"
     wait_for_remote_health "${ip}" "HAProxy ${name}" "nc -z 127.0.0.1 ${HAPROXY_PG_PORT:-5433}" 15 2
 }

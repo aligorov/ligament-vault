@@ -69,7 +69,7 @@ log_info "  ✅ Схема SFTPGo в PostgreSQL инициализирована
 # --- 3. Запуск SFTPGo и node-exporter ---
 log_step "3/7 — Запуск SFTPGo и node-exporter на всех нодах"
 start_edge_cb() {
-    local ip="$1" dc="$2" name="$3" idx="$4"
+    local ip="$1" name="$3"
     log_info "  Старт SFTPGo и node-exporter на ${name} (${ip})..."
     remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d sftpgo node-exporter"
     wait_for_remote_health "${ip}" "SFTPGo ${name}" \

@@ -64,7 +64,7 @@ fi
 
 # --- 2. SSH-доступ ---
 check_ssh_access() {
-    local ip="$1" dc="$2" name="$3" idx="$4"
+    local ip="$1" name="$3"
     if remote_exec "${ip}" "echo ok" &>/dev/null; then
         log_info "  ✅ SSH OK: ${name} (${ip})"
     else
@@ -121,7 +121,7 @@ check_rtt
 
 # --- 4. NTP / chrony ---
 check_ntp() {
-    local ip="$1" dc="$2" name="$3" idx="$4"
+    local ip="$1" name="$3"
     local chrony_ok
     chrony_ok=$(remote_exec "${ip}" "chronyc tracking 2>/dev/null | grep -c 'Leap status.*Normal'" || echo "0")
     if (( chrony_ok >= 1 )); then
@@ -135,7 +135,7 @@ for_each_node check_ntp
 
 # --- 5. Свободное место на диске раздела данных (${PG_DATA_DIR}) ---
 check_disk() {
-    local ip="$1" dc="$2" name="$3" idx="$4"
+    local ip="$1" name="$3"
     local min_gb="${MIN_FREE_DISK_GB:-80}"
     local target_dir="${PG_DATA_DIR:-/data/postgresql}"
     local avail_gb
@@ -157,7 +157,7 @@ for_each_node check_disk
 
 # --- 6. PASV-порты ---
 check_pasv_ports() {
-    local ip="$1" dc="$2" name="$3" idx="$4"
+    local ip="$1" name="$3"
     local pmin="${FTPS_PASV_MIN:-50000}" pmax="${FTPS_PASV_MAX:-50199}"
     local busy
     busy=$(remote_exec_stdin "${ip}" "${pmin}" "${pmax}" <<'REMOTE_PASV' || echo "0"
@@ -177,7 +177,7 @@ for_each_node check_pasv_ports
 
 # --- 7. Docker и ядро ---
 check_docker_kernel() {
-    local ip="$1" dc="$2" name="$3" idx="$4"
+    local ip="$1" name="$3"
     local info
     info=$(remote_exec "${ip}" "docker --version 2>/dev/null && docker compose version 2>/dev/null && uname -r" || echo "FAIL")
     if [[ "${info}" == *"FAIL"* ]]; then

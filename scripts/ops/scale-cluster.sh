@@ -388,7 +388,7 @@ cmd_remove() {
         log_error "Узел '${target_node}' не найден в CLUSTER_NODES"
         exit 1
     }
-    IFS=':' read -r rm_ip rm_dc rm_name rm_idx <<< "${node_info}"
+    IFS=':' read -r rm_ip _ rm_name rm_idx <<< "${node_info}"
 
     local count
     count=$(get_node_count)
