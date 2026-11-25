@@ -28,7 +28,13 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_SRC="${BASH_SOURCE[0]}"
+while [[ -L "${_SRC}" ]]; do
+    _LDIR="$(cd -P "$(dirname "${_SRC}")" && pwd)"
+    _SRC="$(readlink "${_SRC}")"
+    [[ "${_SRC}" != /* ]] && _SRC="${_LDIR}/${_SRC}"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "${_SRC}")" && pwd)"
 export SCRIPT_DIR
 
 CLI_NAME="${CLI_INVOKED_AS:-$(basename "$0")}"
