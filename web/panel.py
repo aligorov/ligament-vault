@@ -609,6 +609,75 @@ class PanelHandler(BaseHTTPRequestHandler):
             self.send_json(200, {"ok": True, "message": msg, "cluster_nodes": " ".join(existing), "joined_live": False})
             return
 
+        if path == "/api/v1/nodes/remove":
+            target_node = str(body.get("node", "")).strip()
+            if not re.match(r"^[a-zA-Z0-9_-]+$", target_node):
+                self.send_json(400, {"error": "Некорректное имя узла"})
+                return
+            installed = os.path.exists(os.path.join(CONFIG_ROOT, ".cluster_installed"))
+            cenv_path = os.path.join(CONFIG_ROOT, "cluster.env")
+            cenv = read_env_dict(cenv_path)
+            existing = [e for e in cenv.get("CLUSTER_NODES", "").split() if "FIXME" not in e]
+
+            if not installed:
+                kept = [e for e in existing if e.split(":")[-1] != target_node]
+                # Перенумеровываем dcN:nodeN по порядку, чтобы не было дыр до установки
+                reindexed = [f"{e.split(':')[0]}:dc{i+1}:node{i+1}" for i, e in enumerate(kept)]
+                update_env_file(cenv_path, {"CLUSTER_NODES": " ".join(reindexed)})
+                ck = os.path.join(CONFIG_ROOT, ".state", "checkpoints.install")
+                if os.path.exists(ck):
+                    os.remove(ck)
+                self.send_json(200, {"ok": True, "removed_preinstall": True, "cluster_nodes": " ".join(reindexed)})
+                return
+
+            if len(existing) <= 3:
+                self.send_json(400, {"error": "В работающем кластере из 3 нод нельзя просто удалить узел (потеряется кворум) — используйте кнопку «Заменить» на новый IP!"})
+                return
+            ligactl = os.path.join(REPO_DIR, "ligactl")
+            tid, err = start_async_task(f"Безопасный вывод узла {target_node} из кластера", [ligactl, "scale", "remove", "--node", target_node, "--yes"])
+            if err:
+                self.send_json(409, {"error": err})
+                return
+            self.send_json(200, {"ok": True, "removed_preinstall": False, "task_id": tid})
+            return
+
+        if path == "/api/v1/nodes/replace":
+            target_node = str(body.get("node", "")).strip()
+            new_ip = str(body.get("new_ip", "")).strip()
+            ssh_port = int(body.get("ssh_port") or 22)
+            root_pw = str(body.get("password", ""))
+            if not re.match(r"^[a-zA-Z0-9_-]+$", target_node) or not re.match(r"^[0-9]{1,3}(\.[0-9]{1,3}){3}$", new_ip):
+                self.send_json(400, {"error": "Укажите корректное имя узла и новый IPv4 адрес"})
+                return
+            pubkey = get_orchestrator_pubkey()
+            if os.environ.get("DRY_RUN") != "true":
+                ok, msg = bootstrap_remote_vps_ssh(new_ip, ssh_port, root_pw, pubkey)
+                if not ok:
+                    self.send_json(400, {"error": msg})
+                    return
+            installed = os.path.exists(os.path.join(CONFIG_ROOT, ".cluster_installed"))
+            cenv_path = os.path.join(CONFIG_ROOT, "cluster.env")
+            cenv = read_env_dict(cenv_path)
+            existing = [e for e in cenv.get("CLUSTER_NODES", "").split() if "FIXME" not in e]
+            if not installed:
+                updated = []
+                for e in existing:
+                    parts = e.split(":")
+                    if len(parts) >= 3 and parts[2] == target_node:
+                        updated.append(f"{new_ip}:{parts[1]}:{parts[2]}")
+                    else:
+                        updated.append(e)
+                update_env_file(cenv_path, {"CLUSTER_NODES": " ".join(updated)})
+                self.send_json(200, {"ok": True, "replaced_preinstall": True, "cluster_nodes": " ".join(updated)})
+                return
+            ligactl = os.path.join(REPO_DIR, "ligactl")
+            tid, err = start_async_task(f"Замена узла {target_node} -> {new_ip}", [ligactl, "scale", "replace", "--old", target_node, "--new-ip", new_ip, "--yes"])
+            if err:
+                self.send_json(409, {"error": err})
+                return
+            self.send_json(200, {"ok": True, "replaced_preinstall": False, "task_id": tid})
+            return
+
         if path == "/api/v1/config":
             allowed_cluster = (
                 "CLUSTER_NODES", "DOMAIN", "ADMIN_SSH_NET", "SFTP_PORT", "FTPS_PORT",

@@ -185,9 +185,9 @@
         </h3>
         <table>
           <thead>
-            <tr><th>Узел</th><th>IP адрес</th><th>ДЦ</th><th>PostgreSQL</th><th>HAProxy</th><th>SWFS Volume</th><th>SWFS Filer</th><th>SFTPGo</th><th>Диск / NTP</th></tr>
+            <tr><th>Узел</th><th>IP адрес</th><th>ДЦ</th><th>PostgreSQL</th><th>HAProxy</th><th>SWFS Volume</th><th>SWFS Filer</th><th>SFTPGo</th><th>Диск / NTP</th><th>Действия</th></tr>
           </thead>
-          <tbody id="nodesBody"><tr><td colspan="9" style="color:var(--muted);">Загрузка...</td></tr></tbody>
+          <tbody id="nodesBody"><tr><td colspan="10" style="color:var(--muted);">Загрузка...</td></tr></tbody>
         </table>
       </div>
     </section>
@@ -492,8 +492,44 @@
         <td>${n.swfs_filer || '—'}</td>
         <td>${n.sftpgo || '—'}</td>
         <td>${n.disk_root || '—'} / ${n.ntp_offset || '—'}</td>
+        <td style="display:flex;gap:6px;">
+          <button class="btn btn-sec btn-sm" onclick="replaceNodePrompt('${n.node}','${n.ip}')" title="Заменить сервер">🔄 Заменить</button>
+          <button class="btn btn-err btn-sm" onclick="removeNode('${n.node}','${n.ip}')" title="Удалить узел">🗑</button>
+        </td>
       </tr>
-    `).join("") || '<tr><td colspan="9">Узлы не заданы</td></tr>';
+    `).join("") || '<tr><td colspan="10">Узлы не заданы</td></tr>';
+  }
+
+  async function removeNode(node, ip) {
+    if (!confirm(`Удалить узел ${node} (${ip}) из списка кластера?`)) return;
+    try {
+      const res = await api("/api/v1/nodes/remove", { method: "POST", body: JSON.stringify({ node }) });
+      if (res.task_id) {
+        activeTaskId = res.task_id; pollOffset = 0;
+        document.getElementById("consoleOut").textContent = "";
+        document.querySelectorAll(".tab-btn")[4].click();
+        pollTask();
+      } else {
+        await loadOverview(false);
+      }
+    } catch (e) { alert("Ошибка: " + e.message); }
+  }
+
+  async function replaceNodePrompt(node, oldIp) {
+    const newIp = prompt(`Введите новый IP адрес для замены ${node} (вместо ${oldIp}):`);
+    if (!newIp) return;
+    const pw = prompt(`Пароль root от нового VPS ${newIp} (или оставьте пустым, если SSH-ключ уже прописан):`) || "";
+    try {
+      const res = await api("/api/v1/nodes/replace", { method: "POST", body: JSON.stringify({ node, new_ip: newIp.trim(), password: pw }) });
+      if (res.task_id) {
+        activeTaskId = res.task_id; pollOffset = 0;
+        document.getElementById("consoleOut").textContent = "";
+        document.querySelectorAll(".tab-btn")[4].click();
+        pollTask();
+      } else {
+        await loadOverview(false);
+      }
+    } catch (e) { alert("Ошибка: " + e.message); }
   }
 
   async function loadUsers() {
