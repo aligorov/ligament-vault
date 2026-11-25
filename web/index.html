@@ -332,7 +332,32 @@
         </div>
 
         <div class="card">
-          <h3>Внешний S3 для зашифрованных DR-бэкапов</h3>
+          <h3>1. Внешний S3 для хранения файлов клиентов (Cloudflare R2, Timeweb, Selectel, AWS, MinIO)</h3>
+          <p style="color:var(--muted);font-size:13px;margin-bottom:8px;">
+            Подключите любой внешний S3-бакет как папку хранения (клиенты будут работать с ней по SFTP / FTPS / браузеру).
+          </p>
+          <form id="extS3Form">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+              <div><label>Имя папки (например <code>cloud-s3</code>)</label><input id="extName" placeholder="cloud-s3" required /></div>
+              <div><label>Регион</label><input id="extRegion" value="us-east-1" /></div>
+            </div>
+            <label>S3 Endpoint</label>
+            <input id="extEndpoint" placeholder="https://s3.twcstorage.ru или https://<id>.r2.cloudflarestorage.com" required />
+            <label>Имя бакета (Bucket)</label>
+            <input id="extBucket" placeholder="my-files-bucket" required />
+            <label>Access Key</label>
+            <input id="extAk" placeholder="Access Key ID" required />
+            <label>Secret Key</label>
+            <input id="extSk" type="password" placeholder="Secret Access Key" required />
+            <div class="btn-row">
+              <button type="submit" class="btn btn-ok">+ Подключить внешний S3-бакет</button>
+            </div>
+            <div id="extS3Msg" class="msg b-ok hidden"></div>
+          </form>
+        </div>
+
+        <div class="card">
+          <h3>2. Внешний S3 для зашифрованных DR-бэкапов БД и кластера</h3>
           <label>S3 Endpoint</label>
           <input id="setS3Endpoint" placeholder="https://s3.eu-central-1.amazonaws.com" />
           <label>S3 Bucket</label>
@@ -475,6 +500,14 @@
         tbody.innerHTML = '<tr><td colspan="5" style="color:var(--muted);">Сначала разверните кластер во вкладке «Установка и Масштаб»</td></tr>';
         return;
       }
+      const sel = document.getElementById("uProfile");
+      const extraFolders = (d.folders || []).filter(f => f.name !== "sftp-work" && f.name !== "sftp-worm");
+      sel.innerHTML = `
+        <option value="dual">Двойной кластерный: /work + /worm (неудаляемый архив)</option>
+        <option value="work-only">Только рабочий каталог (/work)</option>
+        <option value="worm-only">Только неизменяемый архив (/worm COMPLIANCE)</option>
+      ` + extraFolders.map(f => `<option value="ext:${f.name}">Внешний S3 бакет: /${f.name} (${f.description})</option>`).join("");
+
       tbody.innerHTML = (d.users || []).map(u => {
         const st = u.status === 1 ? '<span class="badge b-ok">Активен</span>' : '<span class="badge b-err">Отключен</span>';
         const q = u.quota_size ? (u.quota_size / (1024**3)).toFixed(1) + " ГБ" : "Безлимит";
@@ -543,6 +576,32 @@
     });
     await runTask(action);
   }
+
+  document.getElementById("extS3Form").onsubmit = async (e) => {
+    e.preventDefault();
+    const msg = document.getElementById("extS3Msg");
+    msg.classList.add("hidden");
+    try {
+      const res = await api("/api/v1/storage/s3-folder", {
+        method: "POST",
+        body: JSON.stringify({
+          name: document.getElementById("extName").value.trim(),
+          region: document.getElementById("extRegion").value.trim(),
+          endpoint: document.getElementById("extEndpoint").value.trim(),
+          bucket: document.getElementById("extBucket").value.trim(),
+          access_key: document.getElementById("extAk").value.trim(),
+          secret_key: document.getElementById("extSk").value,
+        }),
+      });
+      msg.className = "msg b-ok";
+      msg.textContent = `✅ Внешний S3 подключен как папка /${res.name} — теперь ее можно выбирать при создании клиента!`;
+      msg.classList.remove("hidden");
+    } catch (err) {
+      msg.className = "msg b-err";
+      msg.textContent = "❌ " + err.message;
+      msg.classList.remove("hidden");
+    }
+  };
 
   async function saveSettings(syncAfter) {
     await api("/api/v1/config", {

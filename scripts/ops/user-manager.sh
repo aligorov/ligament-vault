@@ -74,8 +74,8 @@ cmd_add() {
         log_error "Некорректное имя пользователя '${uname}' (разрешены a-zA-Z0-9._-)"
         exit 1
     fi
-    if [[ "${profile}" != "dual" && "${profile}" != "work-only" && "${profile}" != "worm-only" ]]; then
-        log_error "--profile должен быть dual, work-only или worm-only"
+    if [[ "${profile}" != "dual" && "${profile}" != "work-only" && "${profile}" != "worm-only" && "${profile}" != ext:* ]]; then
+        log_error "--profile должен быть dual, work-only, worm-only или ext:<имя_папки>"
         exit 1
     fi
 
@@ -139,6 +139,10 @@ if profile in ("dual", "worm-only"):
     vfolders.append({"name": "sftp-worm", "virtual_path": "/worm"})
     # Defense-in-depth: даже на уровне SFTPGo запрещены delete, rename и overwrite в /worm!
     perms["/worm"] = ["list", "upload", "download", "create_dirs"]
+if profile.startswith("ext:"):
+    ext_name = profile.split(":", 1)[1]
+    vfolders.append({"name": ext_name, "virtual_path": f"/{ext_name}"})
+    perms[f"/{ext_name}"] = ["*"]
 
 filters = {}
 if allow_ips:
@@ -301,12 +305,97 @@ REMOTE_MUT
     fi
 }
 
+cmd_add_s3_folder() {
+    local fname="" endpoint="" bucket="" region="us-east-1" ak="" sk="" path_style="true"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --name)       fname="$2"; shift 2 ;;
+            --endpoint)   endpoint="$2"; shift 2 ;;
+            --bucket)     bucket="$2"; shift 2 ;;
+            --region)     region="$2"; shift 2 ;;
+            --access-key) ak="$2"; shift 2 ;;
+            --secret-key) sk="$2"; shift 2 ;;
+            --path-style) path_style="$2"; shift 2 ;;
+            *)            log_error "Неизвестный флаг add-s3-folder: $1"; exit 1 ;;
+        esac
+    done
+    [[ -n "${fname}" && -n "${endpoint}" && -n "${bucket}" && -n "${ak}" && -n "${sk}" ]] || {
+        log_error "Укажите --name, --endpoint, --bucket, --access-key и --secret-key"
+        exit 1
+    }
+    local active_ip
+    active_ip=$(resolve_current_active_ip)
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        log_info "[DRY-RUN] Подключение внешнего S3 бакета '${bucket}' (${endpoint}) как папки '${fname}'"
+        return 0
+    fi
+    remote_exec_stdin "${active_ip}" \
+        "${SFTPGO_ADMIN_USERNAME:-admin}" "${SFTPGO_ADMIN_PASSWORD}" \
+        "${fname}" "${endpoint}" "${bucket}" "${region}" "${ak}" "${sk}" "${path_style}" <<'REMOTE_EXT_S3'
+set -euo pipefail
+ADMIN_U="$1"; ADMIN_P="$2"; FNAME="$3"; ENDPOINT="$4"; BUCKET="$5"; REGION="$6"; AK="$7"; SK="$8"; PSTYLE="$9"
+python3 - "${ADMIN_U}" "${ADMIN_P}" "${FNAME}" "${ENDPOINT}" "${BUCKET}" "${REGION}" "${AK}" "${SK}" "${PSTYLE}" <<'PYEOF'
+import base64, json, sys, urllib.error, urllib.request
+u, p, fname, endpoint, bucket, region, ak, sk, pstyle = sys.argv[1:]
+base = "http://127.0.0.1:8081/api/v2"
+b64 = base64.b64encode(f"{u}:{p}".encode()).decode()
+tok = json.loads(urllib.request.urlopen(urllib.request.Request(f"{base}/token", headers={"Authorization": f"Basic {b64}"}), timeout=10).read().decode())["access_token"]
+hdr = {"Authorization": f"Bearer {tok}", "Content-Type": "application/json"}
+payload = {
+    "name": fname,
+    "description": f"External S3: {endpoint}/{bucket}",
+    "filesystem": {
+        "provider": 1,
+        "s3config": {
+            "bucket": bucket,
+            "region": region or "us-east-1",
+            "endpoint": endpoint,
+            "access_key": ak,
+            "access_secret": {"status": "Plain", "payload": sk},
+            "force_path_style": (pstyle.lower() == "true"),
+        },
+    },
+}
+try:
+    urllib.request.urlopen(urllib.request.Request(f"{base}/folders/{fname}", headers=hdr), timeout=10).read()
+    urllib.request.urlopen(urllib.request.Request(f"{base}/folders/{fname}", data=json.dumps(payload).encode(), headers=hdr, method="PUT"), timeout=15).read()
+except urllib.error.HTTPError:
+    urllib.request.urlopen(urllib.request.Request(f"{base}/folders", data=json.dumps(payload).encode(), headers=hdr, method="POST"), timeout=15).read()
+print(f"External S3 folder '{fname}' -> {endpoint}/{bucket} ready")
+PYEOF
+REMOTE_EXT_S3
+    log_info "✅ Внешний S3 бакет '${bucket}' подключен как виртуальная папка '${fname}'"
+}
+
+cmd_list_folders() {
+    local active_ip
+    active_ip=$(resolve_current_active_ip)
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        echo "[]"
+        return 0
+    fi
+    remote_exec_stdin "${active_ip}" "${SFTPGO_ADMIN_USERNAME:-admin}" "${SFTPGO_ADMIN_PASSWORD}" <<'REMOTE_FLIST'
+set -euo pipefail
+python3 - "$1" "$2" <<'PYEOF'
+import base64, json, sys, urllib.request
+u, p = sys.argv[1:]
+base = "http://127.0.0.1:8081/api/v2"
+b64 = base64.b64encode(f"{u}:{p}".encode()).decode()
+tok = json.loads(urllib.request.urlopen(urllib.request.Request(f"{base}/token", headers={"Authorization": f"Basic {b64}"}), timeout=10).read().decode())["access_token"]
+folders = json.loads(urllib.request.urlopen(urllib.request.Request(f"{base}/folders?limit=200", headers={"Authorization": f"Bearer {tok}"}), timeout=10).read().decode())
+print(json.dumps([{"name": f.get("name"), "description": f.get("description", "")} for f in folders]))
+PYEOF
+REMOTE_FLIST
+}
+
 main() {
     local sub="${1:-}"
     shift || true
     case "${sub}" in
-        add)        cmd_add "$@" ;;
-        list)       cmd_list "$@" ;;
+        add)           cmd_add "$@" ;;
+        list)          cmd_list "$@" ;;
+        add-s3-folder) cmd_add_s3_folder "$@" ;;
+        list-folders)  cmd_list_folders ;;
         inspect|disable|enable|set-quota|rotate-key|disconnect)
             cmd_mutate_simple "${sub}" "$@"
             ;;

@@ -441,6 +441,31 @@ class PanelHandler(BaseHTTPRequestHandler):
             )
             return
 
+        if path == "/api/v1/storage/s3-folder":
+            if not os.path.exists(os.path.join(CONFIG_ROOT, ".cluster_installed")):
+                self.send_json(400, {"error": "Сначала завершите установку кластера во вкладке «Установка и Масштаб»"})
+                return
+            fname = str(body.get("name", "")).strip()
+            endpoint = str(body.get("endpoint", "")).strip()
+            bucket = str(body.get("bucket", "")).strip()
+            region = str(body.get("region", "us-east-1")).strip() or "us-east-1"
+            ak = str(body.get("access_key", "")).strip()
+            sk = str(body.get("secret_key", "")).strip()
+            if not re.match(r"^[a-zA-Z0-9_-]+$", fname) or not endpoint or not bucket or not ak or not sk:
+                self.send_json(400, {"error": "Заполните имя папки (латиница), Endpoint, Bucket, Access Key и Secret Key"})
+                return
+            cmd = [
+                os.path.join(REPO_DIR, "ligactl"), "user", "add-s3-folder",
+                "--name", fname, "--endpoint", endpoint, "--bucket", bucket,
+                "--region", region, "--access-key", ak, "--secret-key", sk,
+            ]
+            res = subprocess.run(cmd, cwd=REPO_DIR, env={**os.environ, "CONFIG_ROOT": CONFIG_ROOT}, capture_output=True, text=True, timeout=25)
+            if res.returncode != 0:
+                self.send_json(400, {"error": (res.stderr.strip() or res.stdout.strip() or "Ошибка подключения S3").splitlines()[-1]})
+                return
+            self.send_json(200, {"ok": True, "name": fname})
+            return
+
         if path == "/api/v1/users":
             installed = os.path.exists(os.path.join(CONFIG_ROOT, ".cluster_installed"))
             if not installed:
@@ -461,7 +486,19 @@ class PanelHandler(BaseHTTPRequestHandler):
                 users = json.loads(res.stdout)
             except Exception:
                 users = []
-            self.send_json(200, {"users": users, "installed": True})
+            f_res = subprocess.run(
+                [os.path.join(REPO_DIR, "ligactl"), "user", "list-folders"],
+                cwd=REPO_DIR,
+                env={**os.environ, "CONFIG_ROOT": CONFIG_ROOT},
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            try:
+                folders = json.loads(f_res.stdout) if f_res.returncode == 0 else []
+            except Exception:
+                folders = []
+            self.send_json(200, {"users": users, "folders": folders, "installed": True})
             return
 
         if path == "/api/v1/tasks":
@@ -614,6 +651,31 @@ class PanelHandler(BaseHTTPRequestHandler):
             if s_updates:
                 update_secrets(s_updates)
             self.send_json(200, {"ok": True})
+            return
+
+        if path == "/api/v1/storage/s3-folder":
+            if not os.path.exists(os.path.join(CONFIG_ROOT, ".cluster_installed")):
+                self.send_json(400, {"error": "Сначала завершите установку кластера во вкладке «Установка и Масштаб»"})
+                return
+            fname = str(body.get("name", "")).strip()
+            endpoint = str(body.get("endpoint", "")).strip()
+            bucket = str(body.get("bucket", "")).strip()
+            region = str(body.get("region", "us-east-1")).strip() or "us-east-1"
+            ak = str(body.get("access_key", "")).strip()
+            sk = str(body.get("secret_key", "")).strip()
+            if not re.match(r"^[a-zA-Z0-9_-]+$", fname) or not endpoint or not bucket or not ak or not sk:
+                self.send_json(400, {"error": "Заполните имя папки (латиница), Endpoint, Bucket, Access Key и Secret Key"})
+                return
+            cmd = [
+                os.path.join(REPO_DIR, "ligactl"), "user", "add-s3-folder",
+                "--name", fname, "--endpoint", endpoint, "--bucket", bucket,
+                "--region", region, "--access-key", ak, "--secret-key", sk,
+            ]
+            res = subprocess.run(cmd, cwd=REPO_DIR, env={**os.environ, "CONFIG_ROOT": CONFIG_ROOT}, capture_output=True, text=True, timeout=25)
+            if res.returncode != 0:
+                self.send_json(400, {"error": (res.stderr.strip() or res.stdout.strip() or "Ошибка подключения S3").splitlines()[-1]})
+                return
+            self.send_json(200, {"ok": True, "name": fname})
             return
 
         if path == "/api/v1/users":
