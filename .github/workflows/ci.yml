@@ -154,9 +154,9 @@ jobs:
           ssh-keygen -t ed25519 -f "${WORKDIR}/repo/ssh-host-keys/id_ed25519" -N "" >/dev/null
           ssh-keygen -t ecdsa -b 256 -f "${WORKDIR}/repo/ssh-host-keys/id_ecdsa" -N "" >/dev/null
           ssh-keygen -t rsa -b 2048 -f "${WORKDIR}/repo/ssh-host-keys/id_rsa" -N "" >/dev/null
-          sudo chown 1000:1000 "${WORKDIR}/repo"/ssh-host-keys/id_*
           chmod 600 "${WORKDIR}/repo"/ssh-host-keys/id_*
           chmod 644 "${WORKDIR}/repo"/ssh-host-keys/*.pub
+          sudo chown 1000:1000 "${WORKDIR}/repo"/ssh-host-keys/id_*
 
           render_node_configs "${HOST_IP}" "dc1" "node1" "1" "new"
           RDIR="${WORKDIR}/repo/.rendered/node1"
