@@ -147,12 +147,20 @@ while [[ ! -d "$t" && "$t" != "/" ]]; do t="$(dirname "$t")"; done
 avail_kb=$(df -Pk "$t" 2>/dev/null | awk 'NR==2 {print $4}')
 avail_gb=$(( ${avail_kb:-0} / 1048576 ))
 
-# Если свободно < 2 ГБ — глубокая безопасная очистка кэша apt/docker/логов и расширение раздела!
+# Если свободно < 2 ГБ — глубокая безопасная очистка кэша apt/docker/go/pip/старых ядер и расширение раздела!
 if (( avail_gb < 2 )); then
     export DEBIAN_FRONTEND=noninteractive
+    rm -rf /root/.cache/go-build /root/.cache/pip /root/.cache/npm /root/.cache/uv /root/.cache/yarn \
+           /var/lib/apt/lists/* /var/log/*.gz /var/log/*.[0-9] /tmp/* >/dev/null 2>&1 || true
+    # Удаляем старые неиспользуемые linux-headers / linux-image (кроме текущего ядра uname -r!)
+    CUR_KVER=$(uname -r | sed 's/-generic//')
+    OLD_PKGS=$(dpkg -l 'linux-headers-[0-9]*' 'linux-modules-extra-[0-9]*' 'linux-image-[0-9]*' 2>/dev/null | awk '/^ii/{print $2}' | grep -vF "${CUR_KVER}" || true)
+    if [[ -n "${OLD_PKGS}" ]]; then
+        # shellcheck disable=SC2086
+        apt-get purge -y -qq ${OLD_PKGS} >/dev/null 2>&1 || true
+    fi
     apt-get autoremove --purge -y -qq >/dev/null 2>&1 || true
     apt-get clean >/dev/null 2>&1 || true
-    rm -rf /var/lib/apt/lists/* /var/log/*.gz /var/log/*.[0-9] /tmp/* >/dev/null 2>&1 || true
     journalctl --vacuum-size=20M >/dev/null 2>&1 || true
     docker builder prune -af >/dev/null 2>&1 || true
     docker image prune -f >/dev/null 2>&1 || true
@@ -166,6 +174,14 @@ if (( avail_gb < 2 )); then
         fi
     fi
     avail_kb=$(df -Pk "$t" 2>/dev/null | awk 'NR==2 {print $4}')
+    # Если всё ещё < 1.4 ГБ и есть большой /swapfile >= 900MB — аккуратно ужимаем swapfile до 384MB (+640MB места!)
+    if (( ${avail_kb:-0} < 1433600 )) && [[ -f /swapfile ]]; then
+        swap_sz=$(stat -c '%s' /swapfile 2>/dev/null || echo 0)
+        if (( swap_sz >= 900000000 )); then
+            swapoff /swapfile 2>/dev/null && rm -f /swapfile && fallocate -l 384M /swapfile && chmod 600 /swapfile && mkswap /swapfile >/dev/null 2>&1 && swapon /swapfile 2>/dev/null || true
+            avail_kb=$(df -Pk "$t" 2>/dev/null | awk 'NR==2 {print $4}')
+        fi
+    fi
     avail_gb=$(( ${avail_kb:-0} / 1048576 ))
 fi
 avail_mb=$(( ${avail_kb:-0} / 1024 ))
@@ -179,10 +195,10 @@ REMOTE_DF
     [[ -z "${avail_mb}" ]] && avail_mb=0
     local avail_gb=$(( avail_mb / 1024 ))
 
-    if (( avail_mb < 1500 )); then
-        log_error "  ❌ Критически мало места на ${name} (${ip}): свободно всего ${avail_mb}MB (< 1.5GB) [${summary}]"
-        log_error "     Топ-8 самых тяжелых папок на ${name} (удалите лишнее или расширьте диск VPS):"
-        remote_exec "${ip}" "du -xhd1 / 2>/dev/null | sort -hr | head -n 8; swapon --show 2>/dev/null || true" || true
+    if (( avail_mb < 850 )); then
+        log_error "  ❌ Критически мало места на ${name} (${ip}): свободно всего ${avail_mb}MB (< 850MB) [${summary}]"
+        log_error "     Содержимое /root и топ папок на ${name}:"
+        remote_exec "${ip}" "du -xhd1 / /root 2>/dev/null | sort -hr | head -n 12" || true
         PREFLIGHT_PASS=false
     elif (( avail_gb < 15 )); then
         log_warn "  ⚠️  Компактный диск на ${name}: свободно ${avail_mb}MB [${summary}] — для запуска стека достаточно"

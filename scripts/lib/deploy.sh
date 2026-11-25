@@ -843,9 +843,14 @@ build_patroni_image_on_node() {
         fi
         if [[ '${PATRONI_PG_IMAGE}' != local/* ]] && docker pull -q '${target_ref}' >/dev/null 2>&1; then
             echo 'Pulled ${target_ref} from registry'
+        elif docker pull -q 'ghcr.io/aligorov/ligament_vault_patroni:16' >/dev/null 2>&1; then
+            docker tag 'ghcr.io/aligorov/ligament_vault_patroni:16' '${PATRONI_PG_IMAGE}'
+            echo 'Pulled ghcr.io/aligorov/ligament_vault_patroni:16'
         else
             echo 'Registry pull unavailable — building ${PATRONI_PG_IMAGE} locally from Dockerfile.patroni...'
-            cd '${REMOTE_BASE_DIR}/build-patroni' && docker build -q -t '${PATRONI_PG_IMAGE}' -f Dockerfile.patroni .
+            cd '${REMOTE_BASE_DIR}/build-patroni' && docker build --no-cache -q -t '${PATRONI_PG_IMAGE}' -f Dockerfile.patroni .
+            docker builder prune -af >/dev/null 2>&1 || true
+            docker image prune -f >/dev/null 2>&1 || true
         fi
     "
 }
