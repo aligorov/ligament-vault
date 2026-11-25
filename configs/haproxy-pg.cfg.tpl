@@ -26,7 +26,8 @@ frontend pg_primary_frontend
 
 # --- Бэкенд: все ноды Patroni (генерируются динамически из CLUSTER_NODES) ---
 backend pg_primary_backend
-    option httpchk GET /primary
+    option httpchk
+    http-check send meth GET uri /primary ver HTTP/1.1 hdr Host patroni
     http-check expect status 200
     default-server inter 3s fall 3 rise 2 maxconn 128 on-marked-down shutdown-sessions
 

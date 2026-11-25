@@ -204,8 +204,19 @@ jobs:
           docker exec "$(docker ps -qf name=patroni)" patronictl list
 
           docker compose up -d haproxy
-          sleep 3
-          nc -z 127.0.0.1 5433
+          HAPROXY_OK=false
+          for _ in $(seq 1 15); do
+              if nc -z 127.0.0.1 5433 2>/dev/null; then
+                  HAPROXY_OK=true
+                  break
+              fi
+              sleep 1
+          done
+          if [[ "${HAPROXY_OK}" != "true" ]]; then
+              docker compose ps -a || true
+              docker compose logs haproxy || true
+              exit 1
+          fi
 
           docker exec -i -e "SFTPGO_PW=${SFTPGO_DB_PASSWORD}" -e "SWFS_PW=${SWFS_FILER_DB_PASSWORD}" "$(docker ps -qf name=patroni)" python3 - <<'PYEOF'
           import os, psycopg2
@@ -225,27 +236,46 @@ jobs:
           PYEOF
 
           docker compose up -d swfs-master swfs-volume
+          MASTER_OK=false
           for _ in $(seq 1 30); do
               if curl -sf http://127.0.0.1:9333/cluster/status | jq -e '.Leader != ""' >/dev/null 2>&1; then
+                  MASTER_OK=true
                   break
               fi
               sleep 2
           done
+          if [[ "${MASTER_OK}" != "true" ]]; then
+              docker compose logs swfs-master swfs-volume || true
+              exit 1
+          fi
           docker compose up -d swfs-filer swfs-s3
+          S3_OK=false
           for _ in $(seq 1 30); do
               if nc -z 127.0.0.1 8333 >/dev/null 2>&1; then
+                  S3_OK=true
                   break
               fi
               sleep 2
           done
+          if [[ "${S3_OK}" != "true" ]]; then
+              docker compose ps -a || true
+              docker compose logs swfs-filer swfs-s3 || true
+              exit 1
+          fi
 
           docker compose run --rm --no-deps sftpgo initprovider --config-file /etc/sftpgo/sftpgo.json
           docker compose up -d sftpgo
+          SFTP_OK=false
           for _ in $(seq 1 25); do
               if docker exec "$(docker ps -qf name=sftpgo)" sftpgo ping --config-file /etc/sftpgo/sftpgo.json >/dev/null 2>&1; then
+                  SFTP_OK=true
                   break
               fi
               sleep 2
           done
+          if [[ "${SFTP_OK}" != "true" ]]; then
+              docker compose logs sftpgo || true
+              exit 1
+          fi
           docker exec "$(docker ps -qf name=sftpgo)" sftpgo ping --config-file /etc/sftpgo/sftpgo.json
           echo "LIVE_STACK_SMOKE_OK"
