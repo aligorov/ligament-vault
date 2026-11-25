@@ -62,7 +62,7 @@ ensure_fallback_or_distribute_ssl
 
 # --- 2. Однократный sftpgo initprovider ДО старта SFTPGo ---
 log_step "2/7 — SFTPGo initprovider (update_mode=1, однократно на Node 1)"
-remote_exec "${NODE1_IP}" "cd '${REMOTE_BASE_DIR}' && docker compose run --rm --no-deps sftpgo initprovider --config-file /etc/sftpgo/sftpgo.json"
+remote_exec "${NODE1_IP}" "cd '${REMOTE_BASE_DIR}' && docker compose run --rm --no-deps sftpgo sftpgo initprovider --config-file /etc/sftpgo/sftpgo.json"
 log_info "  ✅ Схема SFTPGo в PostgreSQL инициализирована"
 
 # --- 3. Запуск SFTPGo и node-exporter ---

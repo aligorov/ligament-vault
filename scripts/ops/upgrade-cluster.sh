@@ -268,7 +268,7 @@ upgrade_sftpgo() {
     done
 
     log_info "Запуск sftpgo initprovider (update_mode=1) на обновленном Standby (${standby_ip})..."
-    remote_exec "${standby_ip}" "cd '${REMOTE_BASE_DIR}' && docker compose run --rm --no-deps sftpgo initprovider --config-file /etc/sftpgo/sftpgo.json"
+    remote_exec "${standby_ip}" "cd '${REMOTE_BASE_DIR}' && docker compose run --rm --no-deps sftpgo sftpgo initprovider --config-file /etc/sftpgo/sftpgo.json"
     log_info "Рестарт Standby SFTPGo для сброса 10-минутного кэша до DNS cutover..."
     remote_exec "${standby_ip}" "cd '${REMOTE_BASE_DIR}' && docker compose restart sftpgo"
 
