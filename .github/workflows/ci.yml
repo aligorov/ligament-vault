@@ -272,9 +272,9 @@ jobs:
               exit 1
           fi
 
-          docker exec -i "$(docker ps -qf name=swfs-filer)" weed shell -master=127.0.0.1:9333 <<< 'cluster.status'
+          docker exec -i "$(docker ps -qf name=swfs-filer)" weed shell -master=127.0.0.1:9333 <<< 'fs.ls /'
 
-          python3 - <<'PYEOF'
+          sudo python3 - <<'PYEOF'
           import datetime, glob, hashlib, hmac, json, os, urllib.error, urllib.request
 
           s3_files = glob.glob("**/s3.json", recursive=True)
