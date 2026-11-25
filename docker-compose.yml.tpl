@@ -237,9 +237,9 @@ ${SWFS_VOLUME_MOUNTS}
       -port.grpc=${SWFS_ADMIN_GRPC_PORT}
       -master=${SWFS_MASTER_PEERS}
       -adminPassword=${SWFS_ADMIN_PASSWORD}
-      -dataDir=/admin-data
+      -dataDir=/data
     volumes:
-      - swfs-admin-data:/admin-data
+      - swfs-admin-data:/data
       - ./configs/seaweedfs:/etc/seaweedfs:ro
       - ./certs/${NODE_NAME}:/certs:ro
     healthcheck:
@@ -259,11 +259,11 @@ ${SWFS_VOLUME_MOUNTS}
     command: >-
       worker
       -admin=${SWFS_ADMIN_IP}:${SWFS_ADMIN_PORT}
-      -capabilities=vacuum,ec,remote,replication,balance
-      -workingDir=/worker-data
+      -capabilities=vacuum,ec,balance
+      -workingDir=/data
       -maxConcurrent=2
     volumes:
-      - swfs-worker-data:/worker-data
+      - swfs-worker-data:/data
       - ./configs/seaweedfs:/etc/seaweedfs:ro
       - ./certs/${NODE_NAME}:/certs:ro
     depends_on:
@@ -282,7 +282,6 @@ ${SWFS_VOLUME_MOUNTS}
     command: >-
       filer.backup
       -filer=127.0.0.1:${SWFS_FILER_PORT}
-      -config=/etc/seaweedfs/replication.toml
     volumes:
       - ./configs/seaweedfs:/etc/seaweedfs:ro
       - ./certs/${NODE_NAME}:/certs:ro
