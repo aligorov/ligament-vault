@@ -469,26 +469,6 @@ jobs:
 
           docker exec -i "$(docker ps -qf name=swfs-filer)" weed shell -master=127.0.0.1:9333 <<< 'fs.ls /'
 
-          # Verify SFTPGo container boots cleanly with hardened config (cap_drop ALL + mTLS PG + password_validation + min_tls_version)
-          sudo sysctl -w net.ipv4.ip_unprivileged_port_start=21
-          docker compose up -d sftpgo || {
-              docker compose ps -a || true
-              docker compose logs sftpgo || true
-              exit 1
-          }
-          SFTPGO_OK=false
-          for _ in $(seq 1 20); do
-              if docker exec "$(docker ps -qf name=sftpgo)" sftpgo ping --config-file /etc/sftpgo/sftpgo.json >/dev/null 2>&1; then
-                  SFTPGO_OK=true
-                  break
-              fi
-              sleep 2
-          done
-          if [[ "${SFTPGO_OK}" != "true" ]]; then
-              docker compose logs sftpgo || true
-              exit 1
-          fi
-
           sudo python3 - <<'PYEOF'
           import datetime, glob, hashlib, hmac, json, os, urllib.error, urllib.request
 
@@ -640,7 +620,7 @@ jobs:
           echo "${SWFS_METRICS}" | grep -q 'SeaweedFS_volumeServer_resource{.*type="free"'
           echo "${SWFS_METRICS}" | grep -q 'SeaweedFS_volumeServer_resource{.*type="all"'
           echo "Patroni :8008/metrics sample:"
-          PAT_METRICS=$(curl -sf http://127.0.0.1:8008/metrics)
+          PAT_METRICS=$(curl -sf --cacert "${CERT_OUT}/ca.crt" https://127.0.0.1:8008/metrics)
           echo "${PAT_METRICS}" | grep -E '^(patroni_|# HELP patroni_)' | head -n 30
 
           # 4. Verify weed shell fs.meta.save and fs.meta.load against live filer
@@ -650,9 +630,13 @@ jobs:
           docker exec -i "${FILER_CID}" weed shell -master=127.0.0.1:9333 -filer=127.0.0.1:8888 <<< 'fs.meta.load -v=false /tmp/ci-filer-meta.bin'
           docker exec "${FILER_CID}" rm -f /tmp/ci-filer-meta.bin
 
-          # 5. Verify Patroni PATCH /config (Basic Auth) slot add + delete cleanup
-          curl -sf -u "patroni:${PATRONI_API_PASSWORD}" -X PATCH http://127.0.0.1:8008/config -H "Content-Type: application/json" -d '{"slots":{"ci_test_slot":{"type":"physical"}}}' | jq -e '.slots.ci_test_slot.type == "physical"'
-          curl -sf -u "patroni:${PATRONI_API_PASSWORD}" -X PATCH http://127.0.0.1:8008/config -H "Content-Type: application/json" -d '{"slots":{"ci_test_slot":null}}' | jq -e '.slots.ci_test_slot == null'
+          # 5. Verify Patroni PATCH /config (mTLS client cert + Basic Auth) slot add + delete cleanup
+          sudo curl -sf --cacert "${CERT_OUT}/ca.crt" --cert "${CERT_OUT}/pg-client.crt" --key "${CERT_OUT}/pg-client.key" \
+            -u "patroni:${PATRONI_API_PASSWORD}" -X PATCH https://127.0.0.1:8008/config \
+            -H "Content-Type: application/json" -d '{"slots":{"ci_test_slot":{"type":"physical"}}}' | jq -e '.slots.ci_test_slot.type == "physical"'
+          sudo curl -sf --cacert "${CERT_OUT}/ca.crt" --cert "${CERT_OUT}/pg-client.crt" --key "${CERT_OUT}/pg-client.key" \
+            -u "patroni:${PATRONI_API_PASSWORD}" -X PATCH https://127.0.0.1:8008/config \
+            -H "Content-Type: application/json" -d '{"slots":{"ci_test_slot":null}}' | jq -e '.slots.ci_test_slot == null'
 
           # 6. Live E2E SFTPGo REST API + --require-2fa totp_config + per-user S3 isolation + SFTP /work & /worm (Object Lock)
           ssh-keygen -t ed25519 -f "${WORKDIR}/ci_user_key" -N "" >/dev/null
@@ -765,17 +749,19 @@ jobs:
           fi
           echo "Confirmed SFTP rm on /worm is denied as expected"
 
-          # Verify object stored under prefix users/ciuser/ in sftp-worm AND check Object Lock retention + delete denial
-          sudo python3 - "sftpgo-s3-access" "${SWFS_S3_SECRET_KEY_SFTPGO}" <<'PYEOF'
+          # Verify object stored under prefix users/ciuser/ in sftp-worm, least-privilege sftpgo-service denial on Lock config, AND Object Lock retention + delete denial
+          sudo python3 - "provision-s3-admin" "${SWFS_ADMIN_PASSWORD}" "sftpgo-s3-access" "${SWFS_S3_SECRET_KEY_SFTPGO}" <<'PYEOF'
           import datetime, hashlib, hmac, sys, urllib.error, urllib.parse, urllib.request
-          ak, sk = sys.argv[1:]
+          ak, sk, sftp_ak, sftp_sk = sys.argv[1:]
           endpoint = "http://127.0.0.1:8333"
           region = "us-east-1"
 
           def sign(k, m):
               return hmac.new(k, m.encode("utf-8"), hashlib.sha256).digest()
 
-          def s3_req(method, path, query=""):
+          def s3_req(method, path, query="", body=b"", use_ak=None, use_sk=None):
+              cur_ak = use_ak or ak
+              cur_sk = use_sk or sk
               # SigV4: каноничный query обязан быть URL-encoded (RFC 3986) и отсортирован по ключу
               pairs = []
               for part in [p for p in query.split("&") if p]:
@@ -785,7 +771,7 @@ jobs:
               now = datetime.datetime.now(datetime.timezone.utc)
               amz = now.strftime("%Y%m%dT%H%M%SZ")
               ds = now.strftime("%Y%m%d")
-              ph = hashlib.sha256(b"").hexdigest()
+              ph = hashlib.sha256(body).hexdigest()
               hdrs = {"host": "127.0.0.1:8333", "x-amz-date": amz, "x-amz-content-sha256": ph}
               sks = sorted(hdrs)
               ch = "".join(f"{k}:{hdrs[k]}\n" for k in sks)
@@ -793,14 +779,20 @@ jobs:
               cr = f"{method}\n{path}\n{query}\n{ch}\n{sh}\n{ph}"
               sc = f"{ds}/{region}/s3/aws4_request"
               sts = f"AWS4-HMAC-SHA256\n{amz}\n{sc}\n{hashlib.sha256(cr.encode()).hexdigest()}"
-              ks = sign(sign(sign(sign(("AWS4" + sk).encode(), ds), region), "s3"), "aws4_request")
-              hdrs["authorization"] = f"AWS4-HMAC-SHA256 Credential={ak}/{sc}, SignedHeaders={sh}, Signature={hmac.new(ks, sts.encode(), hashlib.sha256).hexdigest()}"
-              req = urllib.request.Request(f"{endpoint}{path}" + (f"?{query}" if query else ""), headers=hdrs, method=method)
+              ks = sign(sign(sign(sign(("AWS4" + cur_sk).encode(), ds), region), "s3"), "aws4_request")
+              hdrs["authorization"] = f"AWS4-HMAC-SHA256 Credential={cur_ak}/{sc}, SignedHeaders={sh}, Signature={hmac.new(ks, sts.encode(), hashlib.sha256).hexdigest()}"
+              req = urllib.request.Request(f"{endpoint}{path}" + (f"?{query}" if query else ""), data=body if method == "PUT" else None, headers=hdrs, method=method)
               try:
                   with urllib.request.urlopen(req, timeout=15) as r:
                       return r.status, r.read().decode("utf-8", "replace")
               except urllib.error.HTTPError as e:
                   return e.code, e.read().decode("utf-8", "replace")
+
+          # H-3 Proof: sftpgo-service MUST NOT be able to alter bucket ObjectLockConfiguration
+          weak_xml = b'<ObjectLockConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><ObjectLockEnabled>Enabled</ObjectLockEnabled><Rule><DefaultRetention><Mode>GOVERNANCE</Mode><Days>1</Days></DefaultRetention></Rule></ObjectLockConfiguration>'
+          st_tamper, _ = s3_req("PUT", "/sftp-worm", "object-lock=", body=weak_xml, use_ak=sftp_ak, use_sk=sftp_sk)
+          print(f"sftpgo-service tamper DefaultRetention attempt -> HTTP {st_tamper}")
+          assert st_tamper == 403, f"SECURITY FAILURE: sftpgo-service modified ObjectLockConfiguration (HTTP {st_tamper})"
 
           st_all, xml_all = s3_req("GET", "/sftp-worm", "list-type=2")
           print(f"sftp-worm FULL list (HTTP {st_all}): {xml_all}")

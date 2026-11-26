@@ -47,7 +47,7 @@ fail() { log_error "  ❌ FAIL: $1"; FAIL_COUNT=$((FAIL_COUNT + 1)); }
 
 # --- 1. S3 & WORM SigV4 Spike ---
 log_step "1/3 — S3 & WORM SigV4 Spike (127.0.0.1:${S3_PORT})"
-if remote_exec_env_stdin "${TEST_NODE_IP}" "SWFS_S3_SECRET_KEY_SFTPGO" "${S3_PORT}" "sftpgo-s3-access" <<'REMOTE_SPIKE'
+if remote_exec_env_stdin "${TEST_NODE_IP}" "SWFS_ADMIN_PASSWORD,SWFS_S3_SECRET_KEY_SFTPGO" "${S3_PORT}" "provision-s3-admin" <<'REMOTE_SPIKE'
 set -euo pipefail
 S3_PORT="$1"; ACCESS_KEY="$2"
 
@@ -55,7 +55,7 @@ python3 - "${S3_PORT}" "${ACCESS_KEY}" <<'PYEOF'
 import datetime, hashlib, hmac, os, sys, urllib.error, urllib.request
 
 port, ak = sys.argv[1], sys.argv[2]
-sk = os.environ["SWFS_S3_SECRET_KEY_SFTPGO"]
+sk = os.environ["SWFS_ADMIN_PASSWORD"]
 endpoint = f"http://127.0.0.1:{port}"
 region = "us-east-1"
 
@@ -139,10 +139,10 @@ fi
 # --- 2. E2E SFTP -> SFTPGo -> SeaweedFS (work & worm) ---
 log_step "2/3 — E2E SFTP -> SFTPGo -> SeaweedFS (/work и /worm)"
 sftpgo_provision_s3_folders "${TEST_NODE_IP}" || true
-if remote_exec_env_stdin "${TEST_NODE_IP}" "SFTPGO_ADMIN_PASSWORD,SWFS_S3_SECRET_KEY_SFTPGO" "${SFTPGO_ADMIN_USERNAME:-admin}" "${SFTP_PORT:-2022}" "${S3_PORT}" "sftpgo-s3-access" <<'REMOTE_SFTP_E2E'
+if remote_exec_env_stdin "${TEST_NODE_IP}" "SFTPGO_ADMIN_PASSWORD,SWFS_ADMIN_PASSWORD" "${SFTPGO_ADMIN_USERNAME:-admin}" "${SFTP_PORT:-2022}" "${S3_PORT}" "provision-s3-admin" <<'REMOTE_SFTP_E2E'
 set -euo pipefail
 ADMIN_U="$1"; SFTP_PORT="$2"; S3_PORT="$3"; S3_AK="$4"
-ADMIN_P="${SFTPGO_ADMIN_PASSWORD}"; S3_SK="${SWFS_S3_SECRET_KEY_SFTPGO}"
+ADMIN_P="${SFTPGO_ADMIN_PASSWORD}"; S3_SK="${SWFS_ADMIN_PASSWORD}"
 
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "${TMPDIR}"' EXIT

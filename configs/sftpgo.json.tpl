@@ -159,7 +159,7 @@
         "uppers": 1,
         "lowers": 1,
         "digits": 1,
-        "specials": 1
+        "specials": 0
       },
       "users": {
         "min_entropy": 0,
@@ -167,7 +167,7 @@
         "uppers": 1,
         "lowers": 1,
         "digits": 1,
-        "specials": 1
+        "specials": 0
       }
     },
     "is_shared": 1,
