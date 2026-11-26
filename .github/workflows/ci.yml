@@ -202,9 +202,7 @@ jobs:
                   printf ' %s' "$(_shell_quote_posix "${a}")"
                 done
                 printf '\n'
-                cat <<'EOS'
-echo "N=$#|$1|$2|$3|$4"
-EOS
+                printf '%s\n' 'echo "N=$#|$1|$2|$3|$4"'
               } | bash -s
             )
             test "${out_args}" = "N=4||194.28.224.231 191.40.5.178 95.183.8.45| -L 127.0.0.1:30201:10.0.0.2:2379|it's \$RAW"
