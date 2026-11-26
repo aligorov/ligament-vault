@@ -648,10 +648,10 @@ fi
 
 # Гарантируем приоритетный /32 допуск кластерных портов выше любых f2b-*/кастомных цепочек в INPUT
 PEER_FAST_PORTS="${ADMIN_SSH_PORT},${ETCD_C},${ETCD_P},${PG_PORT},${PATRONI_PORT},${SWFS_M},${SWFS_MG},${SWFS_V},${SWFS_VG},${SWFS_F},${SWFS_FG},${SWFS_A},${SWFS_AG}"
-iptables -S INPUT 2>/dev/null | grep "${SLUG}:peer-fast:" | sed 's/^-A /-D /' | while read -r r; do
+iptables -S INPUT 2>/dev/null | { grep "${SLUG}:peer-fast:" || true; } | sed 's/^-A /-D /' | while read -r r; do
     # shellcheck disable=SC2086
     iptables $r 2>/dev/null || true
-done
+done || true
 for PEER_IP in ${PEER_IPS}; do
     iptables -I INPUT 1 -p tcp -s "${PEER_IP}/32" -m multiport --dports "${PEER_FAST_PORTS}" -m comment --comment "${SLUG}:peer-fast:${PEER_IP}" -j ACCEPT 2>/dev/null || true
 done
@@ -717,7 +717,7 @@ if [[ -f /run/ligament-pg-probe.pid ]]; then
     kill "$(cat /run/ligament-pg-probe.pid)" 2>/dev/null || true
     rm -f /run/ligament-pg-probe.pid
 fi
-iptables -S INPUT 2>/dev/null | grep 'ligament-pg-probe' | sed 's/^-A /-D /' | while read -r r; do
+iptables -S INPUT 2>/dev/null | { grep 'ligament-pg-probe' || true; } | sed 's/^-A /-D /' | while read -r r; do
     # shellcheck disable=SC2086
     iptables $r 2>/dev/null || true
 done
@@ -831,7 +831,7 @@ if [[ -f /run/ligament-pg-probe.pid ]]; then
     kill "$(cat /run/ligament-pg-probe.pid)" 2>/dev/null || true
     rm -f /run/ligament-pg-probe.pid
 fi
-iptables -S INPUT 2>/dev/null | grep 'ligament-pg-probe' | sed 's/^-A /-D /' | while read -r r; do
+iptables -S INPUT 2>/dev/null | { grep 'ligament-pg-probe' || true; } | sed 's/^-A /-D /' | while read -r r; do
     # shellcheck disable=SC2086
     iptables $r 2>/dev/null || true
 done
