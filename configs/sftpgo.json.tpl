@@ -131,7 +131,7 @@
     "track_quota": 2,
     "delayed_quota_update": 0,
     "pool_size": 0,
-    "users_base_dir": "",
+    "users_base_dir": "/srv/sftpgo/data",
     "pre_login_hook": "${SFTPGO_PRE_LOGIN_HOOK}",
     "actions": {
       "execute_on": [],

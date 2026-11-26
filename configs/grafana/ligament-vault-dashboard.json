@@ -46,7 +46,7 @@
       "title": "Patroni WAL Replication Lag (Bytes)",
       "type": "timeseries",
       "gridPos": { "h": 6, "w": 8, "x": 8, "y": 4 },
-      "targets": [{ "expr": "max(patroni_xlog_location) - on(instance) group_left() patroni_xlog_received_location", "legendFormat": "{{instance}}", "refId": "A" }]
+      "targets": [{ "expr": "clamp_min(max by (scope) (patroni_xlog_location) - on(scope) group_right() (patroni_xlog_received_location and patroni_replica == 1), 0)", "legendFormat": "{{instance}}", "refId": "A" }]
     },
     {
       "id": 7,

@@ -555,6 +555,7 @@ jobs:
 
           u_payload = {
               "username": "ciuser", "status": 1, "password": "CiUserPass!2026",
+              "home_dir": "/srv/sftpgo/data/ciuser",
               "public_keys": [pubkey.strip()],
               "permissions": {"/": ["list"], "/work": ["*"], "/worm": ["list", "upload", "download", "create_dirs"]},
               "filesystem": {"provider": 0},
@@ -577,6 +578,7 @@ jobs:
           # Verify SFTPGo v2.7 accepts totp_config (--require-2fa)
           u2fa = {
               "username": "ci2fa", "status": 1, "password": "Ci2faPass!2026",
+              "home_dir": "/srv/sftpgo/data/ci2fa",
               "permissions": {"/": ["list"], "/work": ["*"]},
               "filesystem": {"provider": 0},
               "virtual_folders": [{"name": "sftp-work", "virtual_path": "/work", "quota_size": -1, "quota_files": -1}],

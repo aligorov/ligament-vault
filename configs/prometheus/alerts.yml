@@ -26,7 +26,7 @@ groups:
           summary: "Patroni: нет активного Primary-лидера в кластере"
 
       - alert: PatroniReplicaLagHigh
-        expr: (max(patroni_xlog_location) - on(instance) group_left() patroni_xlog_received_location) > 10485760
+        expr: clamp_min(max by (scope) (patroni_xlog_location) - on(scope) group_right() (patroni_xlog_received_location and patroni_replica == 1), 0) > 10485760
         for: 3m
         labels:
           severity: warning
