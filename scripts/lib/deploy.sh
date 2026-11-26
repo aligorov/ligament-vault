@@ -217,16 +217,27 @@ export_node_render_vars() {
     export SWFS_VOLUME_MOUNTS="${vol_mounts}"
     export SWFS_VOLUME_MAX="${SWFS_VOLUME_MAX_OVERRIDE:-${vol_max}}"
 
+    if (( $(get_node_count) >= 3 && ${ETCD_ELECTION_TIMEOUT:-2500} <= 2500 )); then
+        export ETCD_HEARTBEAT_INTERVAL=350
+        export ETCD_ELECTION_TIMEOUT=3500
+    fi
+
     export ETCD_INITIAL_CLUSTER ETCD_HOSTS ETCD_PATRONI_HOSTS ETCD_PATRONI_USE_PROXIES SWFS_MASTER_PEERS PG_HOSTS HAPROXY_PG_SERVERS PATRONI_SLOTS_YAML
     ETCD_INITIAL_CLUSTER=$(build_etcd_cluster_string)
     ETCD_HOSTS=$(build_etcd_hosts)
     if is_quorum_node "${idx}" "${name}"; then
-        ETCD_PATRONI_HOSTS="${ip}:${ETCD_CLIENT_PORT:-2379}"
-        ETCD_PATRONI_USE_PROXIES="true"
+        local self_ep="${ip}:${ETCD_CLIENT_PORT:-2379}"
+        local other_eps
+        other_eps=$(echo "${ETCD_HOSTS}" | tr ',' '\n' | grep -Fxv "${self_ep}" | paste -sd, - || true)
+        if [[ -n "${other_eps}" ]]; then
+            ETCD_PATRONI_HOSTS="${self_ep},${other_eps}"
+        else
+            ETCD_PATRONI_HOSTS="${self_ep}"
+        fi
     else
         ETCD_PATRONI_HOSTS="${ETCD_HOSTS}"
-        ETCD_PATRONI_USE_PROXIES="false"
     fi
+    ETCD_PATRONI_USE_PROXIES="false"
     SWFS_MASTER_PEERS=$(build_swfs_master_peers)
     PG_HOSTS=$(build_pg_hosts)
     HAPROXY_PG_SERVERS=$(build_haproxy_pg_servers)

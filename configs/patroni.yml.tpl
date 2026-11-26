@@ -16,7 +16,7 @@ etcd3:
   cacert: /run/pg-certs/ca.crt
   cert: /run/pg-certs/etcd-client.crt
   key: /run/pg-certs/etcd-client.key
-  retry_timeout: 20
+  retry_timeout: 25
 
 # --- REST API Patroni ---
 # GET (/primary, /replica, /health, /metrics) открыты для HAProxy и Prometheus;
@@ -28,18 +28,18 @@ restapi:
     username: patroni
     password: ${PATRONI_API_PASSWORD}
 
-# --- WAN тайминги (election >= 10 * max_RTT) ---
-ttl: 60
+# --- WAN тайминги (ttl >= loop_wait + 2 * retry_timeout) ---
+ttl: 75
 loop_wait: 10
-retry_timeout: 20
+retry_timeout: 25
 failsafe_mode: true
 
 # --- Инициализация кластера (только на первой стартующей ноде) ---
 bootstrap:
   dcs:
-    ttl: 60
+    ttl: 75
     loop_wait: 10
-    retry_timeout: 20
+    retry_timeout: 25
     primary_start_timeout: 60
     maximum_lag_on_failover: 1048576
     synchronous_mode: false           # Включается только после замера в Sprint 2

@@ -20,6 +20,7 @@ log_step "Стадия 3: Bootstrap DB (etcd + Patroni + HAProxy + pgBackRest)"
 
 ensure_quorum_nodes_initialized
 for_each_node tune_node_wan_and_swap
+for_each_node harden_node_ufw
 for_each_node build_patroni_image_on_node
 
 render_and_push_cb() {
@@ -63,34 +64,77 @@ if [[ "${DRY_RUN:-false}" != "true" ]]; then
 fi
 
 log_step "Запуск Patroni Primary -> Replicas"
-if [[ "${DRY_RUN:-false}" != "true" && ! -f "$(state_root)/.cluster_installed" ]]; then
-    remote_exec_stdin "${NODE1_IP}" "${REMOTE_BASE_DIR}" "${PG_DATA_DIR}" "${ETCD_CLIENT_PORT:-2379}" "/${CLUSTER_SLUG}/${CLUSTER_SLUG}" <<'REMOTE_PREP_PRIMARY'
-set -euo pipefail
-BASE_DIR="$1"; PG_DIR="$2"; EC_PORT="$3"; PATRONI_PREFIX="$4"
-if [[ ! -f "${PG_DIR}/data/PG_VERSION" ]]; then
-    if [[ -d "${PG_DIR}/data" ]]; then
-        find "${PG_DIR}/data" -mindepth 1 -delete 2>/dev/null || true
-    fi
-    ETCD_CID=$(cd "${BASE_DIR}" && docker compose ps -q etcd | head -n1 || true)
-    if [[ -n "${ETCD_CID}" ]]; then
-        docker exec "${ETCD_CID}" etcdctl --endpoints="https://127.0.0.1:${EC_PORT}" \
-            --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key \
-            del --prefix "${PATRONI_PREFIX}" >/dev/null 2>&1 || true
-    fi
-fi
-REMOTE_PREP_PRIMARY
-fi
+ACTIVE_PRIMARY_IP="${NODE1_IP}"
 
-log_info "Старт Patroni Primary на $(get_node_name 1) (${NODE1_IP})..."
-remote_exec "${NODE1_IP}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d --force-recreate patroni"
-wait_for_remote_health "${NODE1_IP}" "Patroni Primary /primary" \
-    "curl -sf http://127.0.0.1:${PATRONI_API_PORT:-8008}/primary" 60 3 \
-    "cd '${REMOTE_BASE_DIR}' && docker compose logs --tail 60 patroni || true; curl -s http://127.0.0.1:${PATRONI_API_PORT:-8008}/patroni || true"
+if [[ "${DRY_RUN:-false}" == "true" ]]; then
+    remote_exec "${NODE1_IP}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d --force-recreate patroni"
+    for_each_node_dry_rep() {
+        local ip="$1" idx="$4"
+        (( idx == 1 )) && return 0
+        remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d --force-recreate patroni"
+    }
+    for_each_node for_each_node_dry_rep
+else
+    # Проверяем, есть ли уже здоровый лидер Patroni (например, при --resume после переключения лидера на node2)
+    REUSE_EXISTING_PRIMARY=""
+    CANDIDATE_PRIMARY=$(find_patroni_primary_ip || true)
+    if [[ -n "${CANDIDATE_PRIMARY}" ]]; then
+        PEER_REACH_OK=true
+        check_pg_reach_cb() {
+            local ip="$1" name="$3"
+            [[ "${ip}" == "${CANDIDATE_PRIMARY}" ]] && return 0
+            if ! remote_exec "${ip}" "nc -z -w 5 '${CANDIDATE_PRIMARY}' '${PG_PORT:-5432}'" >/dev/null 2>&1; then
+                log_warn "  ⚠️  Узел ${name} (${ip}) не видит порт PostgreSQL ${CANDIDATE_PRIMARY}:${PG_PORT:-5432}"
+                PEER_REACH_OK=false
+            fi
+        }
+        for_each_node check_pg_reach_cb
+        if [[ "${PEER_REACH_OK}" == "true" ]]; then
+            REUSE_EXISTING_PRIMARY="${CANDIDATE_PRIMARY}"
+        fi
+    fi
 
-start_replica_cb() {
-    local ip="$1" name="$3" idx="$4"
-    if (( idx == 1 )); then return 0; fi
-    if [[ "${DRY_RUN:-false}" != "true" ]]; then
+    if [[ -n "${REUSE_EXISTING_PRIMARY}" ]]; then
+        ACTIVE_PRIMARY_IP="${REUSE_EXISTING_PRIMARY}"
+        log_info "Обнаружен действующий лидер Patroni на ${ACTIVE_PRIMARY_IP} — обновляем его конфиг и поднимаем реплики..."
+        remote_exec "${ACTIVE_PRIMARY_IP}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d --force-recreate patroni"
+        wait_for_remote_health "${ACTIVE_PRIMARY_IP}" "Patroni Primary (${ACTIVE_PRIMARY_IP})" \
+            "curl -sf http://127.0.0.1:${PATRONI_API_PORT:-8008}/primary" 60 3 \
+            "cd '${REMOTE_BASE_DIR}' && docker compose logs --tail 60 patroni || true"
+    else
+        if [[ ! -f "$(state_root)/.cluster_installed" ]]; then
+            log_info "Очистка незавершенного состояния Patroni после прерванной первичной установки..."
+            stop_and_clean_pg_cb() {
+                local ip="$1"
+                remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose stop patroni 2>/dev/null || true; rm -rf '${PG_DATA_DIR}/data' && mkdir -p '${PG_DATA_DIR}/data'"
+            }
+            for_each_node stop_and_clean_pg_cb
+            remote_exec "${NODE1_IP}" "
+                ECID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q etcd | head -n1 || true)
+                if [[ -n \"\${ECID}\" ]]; then
+                    docker exec \"\${ECID}\" etcdctl --endpoints='https://127.0.0.1:${ETCD_CLIENT_PORT:-2379}' \
+                        --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key \
+                        del --prefix '/${CLUSTER_SLUG}/' >/dev/null 2>&1 || true
+                fi
+            "
+        fi
+
+        ACTIVE_PRIMARY_IP="${NODE1_IP}"
+        log_info "Старт Patroni Primary на $(get_node_name 1) (${NODE1_IP})..."
+        remote_exec "${NODE1_IP}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d --force-recreate patroni"
+        wait_for_remote_health "${NODE1_IP}" "Patroni Primary /primary" \
+            "curl -sf http://127.0.0.1:${PATRONI_API_PORT:-8008}/primary" 60 3 \
+            "cd '${REMOTE_BASE_DIR}' && docker compose logs --tail 60 patroni || true; curl -s http://127.0.0.1:${PATRONI_API_PORT:-8008}/patroni || true"
+    fi
+
+    start_replica_cb() {
+        local ip="$1" name="$3"
+        [[ "${ip}" == "${ACTIVE_PRIMARY_IP}" ]] && return 0
+        if ! remote_exec "${ip}" "nc -z -w 6 '${ACTIVE_PRIMARY_IP}' '${PG_PORT:-5432}'" >/dev/null 2>&1; then
+            log_error "❌ Сетевой порт PostgreSQL ${ACTIVE_PRIMARY_IP}:${PG_PORT:-5432} недоступен с узла ${name} (${ip})!"
+            log_error "   Проверьте внешний облачный файрвол хостинга (Security Group / Cloud Firewall) между ${ip} и ${ACTIVE_PRIMARY_IP} для TCP ${PG_PORT:-5432}."
+            exit 1
+        fi
         remote_exec_stdin "${ip}" "${PG_DATA_DIR}" <<'REMOTE_PREP_REPLICA'
 set -euo pipefail
 PG_DIR="$1"
@@ -98,14 +142,17 @@ if [[ ! -f "${PG_DIR}/data/PG_VERSION" && -d "${PG_DIR}/data" ]]; then
     find "${PG_DIR}/data" -mindepth 1 -delete 2>/dev/null || true
 fi
 REMOTE_PREP_REPLICA
-    fi
-    log_info "Старт Patroni Replica на ${name} (${ip})..."
-    remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d --force-recreate patroni"
-    wait_for_remote_health "${ip}" "Patroni Replica ${name} /replica" \
-        "curl -sf http://127.0.0.1:${PATRONI_API_PORT:-8008}/replica" 80 3 \
-        "cd '${REMOTE_BASE_DIR}' && docker compose logs --tail 60 patroni || true; curl -s http://127.0.0.1:${PATRONI_API_PORT:-8008}/patroni || true"
-}
-for_each_node start_replica_cb
+        log_info "Старт Patroni Replica на ${name} (${ip})..."
+        remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d --force-recreate patroni"
+        wait_for_remote_health "${ip}" "Patroni Replica ${name} /replica" \
+            "curl -sf http://127.0.0.1:${PATRONI_API_PORT:-8008}/replica" 80 3 \
+            "cd '${REMOTE_BASE_DIR}' && docker compose logs --tail 60 patroni || true; curl -s http://127.0.0.1:${PATRONI_API_PORT:-8008}/patroni || true"
+    }
+    for_each_node start_replica_cb
+
+    # Обновляем ACTIVE_PRIMARY_IP на случай перевыборов во время старта
+    ACTIVE_PRIMARY_IP=$(find_patroni_primary_ip || echo "${ACTIVE_PRIMARY_IP}")
+fi
 
 log_step "Запуск HAProxy (127.0.0.1:${HAPROXY_PG_PORT:-5433} -> PG Primary)"
 start_haproxy_cb() {
@@ -116,8 +163,8 @@ start_haproxy_cb() {
 }
 for_each_node start_haproxy_cb
 
-log_step "Создание пользователей и БД (sftpgo, seaweedfs_filer)"
-remote_exec_stdin "${NODE1_IP}" "${REMOTE_BASE_DIR}" "${SFTPGO_DB_PASSWORD}" "${SWFS_FILER_DB_PASSWORD}" <<'REMOTE_DB_INIT'
+log_step "Создание пользователей и БД (sftpgo, seaweedfs_filer) на Primary (${ACTIVE_PRIMARY_IP})"
+remote_exec_stdin "${ACTIVE_PRIMARY_IP}" "${REMOTE_BASE_DIR}" "${SFTPGO_DB_PASSWORD}" "${SWFS_FILER_DB_PASSWORD}" <<'REMOTE_DB_INIT'
 set -euo pipefail
 BASE_DIR="$1"
 SFTPGO_PW="$2"
@@ -153,7 +200,7 @@ REMOTE_DB_INIT
 
 log_step "Инициализация pgBackRest stanza '${CLUSTER_SLUG}'"
 if [[ "${BACKUP_S3_ACCESS_KEY:-FIXME}" != *FIXME* && "${BACKUP_S3_ACCESS_KEY:-}" != "" ]]; then
-    remote_exec "${NODE1_IP}" "
+    remote_exec "${ACTIVE_PRIMARY_IP}" "
         PATRONI_CID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q patroni | head -n1) && \
         docker exec -u postgres \"\${PATRONI_CID}\" pgbackrest --stanza='${CLUSTER_SLUG}' stanza-create && \
         docker exec -u postgres \"\${PATRONI_CID}\" pgbackrest --stanza='${CLUSTER_SLUG}' check
