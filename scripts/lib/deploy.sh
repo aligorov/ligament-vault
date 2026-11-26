@@ -503,13 +503,14 @@ fi
 
 if [[ "${WAS_ACTIVE}" == "true" ]]; then
     ALLOWED_SET=" ${PEER_IPS} ${ARBITER_IP} "
-    STALE_NUMS=$(ufw status numbered | python3 - "${ALLOWED_SET}" "${SLUG}" "${HTTPS_P}" "${SFTP_PORT}" "${FTPS_PORT}" <<'PYEOF'
-import re, sys
+    STALE_NUMS=$(python3 - "${ALLOWED_SET}" "${SLUG}" "${HTTPS_P}" "${SFTP_PORT}" "${FTPS_PORT}" <<'PYEOF'
+import re, subprocess, sys
 allowed = set(sys.argv[1].split())
 slug = re.escape(sys.argv[2])
 https_p, sftp_p, ftps_p = sys.argv[3], sys.argv[4], sys.argv[5]
+out = subprocess.check_output(["ufw", "status", "numbered"], text=True, stderr=subprocess.DEVNULL)
 nums = []
-for line in sys.stdin:
+for line in out.splitlines():
     m = re.match(rf"\[\s*(\d+)\]\s+(\S+).*#\s*(?:{slug}|cluster-b):(?:peer|arbiter):(\S+)", line)
     if m and m.group(3) not in allowed:
         nums.append(int(m.group(1)))
