@@ -107,8 +107,8 @@ if [[ "${DRY_RUN:-false}" != "true" ]]; then
     fi
 
     master_peers=$(build_swfs_master_peers)
-    dry_fix=$(remote_exec "${local_ip}" "FCID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q swfs-filer | head -n1); [[ -n \"\${FCID}\" ]] && docker exec -i \"\${FCID}\" weed shell -master='${master_peers}' <<< 'volume.fix.replication -n' || echo 'ERR'" 2>/dev/null || echo "ERR")
-    if echo "${dry_fix}" | grep -qiE "replicating|copying|deleting|under-replicated|over-replicated|\bERR\b|error:"; then
+    dry_fix=$(remote_exec "${local_ip}" "FCID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q swfs-filer | head -n1); [[ -n \"\${FCID}\" ]] && docker exec -i \"\${FCID}\" weed shell -master='${master_peers}' <<< 'volume.fix.replication' || echo 'ERR'" 2>/dev/null || echo "ERR")
+    if echo "${dry_fix}" | grep -qiE "replicating|copying|deleting|under-replicated|over-replicated|flag provided|\bERR\b|error:"; then
         swfs_repl_ok=false
         WARNINGS=$((WARNINGS + 1))
         if [[ "${JSON_OUT}" != "true" ]]; then

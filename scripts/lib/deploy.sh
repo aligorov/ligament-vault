@@ -668,8 +668,8 @@ case "\${CMD}" in
         fi
         FILER_CID=\$(cd "${BASE_DIR}" && docker compose ps -q swfs-filer | head -n1 || true)
         [[ -n "\${FILER_CID}" ]] || { echo "FILER_DOWN"; exit 1; }
-        FIX_OUT=\$(docker exec -i "\${FILER_CID}" weed shell -master="${MASTER_PEERS}" <<< "volume.fix.replication -n" 2>/dev/null || echo "ERR")
-        if echo "\${FIX_OUT}" | grep -qiE "replicating|copying|deleting|under-replicated|over-replicated|\bERR\b|error:"; then
+        FIX_OUT=\$(docker exec -i "\${FILER_CID}" weed shell -master="${MASTER_PEERS}" <<< "volume.fix.replication" 2>/dev/null || echo "ERR")
+        if echo "\${FIX_OUT}" | grep -qiE "replicating|copying|deleting|under-replicated|over-replicated|flag provided|\bERR\b|error:"; then
             echo "SWFS_DIRTY"
             exit 1
         fi

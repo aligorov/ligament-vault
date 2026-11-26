@@ -482,12 +482,12 @@ jobs:
               exit 1
           fi
 
-          # 2. Verify SeaweedFS volume.fix.replication -n output and non-false-positive regex
-          FIX_OUT=$(docker exec -i "$(docker compose ps -q swfs-filer | head -n1)" weed shell -master=127.0.0.1:9333 <<< 'volume.fix.replication -n' 2>&1 || true)
-          echo "volume.fix.replication -n output:"
+          # 2. Verify SeaweedFS volume.fix.replication (default dry-run without -apply) output and regex
+          FIX_OUT=$(docker exec -i "$(docker compose ps -q swfs-filer | head -n1)" weed shell -master=127.0.0.1:9333 <<< 'volume.fix.replication' 2>&1 || true)
+          echo "volume.fix.replication output:"
           echo "${FIX_OUT}"
-          if echo "${FIX_OUT}" | grep -qiE "replicating|copying|deleting|under-replicated|over-replicated|\bERR\b|error:"; then
-              echo "ERROR: Unexpected match in volume.fix.replication -n output!"
+          if echo "${FIX_OUT}" | grep -qiE "replicating|copying|deleting|under-replicated|over-replicated|flag provided|\bERR\b|error:"; then
+              echo "ERROR: Unexpected match in volume.fix.replication output!"
               exit 1
           fi
 
