@@ -126,6 +126,7 @@ services:
       -defaultReplication=${SWFS_DEFAULT_REPLICATION}
       -mdir=/master-data
       -electionTimeout=10s
+      -telemetry=false
     volumes:
       - ${SWFS_MASTER_DIR}:/master-data
       - ./configs/seaweedfs:/etc/seaweedfs:ro
@@ -151,7 +152,7 @@ services:
       -port=${SWFS_VOLUME_PORT}
       -port.grpc=${SWFS_VOLUME_GRPC_PORT}
       -metricsPort=${SWFS_VOLUME_METRICS_PORT}
-      -mserver=${SWFS_MASTER_PEERS}
+      -master=${SWFS_MASTER_PEERS}
       -dataCenter=${DC_NAME}
       -dir=${SWFS_VOLUME_DIR}
       -max=${SWFS_VOLUME_MAX}
@@ -235,6 +236,7 @@ ${SWFS_VOLUME_MOUNTS}
       admin
       -port=${SWFS_ADMIN_PORT}
       -port.grpc=${SWFS_ADMIN_GRPC_PORT}
+      -port.legacy=0
       -master=${SWFS_MASTER_PEERS}
       -adminPassword=${SWFS_ADMIN_PASSWORD}
       -dataDir=/data
@@ -259,9 +261,9 @@ ${SWFS_VOLUME_MOUNTS}
     command: >-
       worker
       -admin=${SWFS_ADMIN_IP}:${SWFS_ADMIN_PORT}
-      -capabilities=vacuum,ec,balance
+      -jobType=vacuum,ec,balance
       -workingDir=/data
-      -maxConcurrent=2
+      -maxExecute=2
     volumes:
       - swfs-worker-data:/data
       - ./configs/seaweedfs:/etc/seaweedfs:ro

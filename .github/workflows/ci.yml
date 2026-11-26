@@ -593,19 +593,31 @@ jobs:
           # Real SFTP transfer test into /work and /worm (Object Lock)
           echo "hello work ci" > "${WORKDIR}/work_sample.txt"
           echo "immutable worm ci" > "${WORKDIR}/worm_sample.txt"
-          if ! sftp -b - -P 2022 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -i "${WORKDIR}/ci_user_key" ciuser@127.0.0.1 <<SFTPEOF
+          if ! SFTP_OUT=$(sftp -b - -P 2022 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -i "${WORKDIR}/ci_user_key" ciuser@127.0.0.1 <<SFTPEOF 2>&1
           put ${WORKDIR}/work_sample.txt /work/work_sample.txt
           get /work/work_sample.txt ${WORKDIR}/work_dl.txt
           rm /work/work_sample.txt
           put ${WORKDIR}/worm_sample.txt /worm/worm_sample.txt
           ls -la /worm
+          get /worm/worm_sample.txt ${WORKDIR}/worm_dl.txt
           bye
           SFTPEOF
-          then
+          ); then
+              echo "${SFTP_OUT}"
               docker compose logs --tail 50 sftpgo swfs-s3 swfs-filer swfs-master || true
               exit 1
           fi
+          echo "${SFTP_OUT}"
+          SFTP_LS=$(sftp -b - -P 2022 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -i "${WORKDIR}/ci_user_key" ciuser@127.0.0.1 <<< 'ls -la /worm')
+          echo "SFTP ls -la /worm:"
+          echo "${SFTP_LS}"
+          echo "${SFTP_LS}" | grep -qE 'worm_sample\.txt$'
+          if echo "${SFTP_LS}" | grep -qE '[[:space:]]users$'; then
+              echo "ERROR: Bogus duplicated prefix directory 'users' appeared in /worm!"
+              exit 1
+          fi
           cmp -s "${WORKDIR}/work_sample.txt" "${WORKDIR}/work_dl.txt"
+          cmp -s "${WORKDIR}/worm_sample.txt" "${WORKDIR}/worm_dl.txt"
           if sftp -b - -P 2022 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -i "${WORKDIR}/ci_user_key" ciuser@127.0.0.1 <<< 'rm /worm/worm_sample.txt'; then
               echo "ERROR: WORM folder permitted rm!"
               exit 1
@@ -653,7 +665,7 @@ jobs:
           print(f"sftp-worm FULL list (HTTP {st_all}): {xml_all}")
           st_ls, xml_ls = s3_req("GET", "/sftp-worm", "list-type=2&prefix=users/ciuser/")
           print(f"sftp-worm list (HTTP {st_ls}): {xml_ls}")
-          assert st_ls == 200 and "users/ciuser/worm_sample.txt" in xml_ls, (st_ls, xml_ls)
+          assert st_ls == 200 and "<Key>users/ciuser/worm_sample.txt</Key>" in xml_ls and "users/ciuser/users/ciuser/" not in xml_ls, (st_ls, xml_ls)
 
           st_ret, xml_ret = s3_req("GET", "/sftp-worm/users/ciuser/worm_sample.txt", "retention=")
           print(f"sftp-worm retention (HTTP {st_ret}): {xml_ret}")
@@ -661,6 +673,13 @@ jobs:
 
           st_ver, xml_ver = s3_req("GET", "/sftp-worm", "prefix=users/ciuser/&versions=")
           print(f"sftp-worm versions (HTTP {st_ver}): {xml_ver}")
+          import re
+          m = re.search(r"<VersionId>([^<]+)</VersionId>", xml_ver)
+          assert m, xml_ver
+          vid = m.group(1)
+          st_del, xml_del = s3_req("DELETE", "/sftp-worm/users/ciuser/worm_sample.txt", f"versionId={vid}")
+          print(f"sftp-worm raw S3 version DELETE under COMPLIANCE (HTTP {st_del}): {xml_del}")
+          assert st_del in (400, 403), f"Expected WORM COMPLIANCE to deny version delete, got {st_del}: {xml_del}"
           PYEOF
 
           echo "LIVE_STACK_SMOKE_OK"
