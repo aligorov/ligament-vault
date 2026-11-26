@@ -81,6 +81,7 @@ services:
       PATRONI_SCOPE: "${CLUSTER_SLUG}"
       PATRONI_POSTGRESQL_DATA_DIR: "${PG_DATA_DIR}/data"
       PATRONICTL_CONFIG_FILE: "/run/pg-certs/patroni.yml"
+      PGPORT: "${PG_PORT}"
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://127.0.0.1:${PATRONI_API_PORT}/health"]
       interval: 10s
@@ -312,6 +313,8 @@ ${SWFS_VOLUME_MOUNTS}
       - ${SFTPGO_DATA_DIR}:/srv/sftpgo
       - ${SFTPGO_TEMP_PATH}:${SFTPGO_TEMP_PATH}
       - ./certs/${NODE_NAME}/ca.crt:/certs/ca.crt:ro
+      - ./certs/${NODE_NAME}/pg-client.crt:/certs/pg-client.crt:ro
+      - ./certs/${NODE_NAME}/pg-client.key:/certs/pg-client.key:ro
       - ./certs/ssl:/etc/sftpgo/ssl:ro
       - ./ssh-host-keys:/etc/sftpgo/host_keys:ro
     depends_on:

@@ -62,8 +62,10 @@ ${PATRONI_SLOTS_YAML}
         archive_mode: "on"
         archive_command: "${PG_ARCHIVE_COMMAND}"
         restore_command: 'pgbackrest --stanza=${CLUSTER_SLUG} archive-get %f "%p"'
-        # --- SSL ---
+        password_encryption: "scram-sha-256"
+        # --- SSL (Zero-Trust mTLS TLSv1.3) ---
         ssl: "on"
+        ssl_min_protocol_version: "TLSv1.3"
         ssl_cert_file: /run/pg-certs/pg-server.crt
         ssl_key_file: /run/pg-certs/pg-server.key
         ssl_ca_file: /run/pg-certs/ca.crt
@@ -74,9 +76,19 @@ ${PATRONI_SLOTS_YAML}
 
   pg_hba:
     - local all all trust
-    - hostssl all all 0.0.0.0/0 scram-sha-256
-    - hostssl all all ::1/128 scram-sha-256
-    - hostssl replication replicator 0.0.0.0/0 scram-sha-256
+    - hostnossl all all 0.0.0.0/0 reject
+    - hostnossl all all ::/0 reject
+    - hostnossl replication all 0.0.0.0/0 reject
+    - hostnossl replication all ::/0 reject
+    - hostssl all all 127.0.0.1/32 scram-sha-256 clientcert=verify-ca
+    - hostssl all all ::1/128 scram-sha-256 clientcert=verify-ca
+    - hostssl replication replicator 127.0.0.1/32 scram-sha-256 clientcert=verify-ca
+    - hostssl replication replicator ::1/128 scram-sha-256 clientcert=verify-ca
+${PG_HBA_PEERS_YAML}
+    - host all all 0.0.0.0/0 reject
+    - host all all ::/0 reject
+    - host replication all 0.0.0.0/0 reject
+    - host replication all ::/0 reject
 
   users:
     replicator:
@@ -91,6 +103,21 @@ postgresql:
   data_dir: ${PG_DATA_DIR}/data
   bin_dir: /usr/lib/postgresql/16/bin
   pgpass: /tmp/pgpass0
+  pg_hba:
+    - local all all trust
+    - hostnossl all all 0.0.0.0/0 reject
+    - hostnossl all all ::/0 reject
+    - hostnossl replication all 0.0.0.0/0 reject
+    - hostnossl replication all ::/0 reject
+    - hostssl all all 127.0.0.1/32 scram-sha-256 clientcert=verify-ca
+    - hostssl all all ::1/128 scram-sha-256 clientcert=verify-ca
+    - hostssl replication replicator 127.0.0.1/32 scram-sha-256 clientcert=verify-ca
+    - hostssl replication replicator ::1/128 scram-sha-256 clientcert=verify-ca
+${PG_HBA_PEERS_YAML}
+    - host all all 0.0.0.0/0 reject
+    - host all all ::/0 reject
+    - host replication all 0.0.0.0/0 reject
+    - host replication all ::/0 reject
   authentication:
     superuser:
       username: postgres

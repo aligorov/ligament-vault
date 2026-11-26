@@ -139,6 +139,11 @@ jobs:
           ./ligactl preflight --dry-run
           ./ligactl install --dry-run --yes
           ./ligactl install --stage=3 --dry-run --yes
+          grep -q 'clientcert=verify-ca' "${WORKDIR}/repo/.rendered/node1/patroni.yml"
+          grep -q '10.0.1.10/32 scram-sha-256 clientcert=verify-ca' "${WORKDIR}/repo/.rendered/node1/patroni.yml"
+          grep -q 'ssl_min_protocol_version: "TLSv1.3"' "${WORKDIR}/repo/.rendered/node1/patroni.yml"
+          grep -q 'sslcert=/certs/pg-client.crt' "${WORKDIR}/repo/.rendered/node1/sftpgo.json"
+          grep -q 'pg1-port=15432' "${WORKDIR}/repo/.rendered/node1/pgbackrest.conf"
           ./ligactl sync-config --dry-run
           ./ligactl user add --username alice --profile dual --quota-gb 50 --generate-password --require-2fa --dry-run
           ./ligactl user list --dry-run
@@ -296,6 +301,66 @@ jobs:
               docker compose logs haproxy || true
               exit 1
           fi
+
+          # Verify standard port 5432 is closed and non-standard mTLS port 15432 enforces TLSv1.3 + clientcert=verify-ca
+          if nc -z 127.0.0.1 5432 2>/dev/null || nc -z "${HOST_IP}" 5432 2>/dev/null; then
+              echo "SECURITY FAILURE: PostgreSQL is listening on standard port 5432!" >&2
+              exit 1
+          fi
+          nc -z "${HOST_IP}" 15432
+
+          docker exec -i -u postgres -e "HOST_IP=${HOST_IP}" -e "SUPER_PW=${PG_SUPERUSER_PASSWORD}" "$(docker ps -qf name=patroni)" python3 - <<'PYSEC'
+          import os, psycopg2
+
+          host_ip = os.environ["HOST_IP"]
+          pw = os.environ["SUPER_PW"]
+
+          # 1. Plaintext TCP must be rejected (hostnossl reject)
+          try:
+              psycopg2.connect(host=host_ip, port=15432, dbname="postgres", user="postgres", password=pw, sslmode="disable")
+              raise SystemExit("SECURITY FAILURE: Plaintext PG connection succeeded!")
+          except psycopg2.OperationalError:
+              pass
+
+          # 2. TLS WITH valid password but WITHOUT client certificate must be rejected (clientcert=verify-ca)
+          try:
+              psycopg2.connect(
+                  host=host_ip,
+                  port=15432,
+                  dbname="postgres",
+                  user="postgres",
+                  password=pw,
+                  sslmode="require",
+                  sslrootcert="/run/pg-certs/ca.crt",
+                  sslcert="/nonexistent",
+                  sslkey="/nonexistent",
+              )
+              raise SystemExit("SECURITY FAILURE: PG connection without client certificate succeeded!")
+          except psycopg2.OperationalError:
+              pass
+
+          # 3. Full mTLS (verify-full + pg-client.crt + pg-client.key) must succeed over TLSv1.3
+          conn = psycopg2.connect(
+              host=host_ip,
+              port=15432,
+              dbname="postgres",
+              user="postgres",
+              password=pw,
+              sslmode="verify-full",
+              sslrootcert="/run/pg-certs/ca.crt",
+              sslcert="/run/pg-certs/pg-client.crt",
+              sslkey="/run/pg-certs/pg-client.key",
+          )
+          cur = conn.cursor()
+          cur.execute("SELECT ssl, version, client_dn FROM pg_stat_ssl WHERE pid = pg_backend_pid()")
+          ssl_on, tls_ver, client_dn = cur.fetchone()
+          assert ssl_on is True, f"Expected ssl=True, got {ssl_on}"
+          assert tls_ver == "TLSv1.3", f"Expected TLSv1.3, got {tls_ver}"
+          assert "pg-client" in (client_dn or ""), f"Expected pg-client in client_dn, got {client_dn}"
+          cur.close()
+          conn.close()
+          print(f"Zero-Trust PG verified: port=15432, ssl={ssl_on}, version={tls_ver}, client_dn={client_dn}")
+          PYSEC
 
           docker exec -i -e "SFTPGO_PW=${SFTPGO_DB_PASSWORD}" -e "SWFS_PW=${SWFS_FILER_DB_PASSWORD}" "$(docker ps -qf name=patroni)" python3 - <<'PYEOF'
           import os, psycopg2

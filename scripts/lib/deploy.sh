@@ -96,7 +96,7 @@ build_haproxy_pg_servers() {
         local name ip
         name=$(get_node_name "$i")
         ip=$(get_node_ip "$i")
-        result+="    server ${name} ${ip}:${PG_PORT:-5432} check port ${PATRONI_API_PORT:-8008}"
+        result+="    server ${name} ${ip}:${PG_PORT:-15432} check port ${PATRONI_API_PORT:-8008}"
         if (( i < count )); then
             result+=$'\n'
         fi
@@ -116,6 +116,17 @@ build_patroni_slots_yaml() {
             result+=$'\n'
         fi
     done
+    echo "${result}"
+}
+
+build_pg_hba_peers_yaml() {
+    local result="" ip
+    while IFS= read -r ip; do
+        [[ -z "${ip}" || "${ip}" == "127.0.0.1" || "${ip}" == "::1" ]] && continue
+        [[ -n "${result}" ]] && result+=$'\n'
+        result+="    - hostssl all all ${ip}/32 scram-sha-256 clientcert=verify-ca"$'\n'
+        result+="    - hostssl replication replicator ${ip}/32 scram-sha-256 clientcert=verify-ca"
+    done < <(get_node_ips | awk '!seen[$0]++')
     echo "${result}"
 }
 
@@ -168,6 +179,9 @@ export_node_render_vars() {
     export ETCD_METRICS_PORT="${ETCD_METRICS_PORT:-2381}"
     export SFTPGO_TELEMETRY_PORT="${SFTPGO_TELEMETRY_PORT:-10000}"
     export HTTPS_PORT="${HTTPS_PORT:-443}"
+    export PG_PORT="${PG_PORT:-15432}"
+    export PATRONI_API_PORT="${PATRONI_API_PORT:-8008}"
+    export HAPROXY_PG_PORT="${HAPROXY_PG_PORT:-5433}"
     export PG_MAX_SLOT_WAL_KEEP_SIZE="${PG_MAX_SLOT_WAL_KEEP_SIZE:-2GB}"
 
     if [[ -n "${ARBITER_IP:-}" ]]; then
@@ -222,7 +236,7 @@ export_node_render_vars() {
         export ETCD_ELECTION_TIMEOUT=3500
     fi
 
-    export ETCD_INITIAL_CLUSTER ETCD_HOSTS ETCD_PATRONI_HOSTS ETCD_PATRONI_USE_PROXIES SWFS_MASTER_PEERS PG_HOSTS HAPROXY_PG_SERVERS PATRONI_SLOTS_YAML
+    export ETCD_INITIAL_CLUSTER ETCD_HOSTS ETCD_PATRONI_HOSTS ETCD_PATRONI_USE_PROXIES SWFS_MASTER_PEERS PG_HOSTS HAPROXY_PG_SERVERS PATRONI_SLOTS_YAML PG_HBA_PEERS_YAML
     ETCD_INITIAL_CLUSTER=$(build_etcd_cluster_string)
     ETCD_HOSTS=$(build_etcd_hosts)
     if is_quorum_node "${idx}" "${name}"; then
@@ -242,6 +256,7 @@ export_node_render_vars() {
     PG_HOSTS=$(build_pg_hosts)
     HAPROXY_PG_SERVERS=$(build_haproxy_pg_servers)
     PATRONI_SLOTS_YAML=$(build_patroni_slots_yaml)
+    PG_HBA_PEERS_YAML=$(build_pg_hba_peers_yaml)
 
     export BACKUP_S3_HOST
     BACKUP_S3_HOST="${BACKUP_S3_ENDPOINT#https://}"
@@ -397,6 +412,10 @@ REMOTE_DIRS
             done
             chown 1000:1000 '${REMOTE_BASE_DIR}/certs/${name}'/swfs-*.key '${REMOTE_BASE_DIR}/certs/${name}/pg-client.key' 2>/dev/null || true
         fi
+        PCID=\$(cd '${REMOTE_BASE_DIR}' 2>/dev/null && docker compose ps -q patroni 2>/dev/null | head -n1 || true)
+        if [[ -n \"\${PCID}\" ]]; then
+            docker exec \"\${PCID}\" bash -c 'if [[ -f /etc/patroni/patroni.yml ]]; then cp -L /etc/patroni/patroni.yml /run/pg-certs/patroni.yml && chown postgres:postgres /run/pg-certs/patroni.yml && chmod 600 /run/pg-certs/patroni.yml && kill -HUP 1; fi' 2>/dev/null || true
+        fi
     "
 }
 
@@ -412,7 +431,7 @@ harden_node_ufw() {
         "${ADMIN_SSH_NET}" "${ADMIN_SSH_PORT:-22}" \
         "${SFTP_PORT:-2022}" "${FTPS_PORT:-21}" "${FTPS_PASV_MIN:-50000}" "${FTPS_PASV_MAX:-50199}" \
         "${ETCD_CLIENT_PORT:-2379}" "${ETCD_PEER_PORT:-2380}" "${ETCD_METRICS_PORT:-2381}" \
-        "${PG_PORT:-5432}" "${PATRONI_API_PORT:-8008}" \
+        "${PG_PORT:-15432}" "${PATRONI_API_PORT:-8008}" \
         "${SWFS_MASTER_PORT:-9333}" "${SWFS_VOLUME_PORT:-8082}" "${SWFS_FILER_PORT:-8888}" \
         "${SWFS_ADMIN_PORT:-12535}" "${SWFS_ADMIN_GRPC_PORT:-22535}" \
         "${SWFS_MASTER_METRICS_PORT:-9324}" "${SWFS_VOLUME_METRICS_PORT:-9325}" "${SWFS_FILER_METRICS_PORT:-9326}" \
@@ -503,16 +522,16 @@ fi
 
 if [[ "${WAS_ACTIVE}" == "true" ]]; then
     ALLOWED_SET=" ${PEER_IPS} ${ARBITER_IP} "
-    STALE_NUMS=$(python3 - "${ALLOWED_SET}" "${SLUG}" "${HTTPS_P}" "${SFTP_PORT}" "${FTPS_PORT}" <<'PYEOF'
+    STALE_NUMS=$(python3 - "${ALLOWED_SET}" "${SLUG}" "${HTTPS_P}" "${SFTP_PORT}" "${FTPS_PORT}" "${PG_PORT}" <<'PYEOF'
 import re, subprocess, sys
 allowed = set(sys.argv[1].split())
 slug = re.escape(sys.argv[2])
-https_p, sftp_p, ftps_p = sys.argv[3], sys.argv[4], sys.argv[5]
+https_p, sftp_p, ftps_p, pg_p = sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6]
 out = subprocess.check_output(["ufw", "status", "numbered"], text=True, stderr=subprocess.DEVNULL)
 nums = []
 for line in out.splitlines():
     m = re.match(rf"\[\s*(\d+)\]\s+(\S+).*#\s*(?:{slug}|cluster-b):(?:peer|arbiter):(\S+)", line)
-    if m and m.group(3) not in allowed:
+    if m and (m.group(3) not in allowed or (pg_p != "5432" and m.group(2) == "5432/tcp")):
         nums.append(int(m.group(1)))
         continue
     m_pub = re.match(rf"\[\s*(\d+)\]\s+(\d+)/tcp\b.*#\s*{slug}:public-(https|sftp|ftps)\b", line)

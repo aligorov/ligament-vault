@@ -18,6 +18,27 @@ source "${SCRIPT_DIR}/scripts/lib/deploy.sh"
 load_cluster_env "${CONFIG_ROOT:-${SCRIPT_DIR}}"
 log_step "Стадия 3: Bootstrap DB (etcd + Patroni + HAProxy + pgBackRest)"
 
+PG_PORT_MIGRATED=false
+if [[ ! -f "$(state_root)/.cluster_installed" && "${PG_PORT:-15432}" == "5432" ]]; then
+    log_warn "🔒 Автоперевод PostgreSQL со стандартного порта 5432 на закрытый mTLS-порт 15432..."
+    ENV_FILE="${CONFIG_ROOT:-${SCRIPT_DIR}}/cluster.env"
+    if [[ "${DRY_RUN:-false}" != "true" && -f "${ENV_FILE}" ]]; then
+        python3 - "${ENV_FILE}" <<'PYENV'
+import pathlib, re, sys
+p = pathlib.Path(sys.argv[1])
+txt = p.read_text(encoding="utf-8")
+if re.search(r"^PG_PORT=", txt, flags=re.M):
+    txt = re.sub(r"^PG_PORT=.*$", "PG_PORT=15432", txt, flags=re.M)
+else:
+    txt = txt.rstrip("\n") + "\nPG_PORT=15432\n"
+p.write_text(txt, encoding="utf-8")
+PYENV
+    fi
+    export PG_PORT=15432
+    PG_PORT_MIGRATED=true
+fi
+export PG_PORT="${PG_PORT:-15432}"
+
 ensure_quorum_nodes_initialized
 for_each_node tune_node_wan_and_swap
 for_each_node harden_node_ufw
@@ -75,16 +96,19 @@ if [[ "${DRY_RUN:-false}" == "true" ]]; then
     }
     for_each_node for_each_node_dry_rep
 else
-    # Проверяем, есть ли уже здоровый лидер Patroni (например, при --resume после переключения лидера на node2)
+    # Проверяем, есть ли уже здоровый лидер Patroni на целевом порту PG_PORT
     REUSE_EXISTING_PRIMARY=""
-    CANDIDATE_PRIMARY=$(find_patroni_primary_ip || true)
+    CANDIDATE_PRIMARY=""
+    if [[ "${PG_PORT_MIGRATED}" != "true" ]]; then
+        CANDIDATE_PRIMARY=$(find_patroni_primary_ip || true)
+    fi
     if [[ -n "${CANDIDATE_PRIMARY}" ]]; then
         PEER_REACH_OK=true
         check_pg_reach_cb() {
             local ip="$1" name="$3"
             [[ "${ip}" == "${CANDIDATE_PRIMARY}" ]] && return 0
-            if ! remote_exec "${ip}" "nc -z -w 5 '${CANDIDATE_PRIMARY}' '${PG_PORT:-5432}'" >/dev/null 2>&1; then
-                log_warn "  ⚠️  Узел ${name} (${ip}) не видит порт PostgreSQL ${CANDIDATE_PRIMARY}:${PG_PORT:-5432}"
+            if ! remote_exec "${ip}" "nc -z -w 8 '${CANDIDATE_PRIMARY}' '${PG_PORT:-15432}'" >/dev/null 2>&1; then
+                log_warn "  ⚠️  Узел ${name} (${ip}) не видит порт PostgreSQL ${CANDIDATE_PRIMARY}:${PG_PORT:-15432}"
                 PEER_REACH_OK=false
             fi
         }
@@ -130,9 +154,9 @@ else
     start_replica_cb() {
         local ip="$1" name="$3"
         [[ "${ip}" == "${ACTIVE_PRIMARY_IP}" ]] && return 0
-        if ! remote_exec "${ip}" "nc -z -w 6 '${ACTIVE_PRIMARY_IP}' '${PG_PORT:-5432}'" >/dev/null 2>&1; then
-            log_error "❌ Сетевой порт PostgreSQL ${ACTIVE_PRIMARY_IP}:${PG_PORT:-5432} недоступен с узла ${name} (${ip})!"
-            log_error "   Проверьте внешний облачный файрвол хостинга (Security Group / Cloud Firewall) между ${ip} и ${ACTIVE_PRIMARY_IP} для TCP ${PG_PORT:-5432}."
+        if ! remote_exec "${ip}" "nc -z -w 10 '${ACTIVE_PRIMARY_IP}' '${PG_PORT:-15432}' || (sleep 2 && nc -z -w 10 '${ACTIVE_PRIMARY_IP}' '${PG_PORT:-15432}')" >/dev/null 2>&1; then
+            log_error "❌ Сетевой порт PostgreSQL ${ACTIVE_PRIMARY_IP}:${PG_PORT:-15432} недоступен с узла ${name} (${ip})!"
+            log_error "   Проверьте внешний облачный файрвол хостинга (Security Group / Cloud Firewall) между ${ip} и ${ACTIVE_PRIMARY_IP} для TCP ${PG_PORT:-15432}."
             exit 1
         fi
         remote_exec_stdin "${ip}" "${PG_DATA_DIR}" <<'REMOTE_PREP_REPLICA'

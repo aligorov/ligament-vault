@@ -229,7 +229,7 @@ check_pasv_ports() {
     local pmin="${FTPS_PASV_MIN:-50000}" pmax="${FTPS_PASV_MAX:-50199}"
     local cur_https="${HTTPS_PORT:-443}"
     local conflicts
-    conflicts=$(remote_exec_stdin "${ip}" "${SFTP_PORT:-2022}" "${PG_PORT:-5432}" "${cur_https}" <<'REMOTE_PORTS' || echo ""
+    conflicts=$(remote_exec_stdin "${ip}" "${SFTP_PORT:-2022}" "${PG_PORT:-15432}" "${cur_https}" <<'REMOTE_PORTS' || echo ""
 sftp_p="$1"; pg_p="$2"; https_p="$3"
 for p in "${https_p}" "${sftp_p}" "${pg_p}" 2379 8888 9333; do
     proc=$(ss -H -tlnp "sport = :${p}" 2>/dev/null | head -n1 || true)

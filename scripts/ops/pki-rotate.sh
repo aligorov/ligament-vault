@@ -173,7 +173,7 @@ reload_rotated_node_services() {
         wait_for_remote_health "${ip}" "etcd ${name}" \
             "ECID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q etcd | head -n1); docker exec \"\${ECID}\" etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key endpoint health" 25 2
     fi
-    remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose restart swfs-volume swfs-filer swfs-s3 swfs-worker"
+    remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose restart swfs-volume swfs-filer swfs-s3 swfs-worker sftpgo"
     wait_for_remote_health "${ip}" "SWFS Filer ${name}" \
         "curl -sf http://127.0.0.1:${SWFS_FILER_PORT:-8888}/healthz || curl -sf http://127.0.0.1:${SWFS_FILER_METRICS_PORT:-9326}/metrics >/dev/null" 20 2
 }

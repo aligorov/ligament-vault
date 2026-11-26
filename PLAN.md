@@ -65,7 +65,7 @@ SFTPGo 2.7.6+ (Active)          SFTPGo 2.7.6+ (Standby)         SFTPGo 2.7.6+ (S
 | **SFTPGo WebAdmin** | `8081` | `127.0.0.1` | **Закрыто извне** | Панель управления и REST API (только SSH-туннель) |
 | **HAProxy / SWFS S3** | `5433` / `8333` | `127.0.0.1` | **Закрыто извне** | Локальные прокси до PG Primary и S3-шлюза |
 | **etcd** | `2379`, `2380` | `PUBLIC_IP` (+`lo`) | **IP нод + Арбитр** | Raft и DCS Patroni (mTLS) |
-| **PG 16 / Patroni API** | `5432`, `8008` | `0.0.0.0` | **IP нод + Арбитр** | БД, WAL-репликация (`verify-full`), `/primary`, `/failsafe` |
+| **PG 16 / Patroni API** | `15432`, `8008` | `0.0.0.0` | **IP нод (`/32`) + Арбитр (`:8008`)** | БД (`TLSv1.3` + mTLS `clientcert=verify-ca` + `scram-sha-256`), WAL-репликация (`verify-full`), `/primary`, `/failsafe` |
 | **SeaweedFS Core** | `9333`, `19333`, `8082`, `18082`, `8888`, `18888` | `0.0.0.0` | **Только IP нод** | Master Raft (`-electionTimeout=10s`), Volume, Filer (mTLS + JWT) |
 | **SWFS Admin / Worker** | `12535`, `22535` | `PUBLIC_IP`/`lo` | **Только IP нод** | Админка (`-port.legacy=0`) и gRPC worker (`[grpc.admin]`) |
 | **Metrics (`Prom`)** | `9100`, `9324`, `8008` | `PUBLIC_IP`/`lo` | **Только IP Арбитра** | Сбор метрик без экспорта в интернет |

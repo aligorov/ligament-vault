@@ -34,3 +34,4 @@ log-level-file=info
 
 [${CLUSTER_SLUG}]
 pg1-path=${PG_DATA_DIR}/data
+pg1-port=${PG_PORT}

@@ -81,7 +81,7 @@ else
 fi
 
 wait_for_remote_health "${NODE2_IP}" "HAProxy :5433 -> новый Primary" \
-    "PCID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q patroni | head -n1); docker exec \"\${PCID}\" pg_isready -h 127.0.0.1 -p ${HAPROXY_PG_PORT:-5433} -U postgres" 15 2
+    "PCID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q patroni | head -n1); docker exec -u postgres -e PGSSLMODE=verify-full -e PGSSLROOTCERT=/run/pg-certs/ca.crt -e PGSSLCERT=/run/pg-certs/pg-client.crt -e PGSSLKEY=/run/pg-certs/pg-client.key \"\${PCID}\" pg_isready -h 127.0.0.1 -p ${HAPROXY_PG_PORT:-5433} -U postgres" 15 2
 log_info "  ✅ PASS: HAProxy :5433 принимает подключения к новому Primary"
 
 if [[ "${DISRUPTIVE}" == "true" ]]; then
