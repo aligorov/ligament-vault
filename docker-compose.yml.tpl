@@ -144,7 +144,10 @@ services:
     cap_drop:
       - ALL
     cap_add:
+      - SETUID
+      - SETGID
       - DAC_OVERRIDE
+      - CHOWN
     logging: *default-logging
     command: >-
       master
@@ -180,7 +183,10 @@ services:
     cap_drop:
       - ALL
     cap_add:
+      - SETUID
+      - SETGID
       - DAC_OVERRIDE
+      - CHOWN
     logging: *default-logging
     command: >-
       volume
@@ -215,6 +221,11 @@ ${SWFS_VOLUME_MOUNTS}
       - "no-new-privileges:true"
     cap_drop:
       - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+      - CHOWN
     logging: *default-logging
     command: >-
       filer
@@ -248,6 +259,11 @@ ${SWFS_VOLUME_MOUNTS}
       - "no-new-privileges:true"
     cap_drop:
       - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+      - CHOWN
     logging: *default-logging
     command: >-
       s3
@@ -280,6 +296,11 @@ ${SWFS_VOLUME_MOUNTS}
       - "no-new-privileges:true"
     cap_drop:
       - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+      - CHOWN
     logging: *default-logging
     command: >-
       admin
@@ -310,6 +331,11 @@ ${SWFS_VOLUME_MOUNTS}
       - "no-new-privileges:true"
     cap_drop:
       - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+      - CHOWN
     logging: *default-logging
     command: >-
       worker
@@ -337,6 +363,11 @@ ${SWFS_VOLUME_MOUNTS}
       - "no-new-privileges:true"
     cap_drop:
       - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+      - CHOWN
     logging: *default-logging
     command: >-
       filer.backup
