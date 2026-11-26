@@ -616,6 +616,19 @@ EOF
     validate_json_file "${out}/revoked_user_certs.json"
     validate_yaml_file "${out}/docker-compose.yml"
     validate_yaml_file "${out}/patroni.yml"
+    python3 - "${out}/haproxy-pg.cfg" <<'PYHAP'
+import sys
+sec = None
+for idx, raw in enumerate(open(sys.argv[1], encoding="utf-8"), 1):
+    line = raw.strip()
+    if not line or line.startswith("#"):
+        continue
+    kw = line.split()[0]
+    if kw in ("global", "defaults", "frontend", "backend", "listen"):
+        sec = kw
+    elif sec is None:
+        raise SystemExit(f"Невалидный {sys.argv[1]}:{idx}: директива '{kw}' вне секции HAProxy")
+PYHAP
 
     log_debug "Конфиги для ${name} отрендерены и провалидированы в ${out}"
 }

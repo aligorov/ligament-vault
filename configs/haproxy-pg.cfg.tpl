@@ -1,9 +1,9 @@
 # ============================================================================
 # haproxy-pg.cfg.tpl — Локальный роутер Filer -> PG Primary (Ligament Vault)
 # ============================================================================
-# weed filer ([postgres2]) подключается к 127.0.0.1:${HAPROXY_PG_PORT}.
+# weed filer ([postgres2]) подключается к 127.0.0.1:HAPROXY_PG_PORT.
 # HAProxy выбирает актуального лидера PG через Patroni HTTP check GET /primary.
-# Переменные: ${HAPROXY_PG_PORT}, ${HAPROXY_PG_SERVERS}
+# Переменные: HAPROXY_PG_PORT, HAPROXY_PG_SERVERS
 # ============================================================================
 
 global

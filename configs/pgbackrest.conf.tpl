@@ -2,10 +2,10 @@
 # pgbackrest.conf.tpl — Конфигурация pgBackRest для Patroni (Ligament Vault)
 # ============================================================================
 # Монтируется в /etc/pgbackrest/pgbackrest.conf внутри контейнера patroni.
-# Клиентское AES-256-CBC шифрование выполняется до отправки в внешний S3.
-# Переменные: ${PG_DATA_DIR}, ${BACKUP_S3_BUCKET}, ${BACKUP_S3_HOST},
-#   ${BACKUP_S3_REGION}, ${BACKUP_S3_ACCESS_KEY}, ${BACKUP_S3_SECRET_KEY},
-#   ${BACKUP_ENCRYPTION_KEY}
+# Клиентское AES-256-CBC шифрование выполняется до отправки во внешний S3.
+# Параметры: PG_DATA_DIR, BACKUP_S3_BUCKET, BACKUP_S3_HOST,
+#   BACKUP_S3_REGION, BACKUP_S3_ACCESS_KEY, BACKUP_S3_SECRET_KEY,
+#   BACKUP_ENCRYPTION_KEY
 # ============================================================================
 
 [global]

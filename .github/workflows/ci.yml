@@ -177,6 +177,25 @@ jobs:
           grep -q 'ssl_min_protocol_version: "TLSv1.3"' "${WORKDIR}/repo/.rendered/node1/patroni.yml"
           grep -q 'sslcert=/certs/pg-client.crt' "${WORKDIR}/repo/.rendered/node1/sftpgo.json"
           grep -q 'pg1-port=15432' "${WORKDIR}/repo/.rendered/node1/pgbackrest.conf"
+          test "$(grep -cE '^[[:space:]]*server node[123] ' "${WORKDIR}/repo/.rendered/node1/haproxy-pg.cfg")" = "3"
+          python3 - "${WORKDIR}/repo/.rendered/node1/haproxy-pg.cfg" <<'PYHAP'
+          import sys
+          sec = None
+          servers = 0
+          for idx, raw in enumerate(open(sys.argv[1], encoding="utf-8"), 1):
+              s = raw.strip()
+              if not s or s.startswith("#"):
+                  continue
+              kw = s.split()[0]
+              if kw in ("global", "defaults", "frontend", "backend", "listen"):
+                  sec = kw
+              elif sec is None:
+                  raise SystemExit(f"haproxy-pg.cfg:{idx} directive '{kw}' out of section")
+              elif kw == "server":
+                  assert sec == "backend", f"server directive in section '{sec}' at line {idx}"
+                  servers += 1
+          assert servers == 3, f"Expected 3 server entries in multi-node haproxy-pg.cfg, got {servers}"
+          PYHAP
 
           # Verify image mirror candidate resolution and pinned digest safety
           (
