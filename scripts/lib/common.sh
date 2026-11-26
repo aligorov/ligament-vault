@@ -223,9 +223,9 @@ for_each_node() {
     done
 }
 
-# --- SSH / SCP обертки ---
+# --- SSH / SCP обертки (адаптированы под высокий WAN RTT до 250ms и кратковременные замирания VPS) ---
 _ssh_base_opts() {
-    local opts="-o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o ServerAliveInterval=5 -o BatchMode=yes"
+    local opts="-o StrictHostKeyChecking=accept-new -o ConnectTimeout=25 -o ServerAliveInterval=15 -o ServerAliveCountMax=6 -o TCPKeepAlive=yes -o BatchMode=yes"
     if [[ -n "${SSH_IDENTITY_FILE:-}" && -f "${SSH_IDENTITY_FILE}" ]]; then
         opts+=" -i ${SSH_IDENTITY_FILE}"
     fi
@@ -239,8 +239,23 @@ remote_exec() {
     if [[ -n "${ADMIN_SSH_PORT:-}" && "${ADMIN_SSH_PORT}" != "22" ]]; then
         ssh_opts+=" -p ${ADMIN_SSH_PORT}"
     fi
-    # shellcheck disable=SC2086
-    run_or_dry ssh ${ssh_opts} "root@${ip}" "$@"
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        # shellcheck disable=SC2086
+        run_or_dry ssh ${ssh_opts} "root@${ip}" "$@"
+        return 0
+    fi
+    local attempt rc=0
+    for attempt in 1 2 3; do
+        rc=0
+        # shellcheck disable=SC2086
+        ssh ${ssh_opts} "root@${ip}" "$@" || rc=$?
+        if (( rc != 255 )) || (( attempt == 3 )); then
+            return "${rc}"
+        fi
+        log_warn "SSH-соединение с ${ip} прервалось (код 255, попытка ${attempt}/3) — повтор через 5с..."
+        sleep 5
+    done
+    return "${rc}"
 }
 
 remote_exec_stdin() {
@@ -255,8 +270,22 @@ remote_exec_stdin() {
         log_info "[DRY-RUN] ssh root@${ip} bash -s -- $*"
         return 0
     fi
-    # shellcheck disable=SC2086
-    ssh ${ssh_opts} "root@${ip}" bash -s -- "$@"
+    local tmp_in attempt rc=0
+    tmp_in=$(mktemp)
+    cat > "${tmp_in}"
+    for attempt in 1 2 3; do
+        rc=0
+        # shellcheck disable=SC2086
+        ssh ${ssh_opts} "root@${ip}" bash -s -- "$@" < "${tmp_in}" || rc=$?
+        if (( rc != 255 )) || (( attempt == 3 )); then
+            rm -f "${tmp_in}"
+            return "${rc}"
+        fi
+        log_warn "SSH-соединение с ${ip} прервалось (код 255, попытка ${attempt}/3) — повтор через 5с..."
+        sleep 5
+    done
+    rm -f "${tmp_in}"
+    return "${rc}"
 }
 
 remote_copy() {
@@ -264,15 +293,30 @@ remote_copy() {
     local target="$2"
     local ip="${target%%:*}"
     local dst="${target#*:}"
-    local scp_opts="-o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o BatchMode=yes"
+    local scp_opts="-o StrictHostKeyChecking=accept-new -o ConnectTimeout=25 -o ServerAliveInterval=15 -o ServerAliveCountMax=6 -o BatchMode=yes"
     if [[ -n "${SSH_IDENTITY_FILE:-}" && -f "${SSH_IDENTITY_FILE}" ]]; then
         scp_opts+=" -i ${SSH_IDENTITY_FILE}"
     fi
     if [[ -n "${ADMIN_SSH_PORT:-}" && "${ADMIN_SSH_PORT}" != "22" ]]; then
         scp_opts+=" -P ${ADMIN_SSH_PORT}"
     fi
-    # shellcheck disable=SC2086
-    run_or_dry scp ${scp_opts} "${src}" "root@${ip}:${dst}"
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        # shellcheck disable=SC2086
+        run_or_dry scp ${scp_opts} "${src}" "root@${ip}:${dst}"
+        return 0
+    fi
+    local attempt rc=0
+    for attempt in 1 2 3; do
+        rc=0
+        # shellcheck disable=SC2086
+        scp ${scp_opts} "${src}" "root@${ip}:${dst}" || rc=$?
+        if (( rc == 0 )) || (( attempt == 3 )); then
+            return "${rc}"
+        fi
+        log_warn "SCP на ${ip} не удался (код ${rc}, попытка ${attempt}/3) — повтор через 5с..."
+        sleep 5
+    done
+    return "${rc}"
 }
 
 # --- Распределенная блокировка операций (локальный PID + etcd CAS lease) ---

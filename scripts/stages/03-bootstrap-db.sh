@@ -19,6 +19,7 @@ load_cluster_env "${CONFIG_ROOT:-${SCRIPT_DIR}}"
 log_step "Стадия 3: Bootstrap DB (etcd + Patroni + HAProxy + pgBackRest)"
 
 ensure_quorum_nodes_initialized
+for_each_node tune_node_wan_and_swap
 for_each_node build_patroni_image_on_node
 
 render_and_push_cb() {

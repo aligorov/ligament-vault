@@ -538,8 +538,53 @@ REMOTE_UFW
     fi
 }
 
+tune_node_wan_and_swap() {
+    local ip="$1"
+    local peer_ips
+    peer_ips=$(get_node_ips | tr '\n' ' ')
+    remote_exec_stdin "${ip}" "${ADMIN_SSH_PORT:-22}" "${peer_ips}" <<'REMOTE_TUNE'
+set -euo pipefail
+SSH_PORT="$1"; PEER_IPS="$2"
+
+# Отключаем обратный DNS-поиск в sshd (иначе на некоторых VPS логин висит по 15-30с!)
+if [[ -d /etc/ssh/sshd_config.d ]]; then
+    if [[ -f /etc/ssh/sshd_config.d/99-ligament-keyonly.conf ]] && ! grep -q '^UseDNS no' /etc/ssh/sshd_config.d/99-ligament-keyonly.conf; then
+        echo "UseDNS no" >> /etc/ssh/sshd_config.d/99-ligament-keyonly.conf
+        sshd -t 2>/dev/null && (systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true)
+    fi
+fi
+
+# Белый список узлов кластера в fail2ban
+if [[ -d /etc/fail2ban/jail.d ]]; then
+    cat > /etc/fail2ban/jail.d/sshd.conf <<F2B
+[sshd]
+enabled = true
+port = ${SSH_PORT}
+filter = sshd
+ignoreip = 127.0.0.1/8 ::1 ${PEER_IPS}
+maxretry = 6
+bantime = 3600
+findtime = 600
+F2B
+    systemctl reload fail2ban 2>/dev/null || systemctl restart fail2ban 2>/dev/null || true
+fi
+
+# Автоматический swap 1GB на малых VPS (< 3GB RAM), чтобы сборка/контейнеры не вешали sshd в OOM-thrash
+MEM_MB=$(awk '/MemTotal:/ {printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 4096)
+SWAP_MB=$(awk '/SwapTotal:/ {printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 1024)
+FREE_ROOT_MB=$(df -Pm / 2>/dev/null | awk 'NR==2{print $4}' || echo 0)
+if (( MEM_MB < 3000 && SWAP_MB < 256 && FREE_ROOT_MB >= 3500 )) && [[ ! -f /swapfile ]]; then
+    (fallocate -l 1024M /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=1024 status=none) && \
+    chmod 600 /swapfile && mkswap /swapfile >/dev/null && swapon /swapfile && \
+    (grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab) || rm -f /swapfile
+fi
+REMOTE_TUNE
+}
+
 harden_node_full() {
     local ip="$1" dc="$2" name="$3" idx="$4"
+    local peer_ips
+    peer_ips=$(get_node_ips | tr '\n' ' ')
     log_info "Укрепление ОС на ${name} (${ip})..."
 
     remote_exec_stdin "${ip}" \
@@ -550,9 +595,10 @@ harden_node_full() {
         "${SWFS_VOLUME_DIR%%,*}" \
         "${PG_DATA_DIR}" \
         "${ETCD_DATA_DIR:-/data/etcd}" \
-        "${SWFS_MASTER_DIR:-/data/swfs-master}" <<'REMOTE_HARDEN'
+        "${SWFS_MASTER_DIR:-/data/swfs-master}" \
+        "${peer_ips}" <<'REMOTE_HARDEN'
 set -euo pipefail
-BASE_DIR="$1"; SSH_PORT="$2"; SFTP_TMP="$3"; SFTP_DATA="$4"; SWFS_DIR="$5"; PG_DIR="$6"; ETCD_DIR="$7"; SWFS_MDIR="$8"
+BASE_DIR="$1"; SSH_PORT="$2"; SFTP_TMP="$3"; SFTP_DATA="$4"; SWFS_DIR="$5"; PG_DIR="$6"; ETCD_DIR="$7"; SWFS_MDIR="$8"; PEER_IPS="$9"
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
@@ -572,6 +618,7 @@ KbdInteractiveAuthentication no
 ChallengeResponseAuthentication no
 PermitRootLogin prohibit-password
 PubkeyAuthentication yes
+UseDNS no
 SSHD
     if sshd -t 2>/dev/null; then
         systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
@@ -607,7 +654,8 @@ cat > /etc/fail2ban/jail.d/sshd.conf <<F2B
 enabled = true
 port = ${SSH_PORT}
 filter = sshd
-maxretry = 5
+ignoreip = 127.0.0.1/8 ::1 ${PEER_IPS}
+maxretry = 6
 bantime = 3600
 findtime = 600
 F2B
@@ -620,6 +668,7 @@ mkdir -p "${BASE_DIR}/configs/seaweedfs" "${BASE_DIR}/certs/ssl" "${BASE_DIR}/ss
 chown -R 1000:1000 "${SFTP_TMP}" "${SFTP_DATA}" "${BASE_DIR}/hooks"
 REMOTE_HARDEN
 
+    tune_node_wan_and_swap "${ip}" "${dc}" "${name}"
     harden_node_ufw "${ip}" "${dc}" "${name}" "${idx}"
     log_info "  ✅ Хост ${name} готов"
 }
