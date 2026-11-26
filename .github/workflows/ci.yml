@@ -132,7 +132,7 @@ jobs:
             -d '{"node":"node4","mode":"preinstall"}' \
             https://127.0.0.1:18443/api/v1/nodes/remove | jq -e '.ok == true'
           curl -ksf -H "Authorization: Bearer ${EXTRACTED_PW}" https://127.0.0.1:18443/api/v1/overview \
-            | jq -e '(.nodes | length) == 3 and .nodes[2].name == "node3"'
+            | jq -e '(.health.nodes | length) == 3 and .health.nodes[2].node == "node3"'
           curl -ksf -H "Authorization: Bearer ${EXTRACTED_PW}" https://127.0.0.1:18443/api/v1/tasks | jq -e '.tasks | type == "array"'
           kill "${PANEL_PID}"
 
@@ -467,14 +467,15 @@ jobs:
           nc -z 127.0.0.1 2022
           nc -z 127.0.0.1 21
 
-          # 1. Verify SFTPGo HTTPS WebClient endpoint serves HTTP 200
+          # 1. Verify SFTPGo HTTPS WebClient endpoint serves TLS + HTTP 200 (after redirect if any)
           WC_CODE=""
           for _ in $(seq 1 5); do
-              WC_CODE=$(curl -ksS -o /dev/null -w '%{http_code}' https://127.0.0.1:8444/web/client/login || echo "err")
+              WC_CODE=$(curl -ksSL -o /dev/null -w '%{http_code}' https://127.0.0.1:8444/web/client/login || echo "err")
               [[ "${WC_CODE}" == "200" ]] && break
               sleep 1
           done
-          echo "SFTPGo WebClient HTTP code: ${WC_CODE}"
+          echo "SFTPGo WebClient final HTTP code: ${WC_CODE}"
+          curl -ksSI https://127.0.0.1:8444/web/client/login | grep -iE 'HTTP/|Location:' || true
           if [[ "${WC_CODE}" != "200" ]]; then
               docker compose logs sftpgo | tail -n 40 || true
               exit 1
