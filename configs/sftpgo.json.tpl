@@ -93,7 +93,7 @@
         "enable_web_client": true,
         "enable_rest_api": false,
         "enabled_login_methods": 0,
-        "tls_mode": 1,
+        "enable_https": true,
         "certificate_file": "/etc/sftpgo/ssl/fullchain.pem",
         "certificate_key_file": "/etc/sftpgo/ssl/privkey.pem",
         "min_tls_version": 13,

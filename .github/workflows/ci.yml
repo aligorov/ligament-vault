@@ -92,7 +92,7 @@ jobs:
             -H "Content-Type: application/json" \
             -d "{\"username\":\"admin\",\"password\":\"${EXTRACTED_PW}\"}" | jq -e '.ok == true'
           curl -ksf -H "Authorization: Bearer ${EXTRACTED_PW}" https://127.0.0.1:18443/api/v1/overview \
-            | jq -e '.config.CLUSTER_SLUG == "ligament-vault" and .config.backup_configured == false'
+            | jq -e '.config.CLUSTER_SLUG == "ligament-vault" and .backup_configured == false'
 
           # Save S3 backup config with special chars ($, ", \) and verify age decrypt round-trip + overview
           python3 - "${EXTRACTED_PW}" <<'PYEOF'
@@ -116,7 +116,7 @@ jobs:
               assert r.status == 200, r.status
           PYEOF
           curl -ksf -H "Authorization: Bearer ${EXTRACTED_PW}" https://127.0.0.1:18443/api/v1/overview \
-            | jq -e '.config.backup_configured == true and .config.BACKUP_S3_REGION == "eu-central-1" and .config.BACKUP_S3_BUCKET == "vault-bk"'
+            | jq -e '.backup_configured == true and .config.BACKUP_S3_REGION == "eu-central-1" and .config.BACKUP_S3_BUCKET == "vault-bk"'
           ROUNDTRIP_SK=$(
             source scripts/lib/common.sh
             load_cluster_env "${WORKDIR}/repo"
@@ -468,9 +468,17 @@ jobs:
           nc -z 127.0.0.1 21
 
           # 1. Verify SFTPGo HTTPS WebClient endpoint serves HTTP 200
-          WC_CODE=$(curl -ks -o /dev/null -w '%{http_code}' https://127.0.0.1:8444/web/client/login)
+          WC_CODE=""
+          for _ in $(seq 1 5); do
+              WC_CODE=$(curl -ksS -o /dev/null -w '%{http_code}' https://127.0.0.1:8444/web/client/login || echo "err")
+              [[ "${WC_CODE}" == "200" ]] && break
+              sleep 1
+          done
           echo "SFTPGo WebClient HTTP code: ${WC_CODE}"
-          [[ "${WC_CODE}" == "200" ]]
+          if [[ "${WC_CODE}" != "200" ]]; then
+              docker compose logs sftpgo | tail -n 40 || true
+              exit 1
+          fi
 
           # 2. Verify SeaweedFS volume.fix.replication -n output and non-false-positive regex
           FIX_OUT=$(docker exec -i "$(docker compose ps -q swfs-filer | head -n1)" weed shell -master=127.0.0.1:9333 <<< 'volume.fix.replication -n' 2>&1 || true)
