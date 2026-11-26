@@ -146,6 +146,7 @@ jobs:
           ./ligactl pki rotate --all --dry-run --yes
           ./ligactl backup --dry-run
           ./ligactl backup --verify --dry-run
+          ./ligactl dr verify-backup --dry-run
           ./ligactl verify --sprint 1 --dry-run
           ./ligactl verify --disruptive --dry-run --yes
           ./ligactl status --json --dry-run
@@ -477,7 +478,7 @@ jobs:
           echo "SFTPGo WebClient final HTTP code: ${WC_CODE}"
           curl -ksSI https://127.0.0.1:8444/web/client/login | grep -iE 'HTTP/|Location:' || true
           if [[ "${WC_CODE}" != "200" ]]; then
-              docker compose logs sftpgo | tail -n 40 || true
+              docker compose logs sftpgo || true
               exit 1
           fi
 

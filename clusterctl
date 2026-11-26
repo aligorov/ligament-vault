@@ -146,6 +146,9 @@ show_help() {
         dr)
             echo "Использование: ./${CLI_NAME} dr <restore|verify-backup> [--target-time '<TS>'|--latest] [--dry-run]"
             ;;
+        backup)
+            echo "Использование: ./${CLI_NAME} backup <incr|full|verify-restore|--verify> [--dry-run]"
+            ;;
         lab)
             echo "Использование: ./${CLI_NAME} lab <up|down|status|verify> [--provider auto|lima|multipass]"
             ;;
@@ -179,6 +182,7 @@ Day-2 (Эксплуатация, Клиенты, PKI и DR):
   scale          Масштабирование (add/replace/remove/expand-disk)
   upgrade        Rolling-обновление по versions.env
   rollback       Откат на .rollback_state
+  backup         Бэкапы БД и SeaweedFS во внешний S3 (incr/full/verify-restore)
   dr             Автоматическое восстановление кластера из внешнего S3 (restore)
   status         Сводный статус кластера (--json / --strict)
   unlock         Сброс зависшей блокировки операций (--force)
@@ -466,6 +470,11 @@ main() {
                 exit 1
             fi
             bash "${OPS_DIR}/upgrade-cluster.sh" --rollback "${cmd_args[@]+"${cmd_args[@]}"}"
+            ;;
+        backup)
+            local bmode="${cmd_args[0]:-incr}"
+            [[ "${bmode}" == "--verify" ]] && bmode="verify-restore"
+            bash "${OPS_DIR}/backup-job.sh" "${bmode}"
             ;;
         dr)
             log_info "═══ ${PROJECT_NAME}: Disaster Recovery ═══"

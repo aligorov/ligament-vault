@@ -138,7 +138,7 @@
       "execute_for": [],
       "hook": ""
     },
-    "update_mode": 1,
+    "update_mode": 0,
     "create_default_admin": true,
     "skip_natural_keys_validation": false,
     "password_hashing": {
