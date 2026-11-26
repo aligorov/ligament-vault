@@ -614,7 +614,7 @@ jobs:
 
           # Verify object stored under prefix users/ciuser/ in sftp-worm AND check Object Lock retention + delete denial
           sudo python3 - "sftpgo-s3-access" "${SWFS_S3_SECRET_KEY_SFTPGO}" <<'PYEOF'
-          import datetime, hashlib, hmac, sys, urllib.error, urllib.request
+          import datetime, hashlib, hmac, sys, urllib.error, urllib.parse, urllib.request
           ak, sk = sys.argv[1:]
           endpoint = "http://127.0.0.1:8333"
           region = "us-east-1"
@@ -623,6 +623,12 @@ jobs:
               return hmac.new(k, m.encode("utf-8"), hashlib.sha256).digest()
 
           def s3_req(method, path, query=""):
+              # SigV4: каноничный query обязан быть URL-encoded (RFC 3986) и отсортирован по ключу
+              pairs = []
+              for part in [p for p in query.split("&") if p]:
+                  k, _, v = part.partition("=")
+                  pairs.append((urllib.parse.quote(k, safe="-_.~"), urllib.parse.quote(v, safe="-_.~")))
+              query = "&".join(f"{k}={v}" for k, v in sorted(pairs))
               now = datetime.datetime.now(datetime.timezone.utc)
               amz = now.strftime("%Y%m%dT%H%M%SZ")
               ds = now.strftime("%Y%m%d")
@@ -643,6 +649,8 @@ jobs:
               except urllib.error.HTTPError as e:
                   return e.code, e.read().decode("utf-8", "replace")
 
+          st_all, xml_all = s3_req("GET", "/sftp-worm", "list-type=2")
+          print(f"sftp-worm FULL list (HTTP {st_all}): {xml_all}")
           st_ls, xml_ls = s3_req("GET", "/sftp-worm", "list-type=2&prefix=users/ciuser/")
           print(f"sftp-worm list (HTTP {st_ls}): {xml_ls}")
           assert st_ls == 200 and "users/ciuser/worm_sample.txt" in xml_ls, (st_ls, xml_ls)
