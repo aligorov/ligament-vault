@@ -389,11 +389,15 @@ REMOTE_DIRS
         remote_copy "${out}/hooks/ligament-2fa-hook.sh" "${ip}:${REMOTE_BASE_DIR}/hooks/ligament-2fa-hook.sh"
     fi
     remote_copy "${out}/hooks/ligament-2fa.env" "${ip}:${REMOTE_BASE_DIR}/hooks/ligament-2fa.env"
+    if [[ -f "$(state_root)/.pki/ca/ca.crt" ]] && [[ ! -f "$(state_root)/.pki/ca/crl.pem" ]] && [[ "${DRY_RUN:-false}" != "true" ]]; then
+        ensure_ca_exists
+    fi
     if [[ -f "$(state_root)/.pki/ca/ca.crt" ]]; then
         remote_copy "$(state_root)/.pki/ca/ca.crt" "${ip}:${REMOTE_BASE_DIR}/certs/ca.crt"
     fi
     if [[ -f "$(state_root)/.pki/ca/crl.pem" ]]; then
         remote_copy "$(state_root)/.pki/ca/crl.pem" "${ip}:${REMOTE_BASE_DIR}/certs/${name}/crl.pem"
+        remote_copy "$(state_root)/.pki/ca/crl.pem" "${ip}:${REMOTE_BASE_DIR}/certs/${name}/ca-crl.crt"
     fi
 
     remote_exec "${ip}" "
@@ -401,7 +405,7 @@ REMOTE_DIRS
                   '${REMOTE_BASE_DIR}/certs' '${REMOTE_BASE_DIR}/certs/ssl' '${REMOTE_BASE_DIR}/ssh-host-keys' '${REMOTE_BASE_DIR}/hooks' && \
         chmod 600 '${REMOTE_BASE_DIR}/docker-compose.yml' '${REMOTE_BASE_DIR}/configs/patroni.yml' '${REMOTE_BASE_DIR}/configs/pgbackrest.conf' && \
         chmod 644 '${REMOTE_BASE_DIR}/configs/haproxy-pg.cfg' && \
-        chmod 644 '${REMOTE_BASE_DIR}/certs/ca.crt' '${REMOTE_BASE_DIR}/certs/${name}/crl.pem' 2>/dev/null || true && \
+        chmod 644 '${REMOTE_BASE_DIR}/certs/ca.crt' '${REMOTE_BASE_DIR}/certs/${name}/crl.pem' '${REMOTE_BASE_DIR}/certs/${name}/ca-crl.crt' 2>/dev/null || true && \
         chown 1000:1000 '${REMOTE_BASE_DIR}/configs/seaweedfs/'*.toml '${REMOTE_BASE_DIR}/configs/seaweedfs/s3.json' && \
         chmod 600 '${REMOTE_BASE_DIR}/configs/seaweedfs/'*.toml '${REMOTE_BASE_DIR}/configs/seaweedfs/s3.json' && \
         chown 1000:1000 '${REMOTE_BASE_DIR}/configs/sftpgo.json' '${REMOTE_BASE_DIR}/configs/revoked_user_certs.json' \
@@ -422,7 +426,7 @@ REMOTE_DIRS
         fi
         PCID=\$(cd '${REMOTE_BASE_DIR}' 2>/dev/null && docker compose ps -q patroni 2>/dev/null | head -n1 || true)
         if [[ -n \"\${PCID}\" ]]; then
-            docker exec \"\${PCID}\" bash -c 'if [[ -f /etc/patroni/patroni.yml ]]; then cp -L /certs/crl.pem /run/pg-certs/crl.pem 2>/dev/null || true; cp -L /etc/patroni/patroni.yml /run/pg-certs/patroni.yml && chown postgres:postgres /run/pg-certs/patroni.yml /run/pg-certs/crl.pem 2>/dev/null || true && chmod 600 /run/pg-certs/patroni.yml && kill -HUP 1; fi' 2>/dev/null || true
+            docker exec \"\${PCID}\" bash -c 'if [[ -f /etc/patroni/patroni.yml ]]; then cp -L /certs/ca-crl.crt /run/pg-certs/ca-crl.crt 2>/dev/null || true; cp -L /etc/patroni/patroni.yml /run/pg-certs/patroni.yml && chown postgres:postgres /run/pg-certs/patroni.yml /run/pg-certs/ca-crl.crt 2>/dev/null || true && chmod 600 /run/pg-certs/patroni.yml && kill -HUP 1; fi' 2>/dev/null || true
         fi
     "
     if [[ "${DRY_RUN:-false}" != "true" ]]; then
@@ -907,7 +911,8 @@ generate_node_certs() {
     remote_copy "${ca_dir}/ca.crt" "${ip}:${REMOTE_BASE_DIR}/certs/${name}/ca.crt"
     if [[ -f "${ca_dir}/crl.pem" ]]; then
         remote_copy "${ca_dir}/crl.pem" "${ip}:${REMOTE_BASE_DIR}/certs/${name}/crl.pem"
-        remote_exec "${ip}" "chmod 644 '${REMOTE_BASE_DIR}/certs/ca.crt' '${REMOTE_BASE_DIR}/certs/${name}/ca.crt' '${REMOTE_BASE_DIR}/certs/${name}/crl.pem'"
+        remote_copy "${ca_dir}/crl.pem" "${ip}:${REMOTE_BASE_DIR}/certs/${name}/ca-crl.crt"
+        remote_exec "${ip}" "chmod 644 '${REMOTE_BASE_DIR}/certs/ca.crt' '${REMOTE_BASE_DIR}/certs/${name}/ca.crt' '${REMOTE_BASE_DIR}/certs/${name}/crl.pem' '${REMOTE_BASE_DIR}/certs/${name}/ca-crl.crt'"
     else
         remote_exec "${ip}" "chmod 644 '${REMOTE_BASE_DIR}/certs/ca.crt' '${REMOTE_BASE_DIR}/certs/${name}/ca.crt'"
     fi
@@ -983,11 +988,12 @@ revoke_node_certs() {
             cip=$(get_node_ip "$i"); cname=$(get_node_name "$i")
             [[ "${cname}" == "${old_name}" ]] && continue
             remote_copy "${ca_dir}/crl.pem" "${cip}:${REMOTE_BASE_DIR}/certs/${cname}/crl.pem" 2>/dev/null || continue
+            remote_copy "${ca_dir}/crl.pem" "${cip}:${REMOTE_BASE_DIR}/certs/${cname}/ca-crl.crt" 2>/dev/null || true
             remote_exec "${cip}" "
-                chmod 644 '${REMOTE_BASE_DIR}/certs/${cname}/crl.pem'
+                chmod 644 '${REMOTE_BASE_DIR}/certs/${cname}/crl.pem' '${REMOTE_BASE_DIR}/certs/${cname}/ca-crl.crt'
                 PCID=\$(cd '${REMOTE_BASE_DIR}' 2>/dev/null && docker compose ps -q patroni 2>/dev/null | head -n1 || true)
                 if [[ -n \"\${PCID}\" ]]; then
-                    docker exec \"\${PCID}\" bash -c 'cp -L /certs/crl.pem /run/pg-certs/crl.pem && chown postgres:postgres /run/pg-certs/crl.pem && chmod 644 /run/pg-certs/crl.pem' 2>/dev/null || true
+                    docker exec \"\${PCID}\" bash -c 'cp -L /certs/ca-crl.crt /run/pg-certs/ca-crl.crt && chown postgres:postgres /run/pg-certs/ca-crl.crt && chmod 644 /run/pg-certs/ca-crl.crt' 2>/dev/null || true
                     docker exec -u postgres \"\${PCID}\" psql -U postgres -c 'SELECT pg_reload_conf();' >/dev/null 2>&1 || true
                 fi
             " 2>/dev/null || true

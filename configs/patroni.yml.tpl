@@ -78,7 +78,7 @@ ${PATRONI_SLOTS_YAML}
         ssl_cert_file: /run/pg-certs/pg-server.crt
         ssl_key_file: /run/pg-certs/pg-server.key
         ssl_ca_file: /run/pg-certs/ca.crt
-        ssl_crl_file: /run/pg-certs/crl.pem
+        ssl_crl_file: /run/pg-certs/ca-crl.crt
 
   initdb:
     - encoding: UTF8

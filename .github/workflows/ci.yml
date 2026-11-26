@@ -248,7 +248,8 @@ jobs:
           cp "${CA_DIR}/ca.crt" "${CERT_OUT}/ca.crt"
           cp "${CA_DIR}/ca.crt" "${WORKDIR}/repo/certs/ca.crt"
           cp "${CA_DIR}/crl.pem" "${CERT_OUT}/crl.pem"
-          chmod 644 "${CERT_OUT}/crl.pem" "${CERT_OUT}/ca.crt" "${WORKDIR}/repo/certs/ca.crt"
+          cp "${CA_DIR}/crl.pem" "${CERT_OUT}/ca-crl.crt"
+          chmod 644 "${CERT_OUT}/crl.pem" "${CERT_OUT}/ca-crl.crt" "${CERT_OUT}/ca.crt" "${WORKDIR}/repo/certs/ca.crt"
           SAN="IP:${HOST_IP},IP:127.0.0.1,DNS:node1,DNS:localhost"
           ACTIVE_CA_KEY="${CA_DIR}/ca.key"
           for role in "${PKI_ROLES[@]}"; do
@@ -412,7 +413,7 @@ jobs:
           assert "pg-client" in (client_dn or ""), f"Expected pg-client in client_dn, got {client_dn}"
           cur.execute("SHOW ssl_crl_file")
           crl_file = cur.fetchone()[0]
-          assert crl_file == "/run/pg-certs/crl.pem", f"Expected CRL file active, got {crl_file}"
+          assert crl_file == "/run/pg-certs/ca-crl.crt", f"Expected CRL file active, got {crl_file}"
           cur.close()
           conn.close()
           print(f"Zero-Trust PG verified: port=15432, ssl={ssl_on}, version={tls_ver}, client_dn={client_dn}, crl={crl_file}")

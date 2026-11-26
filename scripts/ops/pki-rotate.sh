@@ -71,7 +71,7 @@ import datetime, glob, os, subprocess, sys
 cdir = sys.argv[1]
 days_list = []
 for f in glob.glob(os.path.join(cdir, "*.crt")):
-    if os.path.basename(f) == "ca.crt":
+    if os.path.basename(f) in ("ca.crt", "ca-crl.crt"):
         continue
     out = subprocess.check_output(["openssl", "x509", "-in", f, "-noout", "-enddate"], text=True).strip()
     dt_str = out.split("=", 1)[1].replace(" GMT", "").strip()
