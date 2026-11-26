@@ -297,15 +297,22 @@ jobs:
           trap cleanup EXIT
 
           docker compose up -d etcd
+          ETCD_OK=false
           for _ in $(seq 1 25); do
               if docker exec "$(docker ps -qf name=etcd)" etcdctl \
                   --endpoints="https://127.0.0.1:2379" \
                   --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key \
                   endpoint health >/dev/null 2>&1; then
+                  ETCD_OK=true
                   break
               fi
               sleep 1
           done
+          if [[ "${ETCD_OK}" != "true" ]]; then
+              docker compose ps -a || true
+              docker compose logs etcd || true
+              exit 1
+          fi
 
           docker compose up -d patroni
           PRIMARY_OK=false

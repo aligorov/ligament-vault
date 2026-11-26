@@ -32,6 +32,8 @@ services:
       - "no-new-privileges:true"
     cap_drop:
       - ALL
+    cap_add:
+      - DAC_OVERRIDE
     logging: *default-logging
     environment:
       ETCD_NAME: "etcd-${NODE_NAME}"
@@ -141,6 +143,8 @@ services:
       - "no-new-privileges:true"
     cap_drop:
       - ALL
+    cap_add:
+      - DAC_OVERRIDE
     logging: *default-logging
     command: >-
       master
@@ -175,6 +179,8 @@ services:
       - "no-new-privileges:true"
     cap_drop:
       - ALL
+    cap_add:
+      - DAC_OVERRIDE
     logging: *default-logging
     command: >-
       volume

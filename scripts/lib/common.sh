@@ -125,6 +125,7 @@ load_cluster_env() {
         while IFS= read -r -d '' _k && IFS= read -r -d '' _v; do
             if [[ "${_k}" =~ ^[A-Z][A-Z0-9_]*$ ]]; then
                 printf -v "${_k}" '%s' "${_v}"
+                # shellcheck disable=SC2163
                 export "${_k}"
             fi
         done < <(printf '%s\n' "${decrypted_env}" | python3 -c '
