@@ -177,6 +177,23 @@ jobs:
           grep -q 'ssl_min_protocol_version: "TLSv1.3"' "${WORKDIR}/repo/.rendered/node1/patroni.yml"
           grep -q 'sslcert=/certs/pg-client.crt' "${WORKDIR}/repo/.rendered/node1/sftpgo.json"
           grep -q 'pg1-port=15432' "${WORKDIR}/repo/.rendered/node1/pgbackrest.conf"
+
+          # Verify image mirror candidate resolution and pinned digest safety
+          (
+            set -euo pipefail
+            export SCRIPT_DIR="${WORKDIR}/repo"
+            export CONFIG_ROOT="${WORKDIR}/repo"
+            source "${WORKDIR}/repo/scripts/lib/common.sh"
+            source "${WORKDIR}/repo/scripts/lib/deploy.sh"
+            load_cluster_env "${WORKDIR}/repo"
+            _image_mirror_candidates "quay.io/coreos/etcd:v3.5.17" | grep -qx "gcr.io/etcd-development/etcd:v3.5.17"
+            _image_mirror_candidates "haproxy:3.0-alpine" | grep -qx "mirror.gcr.io/library/haproxy:3.0-alpine"
+            _image_mirror_candidates "chrislusf/seaweedfs:4.55" | grep -qx "mirror.gcr.io/chrislusf/seaweedfs:4.55"
+            test "$(_image_mirror_candidates "quay.io/coreos/etcd:v3.5.17@sha256:0123456789abcdef" | wc -l | tr -d ' ')" = "1"
+            test "$(_image_mirror_candidates "local/patroni-pg16:16" | wc -l | tr -d ' ')" = "1"
+            test "$(resolve_service_image_ref etcd)" = "quay.io/coreos/etcd:v3.5.17"
+            test "$(resolve_service_image_ref swfs-master)" = "chrislusf/seaweedfs:4.55"
+          )
           ./ligactl sync-config --dry-run
           ./ligactl user add --username alice --profile dual --quota-gb 50 --generate-password --require-2fa --dry-run
           ./ligactl user list --dry-run

@@ -28,6 +28,13 @@ ensure_swfs_configs_cb() {
 }
 for_each_node ensure_swfs_configs_cb
 
+# Предварительная загрузка образа SeaweedFS (retry + зеркало + P2P) до поднятия кворума мастеров
+preload_swfs_image_cb() {
+    local ip="$1"
+    ensure_remote_image "${ip}" "$(resolve_service_image_ref swfs-master)"
+}
+for_each_node preload_swfs_image_cb
+
 # 1. Masters (профиль quorum)
 log_step "Запуск SeaweedFS Masters"
 start_master_cb() {
@@ -36,9 +43,33 @@ start_master_cb() {
         log_info "  Пропуск Master на ${name} (edge-нода)"
         return 0
     fi
-    remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d swfs-master"
+    remote_compose_up "${ip}" "" swfs-master
+    if [[ "${DRY_RUN:-false}" != "true" ]]; then
+        remote_exec "${ip}" "for _i in 1 2 3 4 5 6 7 8 9 10; do nc -z 127.0.0.1 ${SWFS_MASTER_PORT:-9333} 2>/dev/null && exit 0; sleep 1; done; exit 0" >/dev/null 2>&1 || true
+    fi
 }
 for_each_node start_master_cb
+
+# Гарантируем TCP-связность между всеми узлами и кворум-мастерами SeaweedFS (автомост при фильтрации провайдера)
+ensure_swfs_mesh_cb() {
+    [[ "${DRY_RUN:-false}" == "true" ]] && return 0
+    local src_ip="$1" src_name="$3"
+    local count j dst_ip dst_name
+    count=$(get_node_count)
+    for j in $(seq 1 "${count}"); do
+        dst_ip=$(get_node_ip "${j}")
+        dst_name=$(get_node_name "${j}")
+        [[ "${dst_ip}" == "${src_ip}" ]] && continue
+        is_quorum_node "${j}" "${dst_name}" || continue
+        if ! remote_tcp_probe "${src_ip}" "${dst_ip}" "${SWFS_MASTER_PORT:-9333}" 5 \
+            || ! remote_tcp_probe "${src_ip}" "${dst_ip}" "$(( ${SWFS_MASTER_PORT:-9333} + 10000 ))" 5; then
+            log_warn "  ⚠️  Порты SeaweedFS Master (${SWFS_MASTER_PORT:-9333}/gRPC) на ${dst_name} недоступны с ${src_name} — поднимаем прозрачный SSH-мост..."
+            ensure_ssh_peer_bridge "${src_ip}" "${src_name}" "${dst_ip}" "${dst_name}"
+        fi
+    done
+}
+for_each_node ensure_swfs_mesh_cb
+
 wait_for_remote_health "${NODE1_IP}" "SeaweedFS Master Leader" \
     "curl -sf http://127.0.0.1:${SWFS_MASTER_PORT:-9333}/cluster/status | jq -e '.Leader != \"\"'" 30 3 \
     "cd '${REMOTE_BASE_DIR}' && docker compose logs --tail 50 swfs-master || true"
@@ -48,7 +79,7 @@ log_step "Запуск SeaweedFS Volume Servers"
 start_volume_cb() {
     local ip="$1" dc="$2" name="$3"
     log_info "  Старт swfs-volume на ${name} (-dataCenter=${dc})..."
-    remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d swfs-volume"
+    remote_compose_up "${ip}" "" swfs-volume
     wait_for_remote_health "${ip}" "SWFS Volume ${name}" "curl -sf http://127.0.0.1:${SWFS_VOLUME_PORT:-8082}/healthz || curl -sf http://127.0.0.1:${SWFS_VOLUME_PORT:-8082}/status" 20 2 \
         "cd '${REMOTE_BASE_DIR}' && docker compose logs --tail 40 swfs-volume || true"
 }
@@ -59,7 +90,7 @@ log_step "Запуск SeaweedFS Filers и S3 Gateways"
 start_filer_s3_cb() {
     local ip="$1" name="$3"
     log_info "  Старт swfs-filer и swfs-s3 на ${name}..."
-    remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d swfs-filer swfs-s3"
+    remote_compose_up "${ip}" "" swfs-filer swfs-s3
     # Проверяем /healthz или порт метрик (GET / закрыт JWT -> 401!)
     wait_for_remote_health "${ip}" "SWFS Filer ${name}" \
         "curl -sf http://127.0.0.1:${SWFS_FILER_PORT:-8888}/healthz || curl -sf http://127.0.0.1:${SWFS_FILER_METRICS_PORT:-9326}/metrics >/dev/null" 25 2 \
@@ -177,16 +208,17 @@ log_step "Запуск swfs-admin, swfs-worker (и swfs-backup при настр
 admin_idx="${SWFS_ADMIN_NODE_INDEX:-2}"
 admin_ip=$(get_node_ip "${admin_idx}")
 log_info "Старт admin-сервисов на $(get_node_name "${admin_idx}") (${admin_ip})..."
-remote_exec "${admin_ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d swfs-admin"
+remote_compose_up "${admin_ip}" "" swfs-admin
 if [[ -n "${BACKUP_S3_ACCESS_KEY:-}" && "${BACKUP_S3_ACCESS_KEY}" != *FIXME* ]]; then
-    remote_exec "${admin_ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d swfs-backup"
+    remote_compose_up "${admin_ip}" "" swfs-backup
 fi
-wait_for_remote_health "${admin_ip}" "SWFS Admin" "nc -z 127.0.0.1 ${SWFS_ADMIN_PORT:-12535}" 20 2
+wait_for_remote_health "${admin_ip}" "SWFS Admin" "nc -z 127.0.0.1 ${SWFS_ADMIN_PORT:-12535}" 20 2 \
+    "cd '${REMOTE_BASE_DIR}' && docker compose logs --tail 40 swfs-admin || true"
 
 start_worker_cb() {
     local ip="$1" name="$3"
     log_info "  Старт swfs-worker на ${name}..."
-    remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d swfs-worker"
+    remote_compose_up "${ip}" "" swfs-worker
 }
 for_each_node start_worker_cb
 

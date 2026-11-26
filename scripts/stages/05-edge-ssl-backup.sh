@@ -36,6 +36,7 @@ else
         rm -f "${SSL_DIR}/certificates/${DOMAIN}.crt" "${SSL_DIR}/certificates/${DOMAIN}.key" "${SSL_DIR}/.selfsigned"
         ACME_MAIL="${ACME_EMAIL:-}"
         [[ -z "${ACME_MAIL}" || "${ACME_MAIL}" == "admin@company.com" ]] && ACME_MAIL="admin@${DOMAIN}"
+        ensure_local_image "$(resolve_image_ref "${LEGO_IMAGE}" "${LEGO_DIGEST:-}")"
         run_or_dry docker run --rm \
             -v "${SSL_DIR}:/lego" \
             --env-file "${LEGO_ENV}" \
@@ -67,6 +68,7 @@ ensure_fallback_or_distribute_ssl
 # --- 2. Однократный sftpgo initprovider ДО старта SFTPGo ---
 PRIMARY_PG_IP=$(find_patroni_primary_ip || echo "${NODE1_IP}")
 log_step "2/7 — SFTPGo initprovider (update_mode=1, однократно на Primary ${PRIMARY_PG_IP})"
+ensure_remote_image "${PRIMARY_PG_IP}" "$(resolve_service_image_ref sftpgo)"
 remote_exec "${PRIMARY_PG_IP}" "cd '${REMOTE_BASE_DIR}' && docker compose run --rm --no-deps sftpgo sftpgo initprovider --config-file /etc/sftpgo/sftpgo.json"
 log_info "  ✅ Схема SFTPGo в PostgreSQL инициализирована"
 
@@ -86,7 +88,7 @@ log_step "3/7 — Запуск SFTPGo и node-exporter на всех нодах"
 start_edge_cb() {
     local ip="$1" name="$3"
     log_info "  Старт SFTPGo и node-exporter на ${name} (${ip})..."
-    remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d --force-recreate sftpgo node-exporter"
+    remote_compose_up "${ip}" "--force-recreate" sftpgo node-exporter
     wait_for_remote_health "${ip}" "SFTPGo ${name}" \
         "CID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q sftpgo | head -n1) && [[ -n \"\${CID}\" ]] && docker exec \"\${CID}\" sftpgo ping --config-file /etc/sftpgo/sftpgo.json" 25 2 \
         "cd '${REMOTE_BASE_DIR}' && docker compose logs --tail 50 sftpgo || true"
@@ -177,6 +179,10 @@ REMOTE_ARB_KEY
         remote_copy "${SCRIPT_DIR}/scripts/lib/common.sh" "${ARBITER_IP}:${ARBITER_BASE_DIR}/scripts/lib/common.sh"
         remote_copy "${SCRIPT_DIR}/scripts/lib/deploy.sh" "${ARBITER_IP}:${ARBITER_BASE_DIR}/scripts/lib/deploy.sh"
         remote_copy "${SCRIPT_DIR}/scripts/ops/dns-failover-arbiter.sh" "${ARBITER_IP}:${ARBITER_BASE_DIR}/scripts/ops/dns-failover-arbiter.sh"
+
+        ensure_remote_image "${ARBITER_IP}" "${PROMETHEUS_IMAGE_REF}"
+        ensure_remote_image "${ARBITER_IP}" "${ALERTMANAGER_IMAGE_REF}"
+        ensure_remote_image "${ARBITER_IP}" "${BLACKBOX_IMAGE_REF}"
 
         remote_exec_stdin "${ARBITER_IP}" "${ARBITER_BASE_DIR}" "${CLUSTER_SLUG}" <<'REMOTE_ARB'
 set -euo pipefail

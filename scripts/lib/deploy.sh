@@ -214,6 +214,226 @@ PYEOF
     echo "${fallback}"
 }
 
+# --- Отказоустойчивое скачивание образов (Retry + GCR/Mirror.gcr.io fallback + P2P SSH transfer) ---
+resolve_service_image_ref() {
+    case "$1" in
+        etcd)
+            resolve_image_ref "${ETCD_IMAGE}" "${ETCD_DIGEST:-}"
+            ;;
+        patroni)
+            resolve_image_ref "${PATRONI_PG_IMAGE}" "${PATRONI_PG_DIGEST:-}"
+            ;;
+        haproxy)
+            resolve_image_ref "${HAPROXY_IMAGE}" "${HAPROXY_DIGEST:-}"
+            ;;
+        swfs-master|swfs-volume|swfs-filer|swfs-s3|swfs-admin|swfs-worker|swfs-backup)
+            resolve_image_ref "${SEAWEEDFS_IMAGE}" "${SEAWEEDFS_DIGEST:-}"
+            ;;
+        sftpgo)
+            resolve_image_ref "${SFTPGO_IMAGE}" "${SFTPGO_DIGEST:-}"
+            ;;
+        node-exporter)
+            resolve_image_ref "${NODE_EXPORTER_IMAGE}" "${NODE_EXPORTER_DIGEST:-}"
+            ;;
+        prometheus)
+            resolve_image_ref "${PROMETHEUS_IMAGE}" "${PROMETHEUS_DIGEST:-}"
+            ;;
+        alertmanager)
+            resolve_image_ref "${ALERTMANAGER_IMAGE}" "${ALERTMANAGER_DIGEST:-}"
+            ;;
+        blackbox-exporter)
+            resolve_image_ref "${BLACKBOX_EXPORTER_IMAGE}" "${BLACKBOX_EXPORTER_DIGEST:-}"
+            ;;
+        *)
+            echo ""
+            ;;
+    esac
+}
+
+_image_mirror_candidates() {
+    local ref="$1"
+    echo "${ref}"
+    # При явном @sha256 пининге не подменяем образ непроверенным тегом зеркала
+    if [[ "${ref}" == *@sha256:* ]]; then
+        return 0
+    fi
+    if [[ "${ref}" == quay.io/coreos/etcd:* ]]; then
+        echo "gcr.io/etcd-development/etcd:${ref#quay.io/coreos/etcd:}"
+    fi
+    local first_seg="${ref%%/*}"
+    if [[ "${ref}" != */* ]]; then
+        echo "mirror.gcr.io/library/${ref}"
+    elif [[ "${first_seg}" != *.* && "${first_seg}" != *:* && "${first_seg}" != "localhost" && "${first_seg}" != "local" ]]; then
+        echo "mirror.gcr.io/${ref}"
+    fi
+}
+
+_pull_image_with_mirrors_script() {
+    cat <<'PULL_SCRIPT'
+set -euo pipefail
+TARGET="$1"; shift
+if docker image inspect "${TARGET}" >/dev/null 2>&1; then
+    exit 0
+fi
+LAST_ERR=""
+for cand in "$@"; do
+    for attempt in 1 2 3; do
+        if ERR=$(docker pull "${cand}" 2>&1 >/dev/null); then
+            if [[ "${cand}" != "${TARGET}" ]]; then
+                docker tag "${cand}" "${TARGET}"
+                echo "MIRROR_USED:${cand}"
+            fi
+            exit 0
+        else
+            LAST_ERR="${ERR}"
+            if (( attempt < 3 )); then
+                sleep $(( attempt * 2 ))
+            fi
+        fi
+    done
+done
+echo "${LAST_ERR}" >&2
+exit 1
+PULL_SCRIPT
+}
+
+_pull_image_on_node() {
+    local ip="$1" target_ref="$2"
+    local candidates=()
+    while IFS= read -r _c; do
+        [[ -n "${_c}" ]] && candidates+=("${_c}")
+    done < <(_image_mirror_candidates "${target_ref}")
+    local out rc=0
+    out=$(_pull_image_with_mirrors_script | remote_exec_stdin "${ip}" "${target_ref}" "${candidates[@]}" 2>&1) || rc=$?
+    if (( rc == 0 )); then
+        if [[ "${out}" == *"MIRROR_USED:"* ]]; then
+            local used_mirror
+            used_mirror=$(echo "${out}" | awk -F'MIRROR_USED:' '/MIRROR_USED:/{print $2; exit}')
+            log_info "  🪞 Образ ${target_ref} загружен на ${ip} через официальное зеркало ${used_mirror}"
+        fi
+        return 0
+    fi
+    log_warn "  ⚠️  Прямой pull ${target_ref} на ${ip} завершился ошибкой: $(echo "${out}" | tail -n 3 | tr '\n' ' ')"
+    return 1
+}
+
+ensure_remote_image() {
+    local ip="$1" target_ref="$2"
+    if [[ -z "${target_ref}" || "${target_ref}" == local/* || "${DRY_RUN:-false}" == "true" ]]; then
+        return 0
+    fi
+
+    if remote_exec "${ip}" "docker image inspect '${target_ref}' >/dev/null 2>&1" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if _pull_image_on_node "${ip}" "${target_ref}"; then
+        return 0
+    fi
+
+    # Fallback P2P: скачиваем с другой ноды кластера и передаем образ по SSH-потоку
+    local peer_ip ssh_opts
+    ssh_opts=$(_ssh_base_opts)
+    if [[ -n "${ADMIN_SSH_PORT:-}" && "${ADMIN_SSH_PORT}" != "22" ]]; then
+        ssh_opts+=" -p ${ADMIN_SSH_PORT}"
+    fi
+    while IFS= read -r peer_ip; do
+        [[ -z "${peer_ip}" || "${peer_ip}" == "${ip}" ]] && continue
+        if ! remote_exec "${peer_ip}" "docker image inspect '${target_ref}' >/dev/null 2>&1" >/dev/null 2>&1; then
+            _pull_image_on_node "${peer_ip}" "${target_ref}" || continue
+        fi
+        log_warn "  🔄 Передаем образ ${target_ref} на ${ip} по защищенному SSH с узла ${peer_ip}..."
+        # shellcheck disable=SC2086
+        if ssh ${ssh_opts} "root@${peer_ip}" "docker save '${target_ref}' | gzip -1" \
+            | ssh ${ssh_opts} "root@${ip}" "gunzip | docker load" >/dev/null 2>&1; then
+            if remote_exec "${ip}" "docker image inspect '${target_ref}' >/dev/null 2>&1" >/dev/null 2>&1; then
+                log_info "  ✅ Образ ${target_ref} доставлен на ${ip} с узла ${peer_ip}"
+                return 0
+            fi
+        fi
+    done < <(get_node_ips)
+
+    log_error "Не удалось загрузить Docker-образ ${target_ref} на узел ${ip} (основной реестр, зеркала и P2P-копирование недоступны)"
+    return 1
+}
+
+ensure_local_image() {
+    local target_ref="$1"
+    if [[ -z "${target_ref}" || "${target_ref}" == local/* || "${DRY_RUN:-false}" == "true" ]]; then
+        return 0
+    fi
+    if docker image inspect "${target_ref}" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    local candidates=()
+    while IFS= read -r _c; do
+        [[ -n "${_c}" ]] && candidates+=("${_c}")
+    done < <(_image_mirror_candidates "${target_ref}")
+
+    local out rc=0
+    out=$(_pull_image_with_mirrors_script | bash -s -- "${target_ref}" "${candidates[@]}" 2>&1) || rc=$?
+    if (( rc == 0 )); then
+        if [[ "${out}" == *"MIRROR_USED:"* ]]; then
+            local used_mirror
+            used_mirror=$(echo "${out}" | awk -F'MIRROR_USED:' '/MIRROR_USED:/{print $2; exit}')
+            log_info "  🪞 Образ ${target_ref} загружен локально через официальное зеркало ${used_mirror}"
+        fi
+        return 0
+    fi
+
+    # Fallback: передаем с первой доступной ноды кластера
+    local peer_ip ssh_opts
+    ssh_opts=$(_ssh_base_opts)
+    if [[ -n "${ADMIN_SSH_PORT:-}" && "${ADMIN_SSH_PORT}" != "22" ]]; then
+        ssh_opts+=" -p ${ADMIN_SSH_PORT}"
+    fi
+    while IFS= read -r peer_ip; do
+        [[ -z "${peer_ip}" ]] && continue
+        if ! remote_exec "${peer_ip}" "docker image inspect '${target_ref}' >/dev/null 2>&1" >/dev/null 2>&1; then
+            _pull_image_on_node "${peer_ip}" "${target_ref}" || continue
+        fi
+        log_warn "  🔄 Загружаем ${target_ref} локально с узла ${peer_ip}..."
+        # shellcheck disable=SC2086
+        if ssh ${ssh_opts} "root@${peer_ip}" "docker save '${target_ref}' | gzip -1" | gunzip | docker load >/dev/null 2>&1; then
+            if docker image inspect "${target_ref}" >/dev/null 2>&1; then
+                return 0
+            fi
+        fi
+    done < <(get_node_ips)
+
+    log_error "Не удалось загрузить локальный Docker-образ ${target_ref}"
+    return 1
+}
+
+remote_compose_up() {
+    local ip="$1" up_flags="$2"; shift 2
+    local services=("$@")
+    local svc img_ref seen=" "
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d ${up_flags:+${up_flags} }${services[*]}"
+        return 0
+    fi
+    for svc in "${services[@]}"; do
+        img_ref=$(resolve_service_image_ref "${svc}")
+        if [[ -n "${img_ref}" && "${seen}" != *" ${img_ref} "* ]]; then
+            seen+="${img_ref} "
+            ensure_remote_image "${ip}" "${img_ref}"
+        fi
+    done
+    local attempt rc=0
+    for attempt in 1 2 3; do
+        rc=0
+        remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d ${up_flags:+${up_flags} }${services[*]}" || rc=$?
+        if (( rc == 0 )) || (( attempt == 3 )); then
+            return "${rc}"
+        fi
+        log_warn "docker compose up (${services[*]}) на ${ip} завершился с кодом ${rc} — повтор через 3с..."
+        sleep 3
+    done
+    return "${rc}"
+}
+
 export_node_render_vars() {
     local ip="$1" dc="$2" name="$3" idx="$4" etcd_state="${5:-new}"
     local admin_idx="${SWFS_ADMIN_NODE_INDEX:-2}"
@@ -980,7 +1200,7 @@ REMOTE_BR_UNIT
 
     wait_for_remote_health "${src_ip}" "SSH-мост ${src_name} -> ${dst_name} (127.0.0.1:${first_lport})" \
         "ss -H -tln | awk '{print \$4}' | grep -Fxq '127.0.0.1:${first_lport}'" 15 1 \
-        "systemctl status '${unit_name}.service' --no-pager -l 2>/dev/null || true"
+        "$( [[ "${mode}" == "L" ]] && echo "systemctl status '${unit_name}.service' --no-pager -l 2>/dev/null || true" || echo "ss -H -tln | head -n 20 || true" )"
 
     remote_exec_stdin "${src_ip}" "${CLUSTER_SLUG}" "${dst_name}" "${dst_ip}" "${dst_idx}" "${dnat_pairs}" <<'REMOTE_BR_DNAT'
 set -euo pipefail
@@ -1002,7 +1222,7 @@ sysctl -w net.ipv4.conf.all.route_localnet=1 >/dev/null 2>&1 || true
 sysctl -w net.ipv4.conf.lo.route_localnet=1 >/dev/null 2>&1 || true
 iptables -t nat -N "${CHAIN}" 2>/dev/null || iptables -t nat -F "${CHAIN}"
 iptables -t nat -C OUTPUT -p tcp -d "${DST_IP}/32" -j "${CHAIN}" 2>/dev/null || iptables -t nat -I OUTPUT 1 -p tcp -d "${DST_IP}/32" -j "${CHAIN}"
-iptables -t nat -C POSTROUTING -o lo -p tcp -d 127.0.0.1/32 --dport 30100:30999 -j SNAT --to-source 127.0.0.1 2>/dev/null || iptables -t nat -A POSTROUTING -o lo -p tcp -d 127.0.0.1/32 --dport 30100:30999 -j SNAT --to-source 127.0.0.1
+iptables -t nat -C POSTROUTING -o lo -p tcp -d 127.0.0.1/32 --dport 30100:39999 -j SNAT --to-source 127.0.0.1 2>/dev/null || iptables -t nat -A POSTROUTING -o lo -p tcp -d 127.0.0.1/32 --dport 30100:39999 -j SNAT --to-source 127.0.0.1
 for pair in ${PAIRS}; do
     dp="\${pair%%:*}"
     lp="\${pair##*:}"
@@ -1511,21 +1731,38 @@ REMOTE_CACHE_CHK
 
     remote_exec "${ip}" "mkdir -p '${REMOTE_BASE_DIR}/build-patroni'"
     remote_copy "${SCRIPT_DIR}/Dockerfile.patroni" "${ip}:${REMOTE_BASE_DIR}/build-patroni/Dockerfile.patroni"
-    remote_exec_stdin "${ip}" "${PATRONI_PG_IMAGE}" "${target_ref}" "${REMOTE_BASE_DIR}/build-patroni" "${df_hash}" <<'REMOTE_BUILD'
+    local cand_refs=()
+    if [[ "${PATRONI_PG_IMAGE}" != local/* ]]; then
+        while IFS= read -r _c; do
+            [[ -n "${_c}" ]] && cand_refs+=("${_c}")
+        done < <(_image_mirror_candidates "${target_ref}")
+    fi
+    remote_exec_stdin "${ip}" "${PATRONI_PG_IMAGE}" "${REMOTE_BASE_DIR}/build-patroni" "${df_hash}" "${cand_refs[@]+"${cand_refs[@]}"}" <<'REMOTE_BUILD'
 set -euo pipefail
-IMG="$1"; TARGET_REF="$2"; BUILD_DIR="$3"; DF_HASH="$4"
+IMG="$1"; BUILD_DIR="$2"; DF_HASH="$3"; shift 3
 HASH_FILE="${BUILD_DIR}/.built.sha256"
 
 if docker image inspect "${IMG}" >/dev/null 2>&1; then
     docker tag "${IMG}" "local/patroni-pg16:rollback" >/dev/null 2>&1 || true
 fi
 
-if [[ "${IMG}" != local/* ]] && docker pull -q "${TARGET_REF}" >/dev/null 2>&1; then
-    echo "Pulled ${TARGET_REF} from registry"
-    printf "%s\n" "${DF_HASH}" > "${HASH_FILE}"
-elif docker pull -q "ghcr.io/aligorov/ligament_vault_patroni:16" >/dev/null 2>&1; then
-    docker tag "ghcr.io/aligorov/ligament_vault_patroni:16" "${IMG}"
-    echo "Pulled ghcr.io/aligorov/ligament_vault_patroni:16"
+PULLED_REF=""
+for cand in "$@" "ghcr.io/aligorov/ligament_vault_patroni:16"; do
+    [[ -n "${cand}" ]] || continue
+    for attempt in 1 2 3; do
+        if docker pull -q "${cand}" >/dev/null 2>&1; then
+            if [[ "${cand}" != "${IMG}" ]]; then
+                docker tag "${cand}" "${IMG}"
+            fi
+            PULLED_REF="${cand}"
+            break 2
+        fi
+        (( attempt < 3 )) && sleep $(( attempt * 2 ))
+    done
+done
+
+if [[ -n "${PULLED_REF}" ]]; then
+    echo "Pulled ${PULLED_REF} -> ${IMG}"
     printf "%s\n" "${DF_HASH}" > "${HASH_FILE}"
 else
     echo "Registry pull unavailable — building ${IMG} locally from Dockerfile.patroni (1-2 min)..."
