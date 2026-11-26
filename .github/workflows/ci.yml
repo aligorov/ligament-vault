@@ -193,6 +193,21 @@ jobs:
             test "$(_image_mirror_candidates "local/patroni-pg16:16" | wc -l | tr -d ' ')" = "1"
             test "$(resolve_service_image_ref etcd)" = "quay.io/coreos/etcd:v3.5.17"
             test "$(resolve_service_image_ref swfs-master)" = "chrislusf/seaweedfs:4.55"
+
+            # Verify POSIX arg quoting used by remote_exec_stdin preserves empty args, spaces, leading hyphens, quotes, and newlines
+            out_args=$(
+              {
+                printf 'set --'
+                for a in "" "194.28.224.231 191.40.5.178 95.183.8.45" " -L 127.0.0.1:30201:10.0.0.2:2379" "it's \$RAW"; do
+                  printf ' %s' "$(_shell_quote_posix "${a}")"
+                done
+                printf '\n'
+                cat <<'EOS'
+echo "N=$#|$1|$2|$3|$4"
+EOS
+              } | bash -s
+            )
+            test "${out_args}" = "N=4||194.28.224.231 191.40.5.178 95.183.8.45| -L 127.0.0.1:30201:10.0.0.2:2379|it's \$RAW"
           )
           ./ligactl sync-config --dry-run
           ./ligactl user add --username alice --profile dual --quota-gb 50 --generate-password --require-2fa --dry-run

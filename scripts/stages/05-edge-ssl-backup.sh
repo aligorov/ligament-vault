@@ -90,7 +90,7 @@ start_edge_cb() {
     log_info "  Старт SFTPGo и node-exporter на ${name} (${ip})..."
     remote_compose_up "${ip}" "--force-recreate" sftpgo node-exporter
     wait_for_remote_health "${ip}" "SFTPGo ${name}" \
-        "CID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q sftpgo | head -n1) && [[ -n \"\${CID}\" ]] && docker exec \"\${CID}\" sftpgo ping --config-file /etc/sftpgo/sftpgo.json" 25 2 \
+        "CID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q sftpgo | head -n1) && [[ -n \"\${CID}\" ]] && docker exec \"\${CID}\" sftpgo ping --config-file /etc/sftpgo/sftpgo.json" 35 2 \
         "cd '${REMOTE_BASE_DIR}' && docker compose logs --tail 50 sftpgo || true"
 }
 for_each_node start_edge_cb

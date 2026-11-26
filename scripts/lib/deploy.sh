@@ -823,12 +823,12 @@ if [[ -n "${ARBITER_IP}" ]]; then
 fi
 
 if [[ "${WAS_ACTIVE}" == "true" ]]; then
-    ALLOWED_SET=" ${PEER_IPS} ${ARBITER_IP} "
-    STALE_NUMS=$(python3 - "${ALLOWED_SET}" "${SLUG}" "${HTTPS_P}" "${SFTP_PORT}" "${FTPS_PORT}" "${PG_PORT}" "${PATRONI_PORT}" <<'PYEOF'
+    STALE_NUMS=$(python3 - "${PEER_IPS}" "${ARBITER_IP}" "${SLUG}" "${HTTPS_P}" "${SFTP_PORT}" "${FTPS_PORT}" "${PG_PORT}" "${PATRONI_PORT}" <<'PYEOF'
 import re, subprocess, sys
-allowed = set(sys.argv[1].split())
-slug = re.escape(sys.argv[2])
-https_p, sftp_p, ftps_p, pg_p, pat_p = sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6], sys.argv[7]
+peers = set(sys.argv[1].split())
+arbiter = sys.argv[2].strip()
+slug = re.escape(sys.argv[3])
+https_p, sftp_p, ftps_p, pg_p, pat_p = sys.argv[4], sys.argv[5], sys.argv[6], sys.argv[7], sys.argv[8]
 valid_single_peer_ports = {f"{pg_p}/tcp", f"{pat_p}/tcp"}
 out = subprocess.check_output(["ufw", "status", "numbered"], text=True, stderr=subprocess.DEVNULL)
 nums = []
@@ -836,7 +836,10 @@ for line in out.splitlines():
     m = re.match(rf"\[\s*(\d+)\]\s+(\S+).*#\s*(?:{slug}|cluster-b):(peer|arbiter):(\S+)", line)
     if m:
         rule_num, port_spec, role_kind, src_ip = int(m.group(1)), m.group(2), m.group(3), m.group(4)
-        if src_ip not in allowed:
+        if role_kind == "peer" and src_ip not in peers:
+            nums.append(rule_num)
+            continue
+        if role_kind == "arbiter" and (not arbiter or src_ip != arbiter):
             nums.append(rule_num)
             continue
         if role_kind == "peer" and port_spec.endswith("/tcp") and "," not in port_spec and port_spec not in valid_single_peer_ports:
@@ -1118,9 +1121,9 @@ ensure_ssh_peer_bridge() {
         lport=$(( base_lport + k ))
         [[ -z "${first_lport}" ]] && first_lport="${lport}"
         if [[ "${mode}" == "L" ]]; then
-            fwd_flags+=" -L 127.0.0.1:${lport}:${dst_ip}:${dport}"
+            fwd_flags+="${fwd_flags:+ }-L 127.0.0.1:${lport}:${dst_ip}:${dport}"
         else
-            fwd_flags+=" -R 127.0.0.1:${lport}:${dst_ip}:${dport}"
+            fwd_flags+="${fwd_flags:+ }-R 127.0.0.1:${lport}:${dst_ip}:${dport}"
         fi
         dnat_pairs+="${dport}:${lport} "
     done
@@ -1165,7 +1168,9 @@ if sshd -t 2>/dev/null; then
 fi
 mkdir -p /root/.ssh && chmod 700 /root/.ssh
 touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys
-sed -i "/${TAG}/d" /root/.ssh/authorized_keys
+awk -v pub="${PUB}" -v tag="${TAG}" 'index($0, pub) == 0 && index($0, tag) == 0' /root/.ssh/authorized_keys > /root/.ssh/authorized_keys.tmp
+mv /root/.ssh/authorized_keys.tmp /root/.ssh/authorized_keys
+chmod 600 /root/.ssh/authorized_keys
 echo "restrict,port-forwarding,command=\"/bin/false\" ${PUB} ${TAG}" >> /root/.ssh/authorized_keys
 REMOTE_BR_AUTH
 
@@ -1185,7 +1190,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/ssh -N -T -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/etc/ligament-bridge/known_hosts -o BatchMode=yes -p ${SSH_P} -i /etc/ligament-bridge/id_ed25519${FLAGS} root@${SRV_IP}
+ExecStart=/usr/bin/ssh -N -T -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/etc/ligament-bridge/known_hosts -o BatchMode=yes -p ${SSH_P} -i /etc/ligament-bridge/id_ed25519 ${FLAGS} root@${SRV_IP}
 Restart=always
 RestartSec=3
 

@@ -63,8 +63,10 @@ ensure_swfs_mesh_cb() {
         is_quorum_node "${j}" "${dst_name}" || continue
         if ! remote_tcp_probe "${src_ip}" "${dst_ip}" "${SWFS_MASTER_PORT:-9333}" 5 \
             || ! remote_tcp_probe "${src_ip}" "${dst_ip}" "$(( ${SWFS_MASTER_PORT:-9333} + 10000 ))" 5; then
-            log_warn "  ⚠️  Порты SeaweedFS Master (${SWFS_MASTER_PORT:-9333}/gRPC) на ${dst_name} недоступны с ${src_name} — поднимаем прозрачный SSH-мост..."
-            ensure_ssh_peer_bridge "${src_ip}" "${src_name}" "${dst_ip}" "${dst_name}"
+            if remote_exec "${dst_ip}" "nc -z 127.0.0.1 ${SWFS_MASTER_PORT:-9333}" >/dev/null 2>&1; then
+                log_warn "  ⚠️  Порты SeaweedFS Master (${SWFS_MASTER_PORT:-9333}/gRPC) на ${dst_name} недоступны с ${src_name} — поднимаем прозрачный SSH-мост..."
+                ensure_ssh_peer_bridge "${src_ip}" "${src_name}" "${dst_ip}" "${dst_name}"
+            fi
         fi
     done
 }
@@ -84,6 +86,27 @@ start_volume_cb() {
         "cd '${REMOTE_BASE_DIR}' && docker compose logs --tail 40 swfs-volume || true"
 }
 for_each_node start_volume_cb
+
+# Проверяем связность между всеми узлами для репликации/чтения Volume (8082/18082)
+ensure_volume_mesh_cb() {
+    [[ "${DRY_RUN:-false}" == "true" ]] && return 0
+    local src_ip="$1" src_name="$3"
+    local count j dst_ip dst_name
+    count=$(get_node_count)
+    for j in $(seq 1 "${count}"); do
+        dst_ip=$(get_node_ip "${j}")
+        dst_name=$(get_node_name "${j}")
+        [[ "${dst_ip}" == "${src_ip}" ]] && continue
+        if ! remote_tcp_probe "${src_ip}" "${dst_ip}" "${SWFS_VOLUME_PORT:-8082}" 5 \
+            || ! remote_tcp_probe "${src_ip}" "${dst_ip}" "$(( ${SWFS_VOLUME_PORT:-8082} + 10000 ))" 5; then
+            if remote_exec "${dst_ip}" "nc -z 127.0.0.1 ${SWFS_VOLUME_PORT:-8082}" >/dev/null 2>&1; then
+                log_warn "  ⚠️  Порты SeaweedFS Volume (${SWFS_VOLUME_PORT:-8082}/gRPC) на ${dst_name} недоступны с ${src_name} — поднимаем SSH-мост..."
+                ensure_ssh_peer_bridge "${src_ip}" "${src_name}" "${dst_ip}" "${dst_name}"
+            fi
+        fi
+    done
+}
+for_each_node ensure_volume_mesh_cb
 
 # 3. Filer ([postgres2] verify-full) + S3 Gateway (127.0.0.1:8333)
 log_step "Запуск SeaweedFS Filers и S3 Gateways"
@@ -215,8 +238,18 @@ fi
 wait_for_remote_health "${admin_ip}" "SWFS Admin" "nc -z 127.0.0.1 ${SWFS_ADMIN_PORT:-12535}" 20 2 \
     "cd '${REMOTE_BASE_DIR}' && docker compose logs --tail 40 swfs-admin || true"
 
+admin_name=$(get_node_name "${admin_idx}")
 start_worker_cb() {
     local ip="$1" name="$3"
+    if [[ "${DRY_RUN:-false}" != "true" && "${ip}" != "${admin_ip}" ]]; then
+        if ! remote_tcp_probe "${ip}" "${admin_ip}" "${SWFS_ADMIN_PORT:-12535}" 5 \
+            || ! remote_tcp_probe "${ip}" "${admin_ip}" "${SWFS_ADMIN_GRPC_PORT:-22535}" 5; then
+            if remote_exec "${admin_ip}" "nc -z 127.0.0.1 ${SWFS_ADMIN_PORT:-12535}" >/dev/null 2>&1; then
+                log_warn "  ⚠️  Порты SWFS Admin (${SWFS_ADMIN_PORT:-12535}/gRPC) на ${admin_name} недоступны с ${name} — поднимаем SSH-мост..."
+                ensure_ssh_peer_bridge "${ip}" "${name}" "${admin_ip}" "${admin_name}"
+            fi
+        fi
+    fi
     log_info "  Старт swfs-worker на ${name}..."
     remote_compose_up "${ip}" "" swfs-worker
 }

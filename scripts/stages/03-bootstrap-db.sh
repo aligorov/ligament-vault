@@ -29,6 +29,15 @@ export PG_PORT="${PG_PORT:-15432}"
 
 ensure_quorum_nodes_initialized
 discover_extra_peer_ips
+
+# Убираем старые/сломанные юниты моста (если остались после прошлых сбоев)
+cleanup_broken_bridges_cb() {
+    local ip="$1"
+    [[ "${DRY_RUN:-false}" == "true" ]] && return 0
+    remote_exec "${ip}" 'for uf in /etc/systemd/system/*-bridge-*.service; do [[ -f "${uf}" ]] || continue; if grep -q "id_ed25519-" "${uf}"; then bn=$(basename "${uf}"); systemctl stop "${bn}" 2>/dev/null || true; systemctl disable "${bn}" 2>/dev/null || true; rm -f "${uf}"; systemctl daemon-reload; fi; done' >/dev/null 2>&1 || true
+}
+for_each_node cleanup_broken_bridges_cb
+
 for_each_node tune_node_wan_and_swap
 for_each_node harden_node_ufw
 
@@ -36,7 +45,7 @@ for_each_node harden_node_ufw
 ensure_node_pki_fresh_cb() {
     local ip="$1" dc="$2" name="$3" idx="$4"
     [[ "${DRY_RUN:-false}" == "true" ]] && return 0
-    if ! remote_exec "${ip}" "test -f '${REMOTE_BASE_DIR}/certs/${name}/etcd-server.crt' && openssl x509 -in '${REMOTE_BASE_DIR}/certs/${name}/etcd-server.crt' -noout -ext subjectAltName 2>/dev/null | grep -Fq 'IP Address:${ip}'" >/dev/null 2>&1; then
+    if ! remote_exec "${ip}" "test -f '${REMOTE_BASE_DIR}/certs/${name}/etcd-server.crt' && test -f '${REMOTE_BASE_DIR}/certs/${name}/pg-server.crt' && test -f '${REMOTE_BASE_DIR}/certs/${name}/swfs-client.crt' && openssl x509 -in '${REMOTE_BASE_DIR}/certs/${name}/etcd-server.crt' -noout -ext subjectAltName 2>/dev/null | grep -Fq 'IP Address:${ip}'" >/dev/null 2>&1; then
         log_warn "  🔐 Сертификаты на ${name} (${ip}) отсутствуют или содержат старый IP — обновляем PKI (Remote-CSR)..."
         ensure_ca_exists
         generate_node_certs "${ip}" "${dc}" "${name}" "${idx}"
@@ -63,7 +72,8 @@ start_etcd_cb() {
     log_info "  Старт etcd на ${name} (${ip})..."
     remote_compose_up "${ip}" "" etcd
     if [[ "${DRY_RUN:-false}" != "true" ]]; then
-        remote_exec "${ip}" "for _i in 1 2 3 4 5 6 7 8; do nc -z 127.0.0.1 ${ETCD_PEER_PORT:-2380} 2>/dev/null && exit 0; sleep 1; done; exit 0" >/dev/null 2>&1 || true
+        # etcd слушает peer-порт именно на NODE_IP, а client-порт еще на 127.0.0.1
+        remote_exec "${ip}" "for _i in 1 2 3 4 5 6 7 8; do nc -z '${ip}' ${ETCD_PEER_PORT:-2380} 2>/dev/null && exit 0; sleep 1; done; exit 0" >/dev/null 2>&1 || true
     fi
 }
 for_each_node start_etcd_cb
@@ -79,8 +89,18 @@ ensure_etcd_mesh_cb() {
         dst_name=$(get_node_name "${j}")
         [[ "${dst_ip}" == "${src_ip}" ]] && continue
         is_quorum_node "${j}" "${dst_name}" || continue
-        if ! remote_tcp_probe "${src_ip}" "${dst_ip}" "${ETCD_PEER_PORT:-2380}" 5 \
-            || ! remote_tcp_probe "${src_ip}" "${dst_ip}" "${ETCD_CLIENT_PORT:-2379}" 5; then
+        local need_bridge=false
+        if ! remote_tcp_probe "${src_ip}" "${dst_ip}" "${ETCD_PEER_PORT:-2380}" 5; then
+            if remote_exec "${dst_ip}" "nc -z '${dst_ip}' ${ETCD_PEER_PORT:-2380}" >/dev/null 2>&1; then
+                need_bridge=true
+            fi
+        fi
+        if [[ "${need_bridge}" != "true" ]] && ! remote_tcp_probe "${src_ip}" "${dst_ip}" "${ETCD_CLIENT_PORT:-2379}" 5; then
+            if remote_exec "${dst_ip}" "nc -z '${dst_ip}' ${ETCD_CLIENT_PORT:-2379}" >/dev/null 2>&1; then
+                need_bridge=true
+            fi
+        fi
+        if [[ "${need_bridge}" == "true" ]]; then
             log_warn "  ⚠️  Порты etcd (${ETCD_CLIENT_PORT:-2379}/${ETCD_PEER_PORT:-2380}) на ${dst_name} недоступны с ${src_name} — поднимаем прозрачный SSH-мост..."
             ensure_ssh_peer_bridge "${src_ip}" "${src_name}" "${dst_ip}" "${dst_name}"
         fi
@@ -343,8 +363,10 @@ start_haproxy_cb() {
     if [[ "${DRY_RUN:-false}" != "true" && "${ip}" != "${ACTIVE_PRIMARY_IP}" ]]; then
         if ! remote_tcp_probe "${ip}" "${ACTIVE_PRIMARY_IP}" "${PATRONI_API_PORT:-8008}" 5 \
             || ! remote_tcp_probe "${ip}" "${ACTIVE_PRIMARY_IP}" "${PG_PORT:-15432}" 5; then
-            log_warn "  ⚠️  Порт Patroni API (${PATRONI_API_PORT:-8008}) или PG (${PG_PORT:-15432}) на ${ACTIVE_PRIMARY_NAME} недоступен с ${name} для HAProxy — включаем SSH-мост..."
-            ensure_ssh_peer_bridge "${ip}" "${name}" "${ACTIVE_PRIMARY_IP}" "${ACTIVE_PRIMARY_NAME}"
+            if remote_exec "${ACTIVE_PRIMARY_IP}" "nc -z 127.0.0.1 ${PATRONI_API_PORT:-8008} && nc -z 127.0.0.1 ${PG_PORT:-15432}" >/dev/null 2>&1; then
+                log_warn "  ⚠️  Порт Patroni API (${PATRONI_API_PORT:-8008}) или PG (${PG_PORT:-15432}) на ${ACTIVE_PRIMARY_NAME} недоступен с ${name} для HAProxy — включаем SSH-мост..."
+                ensure_ssh_peer_bridge "${ip}" "${name}" "${ACTIVE_PRIMARY_IP}" "${ACTIVE_PRIMARY_NAME}"
+            fi
         fi
     fi
     remote_compose_up "${ip}" "--force-recreate" haproxy

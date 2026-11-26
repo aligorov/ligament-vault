@@ -308,6 +308,15 @@ remote_exec() {
     return "${rc}"
 }
 
+_shell_quote_posix() {
+    local s="$1" out=""
+    while [[ "${s}" == *"'"* ]]; do
+        out+="${s%%\'*}'\\''"
+        s="${s#*\'}"
+    done
+    printf "'%s%s'" "${out}" "${s}"
+}
+
 remote_exec_stdin() {
     local ip="$1"; shift
     local ssh_opts
@@ -320,13 +329,19 @@ remote_exec_stdin() {
         log_info "[DRY-RUN] ssh root@${ip} bash -s -- $*"
         return 0
     fi
-    local tmp_in attempt rc=0
+    local tmp_in attempt rc=0 arg
     tmp_in=$(mktemp)
-    cat > "${tmp_in}"
+    # Передаем позиционные аргументы в самом теле скрипта, исключая склейку/сплит OpenSSH на удаленном shell
+    printf 'set --' > "${tmp_in}"
+    for arg in "$@"; do
+        printf ' %s' "$(_shell_quote_posix "${arg}")" >> "${tmp_in}"
+    done
+    printf '\n' >> "${tmp_in}"
+    cat >> "${tmp_in}"
     for attempt in 1 2 3; do
         rc=0
         # shellcheck disable=SC2086
-        ssh ${ssh_opts} "root@${ip}" bash -s -- "$@" < "${tmp_in}" || rc=$?
+        ssh ${ssh_opts} "root@${ip}" bash -s < "${tmp_in}" || rc=$?
         if (( rc != 255 )) || (( attempt == 3 )); then
             rm -f "${tmp_in}"
             return "${rc}"
