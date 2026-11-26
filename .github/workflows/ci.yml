@@ -182,6 +182,7 @@ jobs:
 
           cp cluster.env.example cluster.env
           sed -i "s|FIXME_IP1:dc1:node1 FIXME_IP2:dc2:node2 FIXME_IP3:dc3:node3|${HOST_IP}:dc1:node1|" cluster.env
+          sed -i 's|SWFS_DEFAULT_REPLICATION="100"|SWFS_DEFAULT_REPLICATION="000"|' cluster.env
           chmod 600 cluster.env
           export AGE_KEY_FILE="${WORKDIR}/age.key"
           ./ligactl secrets init
@@ -592,7 +593,7 @@ jobs:
           # Real SFTP transfer test into /work and /worm (Object Lock)
           echo "hello work ci" > "${WORKDIR}/work_sample.txt"
           echo "immutable worm ci" > "${WORKDIR}/worm_sample.txt"
-          sftp -b - -P 2022 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -i "${WORKDIR}/ci_user_key" ciuser@127.0.0.1 <<SFTPEOF
+          if ! sftp -b - -P 2022 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -i "${WORKDIR}/ci_user_key" ciuser@127.0.0.1 <<SFTPEOF
           put ${WORKDIR}/work_sample.txt /work/work_sample.txt
           get /work/work_sample.txt ${WORKDIR}/work_dl.txt
           rm /work/work_sample.txt
@@ -600,6 +601,10 @@ jobs:
           ls -la /worm
           bye
           SFTPEOF
+          then
+              docker compose logs --tail 50 sftpgo swfs-s3 swfs-filer swfs-master || true
+              exit 1
+          fi
           cmp -s "${WORKDIR}/work_sample.txt" "${WORKDIR}/work_dl.txt"
           if sftp -b - -P 2022 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -i "${WORKDIR}/ci_user_key" ciuser@127.0.0.1 <<< 'rm /worm/worm_sample.txt'; then
               echo "ERROR: WORM folder permitted rm!"

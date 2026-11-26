@@ -39,6 +39,18 @@ else
     log_info "  ✅ Узлов в CLUSTER_NODES: ${NODE_COUNT}"
 fi
 
+# Проверяем, что число разных ДЦ достаточно для SWFS_DEFAULT_REPLICATION (например, "100" требует >= 2 разных ДЦ!)
+REPL_CFG="${SWFS_DEFAULT_REPLICATION:-100}"
+if [[ "${REPL_CFG}" =~ ^[0-9]{3}$ ]]; then
+    REQ_DCS=$(( ${REPL_CFG:0:1} + 1 ))
+    read -ra _PF_NODES <<< "${CLUSTER_NODES}"
+    UNIQUE_DCS=$(for e in "${_PF_NODES[@]}"; do echo "${e}" | cut -d: -f2; done | sort -u | wc -l | tr -d ' ')
+    if (( UNIQUE_DCS < REQ_DCS )); then
+        log_error "Для SWFS_DEFAULT_REPLICATION=${REPL_CFG} требуется минимум ${REQ_DCS} разных ДЦ в CLUSTER_NODES (найдено уникальных ДЦ: ${UNIQUE_DCS})!"
+        PREFLIGHT_PASS=false
+    fi
+fi
+
 if [[ "${CLUSTER_NODES}" == *FIXME* ]]; then
     log_warn "  ⚠️  CLUSTER_NODES содержит FIXME-заглушки — заполните реальные IP в cluster.env"
     [[ "${DRY_RUN:-false}" != "true" ]] && PREFLIGHT_PASS=false
