@@ -104,11 +104,13 @@ dr_step_swfs_restore() {
     log_step "DR 3/4 — Подъем SeaweedFS и восстановление метаданных Filer из внешнего S3"
     bash "${SCRIPT_DIR}/scripts/stages/04-bootstrap-swfs.sh"
 
-    local node1_ip
+    local node1_ip mpeers
     node1_ip=$(get_node_ip 1)
+    mpeers=$(build_swfs_master_peers)
     if [[ "${BACKUP_S3_ACCESS_KEY:-FIXME}" != *FIXME* && -n "${BACKUP_S3_ACCESS_KEY:-}" ]]; then
         remote_exec_stdin "${node1_ip}" \
             "${REMOTE_BASE_DIR}" \
+            "${mpeers}" \
             "${SWFS_FILER_PORT:-8888}" \
             "${BACKUP_S3_ENDPOINT}" \
             "${BACKUP_S3_REGION:-us-east-1}" \
@@ -117,7 +119,7 @@ dr_step_swfs_restore() {
             "${BACKUP_S3_SECRET_KEY}" \
             "${BACKUP_ENCRYPTION_KEY}" <<'REMOTE_SWFS_RESTORE' || log_warn "Дамп filer-meta/LATEST не найден — используются метаданные из восстановленной БД PostgreSQL"
 set -euo pipefail
-BDIR="$1"; FPORT="$2"; ENDPOINT="$3"; REGION="$4"; BUCKET="$5"; AK="$6"; SK="$7"; ENC_KEY="$8"
+BDIR="$1"; MPEERS="$2"; FPORT="$3"; ENDPOINT="$4"; REGION="$5"; BUCKET="$6"; AK="$7"; SK="$8"; ENC_KEY="$9"
 TMP_ENC="/tmp/dr-filer.meta.gz.enc"
 TMP_RAW="/tmp/dr-filer.meta"
 CID=$(cd "${BDIR}" && docker compose ps -q swfs-filer | head -n1)
@@ -153,7 +155,7 @@ PYEOF
 
 ENCK="${ENC_KEY}" openssl enc -d -aes-256-cbc -pbkdf2 -pass env:ENCK -in "${TMP_ENC}" | gunzip > "${TMP_RAW}"
 docker cp "${TMP_RAW}" "${CID}:${TMP_RAW}"
-docker exec "${CID}" weed filer.meta.restore -filer="127.0.0.1:${FPORT}" -input="${TMP_RAW}" || true
+docker exec -i "${CID}" weed shell -master="${MPEERS}" -filer="127.0.0.1:${FPORT}" <<< "fs.meta.load -v=false ${TMP_RAW}" || true
 REMOTE_SWFS_RESTORE
     fi
 }

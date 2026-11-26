@@ -72,7 +72,7 @@ groups:
           summary: "SeaweedFS компонент {{ $labels.job }} недоступен на {{ $labels.instance }}"
 
       - alert: SwfsVolumeSpaceLow
-        expr: seaweedfs_volumeServer_disk_free_bytes / seaweedfs_volumeServer_disk_total_bytes < 0.15
+        expr: (sum by (instance) (SeaweedFS_volumeServer_resource{type="free"}) / sum by (instance) (SeaweedFS_volumeServer_resource{type="all"})) < 0.15
         for: 5m
         labels:
           severity: warning

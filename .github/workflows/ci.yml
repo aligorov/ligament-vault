@@ -491,23 +491,31 @@ jobs:
               exit 1
           fi
 
-          # 3. Inspect real SeaweedFS 4.02 Prometheus metric names on :9325/metrics
-          echo "SeaweedFS :9325/metrics sample (disk/free):"
-          curl -sf http://127.0.0.1:9325/metrics | grep -iE 'volumeServer|disk|free_bytes' | head -n 25 || true
+          # 3. Verify SeaweedFS 4.02 & Patroni 3.3 Prometheus metric names match alerts.yml / Grafana
+          echo "SeaweedFS :9325/metrics sample (disk/resource):"
+          SWFS_METRICS=$(curl -sf http://127.0.0.1:9325/metrics)
+          echo "${SWFS_METRICS}" | grep -iE 'volumeServer_resource|volumeServer_max_volumes' | head -n 20
+          echo "${SWFS_METRICS}" | grep -q 'SeaweedFS_volumeServer_resource{.*type="free"'
+          echo "${SWFS_METRICS}" | grep -q 'SeaweedFS_volumeServer_resource{.*type="all"'
+          echo "Patroni :8008/metrics sample:"
+          PAT_METRICS=$(curl -sf http://127.0.0.1:8008/metrics)
+          echo "${PAT_METRICS}" | grep -E '^(patroni_|# HELP patroni_)' | head -n 30
 
-          # 4. Verify weed filer.meta.backup and filer.meta.restore CLI flags
-          docker exec "$(docker compose ps -q swfs-filer | head -n1)" weed filer.meta.backup -filer=127.0.0.1:8888 -output=/tmp/ci-filer-meta.bin
-          docker exec "$(docker compose ps -q swfs-filer | head -n1)" sh -c 'ls -lh /tmp/ci-filer-meta.bin && rm -f /tmp/ci-filer-meta.bin'
-          docker exec "$(docker compose ps -q swfs-filer | head -n1)" weed filer.meta.restore -h 2>&1 | head -n 15 || true
+          # 4. Verify weed shell fs.meta.save and fs.meta.load against live filer
+          FILER_CID=$(docker compose ps -q swfs-filer | head -n1)
+          docker exec -i "${FILER_CID}" weed shell -master=127.0.0.1:9333 -filer=127.0.0.1:8888 <<< 'fs.meta.save -o /tmp/ci-filer-meta.bin /'
+          docker exec "${FILER_CID}" test -s /tmp/ci-filer-meta.bin
+          docker exec -i "${FILER_CID}" weed shell -master=127.0.0.1:9333 -filer=127.0.0.1:8888 <<< 'fs.meta.load -v=false /tmp/ci-filer-meta.bin'
+          docker exec "${FILER_CID}" rm -f /tmp/ci-filer-meta.bin
 
-          # 5. Verify Patroni PATCH /config slot add + delete cleanup
-          curl -sf -X PATCH http://127.0.0.1:8008/config -H "Content-Type: application/json" -d '{"slots":{"ci_test_slot":{"type":"physical"}}}' | jq -e '.slots.ci_test_slot.type == "physical"'
-          curl -sf -X PATCH http://127.0.0.1:8008/config -H "Content-Type: application/json" -d '{"slots":{"ci_test_slot":null}}' | jq -e '.slots.ci_test_slot == null'
+          # 5. Verify Patroni PATCH /config (Basic Auth) slot add + delete cleanup
+          curl -sf -u "patroni:${PATRONI_API_PASSWORD}" -X PATCH http://127.0.0.1:8008/config -H "Content-Type: application/json" -d '{"slots":{"ci_test_slot":{"type":"physical"}}}' | jq -e '.slots.ci_test_slot.type == "physical"'
+          curl -sf -u "patroni:${PATRONI_API_PASSWORD}" -X PATCH http://127.0.0.1:8008/config -H "Content-Type: application/json" -d '{"slots":{"ci_test_slot":null}}' | jq -e '.slots.ci_test_slot == null'
 
           # 6. Live E2E SFTPGo REST API + --require-2fa totp_config + per-user S3 isolation + SFTP /work & /worm (Object Lock)
           ssh-keygen -t ed25519 -f "${WORKDIR}/ci_user_key" -N "" >/dev/null
           CI_PUBKEY=$(cat "${WORKDIR}/ci_user_key.pub")
-          python3 - "${SFTPGO_ADMIN_USERNAME:-admin}" "${SFTPGO_ADMIN_PASSWORD}" "${SWFS_S3_ACCESS_KEY}" "${SWFS_S3_SECRET_KEY}" "${CI_PUBKEY}" <<'PYEOF'
+          python3 - "${SFTPGO_ADMIN_USERNAME:-admin}" "${SFTPGO_ADMIN_PASSWORD}" "sftpgo-s3-access" "${SWFS_S3_SECRET_KEY_SFTPGO}" "${CI_PUBKEY}" <<'PYEOF'
           import base64, json, sys, urllib.error, urllib.request
           admin_u, admin_p, s3_ak, s3_sk, pubkey = sys.argv[1:]
           base = "http://127.0.0.1:8081/api/v2"
@@ -591,9 +599,14 @@ jobs:
           bye
           SFTPEOF
           cmp -s "${WORKDIR}/work_sample.txt" "${WORKDIR}/work_dl.txt"
+          if sftp -b - -P 2022 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -i "${WORKDIR}/ci_user_key" ciuser@127.0.0.1 <<< 'rm /worm/worm_sample.txt'; then
+              echo "ERROR: WORM folder permitted rm!"
+              exit 1
+          fi
+          echo "Confirmed SFTP rm on /worm is denied as expected"
 
           # Verify object stored under prefix users/ciuser/ in sftp-worm AND check Object Lock retention + delete denial
-          sudo python3 - "${SWFS_S3_ACCESS_KEY}" "${SWFS_S3_SECRET_KEY}" <<'PYEOF'
+          sudo python3 - "sftpgo-s3-access" "${SWFS_S3_SECRET_KEY_SFTPGO}" <<'PYEOF'
           import datetime, hashlib, hmac, sys, urllib.error, urllib.request
           ak, sk = sys.argv[1:]
           endpoint = "http://127.0.0.1:8333"

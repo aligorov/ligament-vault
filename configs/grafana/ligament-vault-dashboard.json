@@ -60,7 +60,7 @@
       "title": "SeaweedFS Volume Disk Free (%)",
       "type": "timeseries",
       "gridPos": { "h": 7, "w": 12, "x": 0, "y": 10 },
-      "targets": [{ "expr": "100 * (seaweedfs_volumeServer_disk_free_bytes / seaweedfs_volumeServer_disk_total_bytes)", "legendFormat": "{{instance}}", "refId": "A" }]
+      "targets": [{ "expr": "100 * (sum by (instance) (SeaweedFS_volumeServer_resource{type=\"free\"}) / sum by (instance) (SeaweedFS_volumeServer_resource{type=\"all\"}))", "legendFormat": "{{instance}}", "refId": "A" }]
     },
     {
       "id": 9,

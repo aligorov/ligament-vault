@@ -12,6 +12,8 @@ export SCRIPT_DIR
 
 # shellcheck source=../lib/common.sh
 source "${SCRIPT_DIR}/scripts/lib/common.sh"
+# shellcheck source=../lib/deploy.sh
+source "${SCRIPT_DIR}/scripts/lib/deploy.sh"
 
 load_cluster_env "${CONFIG_ROOT:-${SCRIPT_DIR}}"
 MODE="${1:-incr}"
@@ -66,8 +68,9 @@ run_pgbackrest() {
 
 run_swfs_backup() {
     local admin_idx="${SWFS_ADMIN_NODE_INDEX:-2}"
-    local node_ip
+    local node_ip mpeers
     node_ip=$(get_node_ip "${admin_idx}")
+    mpeers=$(build_swfs_master_peers)
     log_step "SeaweedFS off-cluster meta-backup + контроль демона swfs-backup (${node_ip})"
 
     remote_exec "${node_ip}" "
@@ -79,6 +82,7 @@ run_swfs_backup() {
 
     if ! remote_exec_stdin "${node_ip}" \
         "${REMOTE_BASE_DIR}" \
+        "${mpeers}" \
         "${SWFS_FILER_PORT:-8888}" \
         "${BACKUP_S3_ENDPOINT}" \
         "${BACKUP_S3_REGION:-us-east-1}" \
@@ -87,7 +91,7 @@ run_swfs_backup() {
         "${BACKUP_S3_SECRET_KEY}" \
         "${BACKUP_ENCRYPTION_KEY}" <<'REMOTE_META_BKP'
 set -euo pipefail
-BDIR="$1"; FPORT="$2"; ENDPOINT="$3"; REGION="$4"; BUCKET="$5"; AK="$6"; SK="$7"; ENC_KEY="$8"
+BDIR="$1"; MPEERS="$2"; FPORT="$3"; ENDPOINT="$4"; REGION="$5"; BUCKET="$6"; AK="$7"; SK="$8"; ENC_KEY="$9"
 
 TS=$(date -u +%Y%m%dT%H%M%SZ)
 TMP_META="/tmp/filer-meta-${TS}.meta"
@@ -97,7 +101,7 @@ CID=$(cd "${BDIR}" && docker compose ps -q swfs-filer | head -n1)
 
 trap 'rm -f "${TMP_META}" "${TMP_ENC}"; docker exec "${CID}" rm -f "${TMP_META}" 2>/dev/null || true' EXIT
 
-docker exec "${CID}" weed filer.meta.backup -filer="127.0.0.1:${FPORT}" -output="${TMP_META}"
+docker exec -i "${CID}" weed shell -master="${MPEERS}" -filer="127.0.0.1:${FPORT}" <<< "fs.meta.save -o ${TMP_META} /"
 docker cp "${CID}:${TMP_META}" "${TMP_META}"
 docker exec "${CID}" rm -f "${TMP_META}"
 
