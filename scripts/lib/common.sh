@@ -688,3 +688,33 @@ check_command() {
         return 1
     fi
 }
+
+# Надежная TCP-проверка достижимости без зависимости от флагов/версии nc на узле
+remote_tcp_probe() {
+    local from_ip="$1" target_ip="$2" port="$3" timeout_s="${4:-6}"
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        return 0
+    fi
+    remote_exec "${from_ip}" "python3 -c 'import socket, sys; s = socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=float(sys.argv[3])); s.close()' '${target_ip}' '${port}' '${timeout_s}'" >/dev/null 2>&1
+}
+
+# Атомарное сохранение переменной в cluster.env
+persist_cluster_env_var() {
+    local key="$1" val="$2"
+    local env_file="${CONFIG_ROOT:-${SCRIPT_DIR}}/cluster.env"
+    if [[ "${DRY_RUN:-false}" == "true" || ! -f "${env_file}" ]]; then
+        return 0
+    fi
+    python3 - "${env_file}" "${key}" "${val}" <<'PYENV'
+import pathlib, re, sys
+p = pathlib.Path(sys.argv[1])
+key, val = sys.argv[2], sys.argv[3]
+txt = p.read_text(encoding="utf-8")
+pat = rf"^{re.escape(key)}=.*$"
+if re.search(pat, txt, flags=re.M):
+    txt = re.sub(pat, lambda _: f"{key}={val}", txt, flags=re.M)
+else:
+    txt = txt.rstrip("\n") + f"\n{key}={val}\n"
+p.write_text(txt, encoding="utf-8")
+PYENV
+}

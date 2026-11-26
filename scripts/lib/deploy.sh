@@ -89,6 +89,63 @@ build_pg_hosts() {
     get_node_ips | paste -sd, -
 }
 
+build_pg_ports_csv() {
+    local count
+    count=$(get_node_count)
+    python3 -c 'import sys; print(",".join([sys.argv[1]] * int(sys.argv[2])))' "${PG_PORT:-15432}" "${count}"
+}
+
+EXTRA_PEER_IPS="${EXTRA_PEER_IPS:-}"
+
+get_all_peer_ips() {
+    local extra_file
+    extra_file="$(state_root)/.state/extra_peer_ips"
+    {
+        get_node_ips
+        if [[ -n "${EXTRA_PEER_IPS:-}" ]]; then
+            printf '%s\n' "${EXTRA_PEER_IPS}" | tr ' ' '\n'
+        fi
+        if [[ -f "${extra_file}" ]]; then
+            cat "${extra_file}"
+        fi
+    } | awk 'NF && !seen[$0]++'
+}
+
+discover_extra_peer_ips() {
+    [[ "${DRY_RUN:-false}" == "true" ]] && return 0
+    local count found=""
+    count=$(get_node_count)
+    for i in $(seq 1 "${count}"); do
+        local ip name ext_ip
+        ip=$(get_node_ip "$i")
+        name=$(get_node_name "$i")
+        ext_ip=$(remote_exec "${ip}" "python3 - <<'PYIP' 2>/dev/null || true
+import ipaddress, urllib.request
+for url in ('https://api.ipify.org', 'https://ipv4.icanhazip.com'):
+    try:
+        raw = urllib.request.urlopen(url, timeout=3).read().decode().strip()
+        addr = ipaddress.IPv4Address(raw)
+        if addr.is_global:
+            print(str(addr))
+            break
+    except Exception:
+        pass
+PYIP" 2>/dev/null | tail -n1 | tr -d '[:space:]' || true)
+        if [[ "${ext_ip}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && ! get_node_ips | grep -Fxq "${ext_ip}"; then
+            log_info "  🌐 Обнаружен внешний NAT/egress IP узла ${name}: ${ext_ip} (добавлен в peer-allowlist)"
+            found+="${found:+ }${ext_ip}"
+        fi
+    done
+    EXTRA_PEER_IPS="${found}"
+    export EXTRA_PEER_IPS
+    mkdir -p "$(state_root)/.state"
+    if [[ -n "${found}" ]]; then
+        printf '%s\n' "${found}" | tr ' ' '\n' > "$(state_root)/.state/extra_peer_ips"
+    else
+        rm -f "$(state_root)/.state/extra_peer_ips"
+    fi
+}
+
 build_haproxy_pg_servers() {
     local result="" count
     count=$(get_node_count)
@@ -126,7 +183,7 @@ build_pg_hba_peers_yaml() {
         [[ -n "${result}" ]] && result+=$'\n'
         result+="    - hostssl all all ${ip}/32 scram-sha-256 clientcert=verify-ca"$'\n'
         result+="    - hostssl replication replicator ${ip}/32 scram-sha-256 clientcert=verify-ca"
-    done < <(get_node_ips | awk '!seen[$0]++')
+    done < <(get_all_peer_ips)
     echo "${result}"
 }
 
@@ -236,7 +293,7 @@ export_node_render_vars() {
         export ETCD_ELECTION_TIMEOUT=3500
     fi
 
-    export ETCD_INITIAL_CLUSTER ETCD_HOSTS ETCD_PATRONI_HOSTS ETCD_PATRONI_USE_PROXIES SWFS_MASTER_PEERS PG_HOSTS HAPROXY_PG_SERVERS PATRONI_SLOTS_YAML PG_HBA_PEERS_YAML
+    export ETCD_INITIAL_CLUSTER ETCD_HOSTS ETCD_PATRONI_HOSTS ETCD_PATRONI_USE_PROXIES SWFS_MASTER_PEERS PG_HOSTS PG_PORTS_CSV HAPROXY_PG_SERVERS PATRONI_SLOTS_YAML PG_HBA_PEERS_YAML
     ETCD_INITIAL_CLUSTER=$(build_etcd_cluster_string)
     ETCD_HOSTS=$(build_etcd_hosts)
     if is_quorum_node "${idx}" "${name}"; then
@@ -254,6 +311,7 @@ export_node_render_vars() {
     ETCD_PATRONI_USE_PROXIES="false"
     SWFS_MASTER_PEERS=$(build_swfs_master_peers)
     PG_HOSTS=$(build_pg_hosts)
+    PG_PORTS_CSV=$(build_pg_ports_csv)
     HAPROXY_PG_SERVERS=$(build_haproxy_pg_servers)
     PATRONI_SLOTS_YAML=$(build_patroni_slots_yaml)
     PG_HBA_PEERS_YAML=$(build_pg_hba_peers_yaml)
@@ -440,7 +498,7 @@ REMOTE_DIRS
 harden_node_ufw() {
     local ip="$1" dc="$2" name="$3" idx="$4"
     local peer_ips
-    peer_ips=$(get_node_ips | tr '\n' ' ')
+    peer_ips=$(get_all_peer_ips | tr '\n' ' ')
 
     log_info "Синхронизация UFW на ${name} (${ip}) с внешним 120s Dead-Man's Switch..."
     remote_exec_stdin "${ip}" \
@@ -475,6 +533,13 @@ SWFS_FG=$((SWFS_F + 10000))
 if [[ -f /run/ufw-rollback.pid ]]; then
     kill "$(cat /run/ufw-rollback.pid)" 2>/dev/null || true
     rm -f /run/ufw-rollback.pid
+fi
+
+# Разблокируем IP всех нод кластера во всех активных jail'ах fail2ban
+if command -v fail2ban-client >/dev/null 2>&1; then
+    for PEER_IP in ${PEER_IPS}; do
+        fail2ban-client unban "${PEER_IP}" >/dev/null 2>&1 || true
+    done
 fi
 
 WAS_ACTIVE=false
@@ -525,7 +590,7 @@ ufw allow "${PASV_MIN}:${PASV_MAX}/tcp" comment "${SLUG}:public-pasv" >/dev/null
 ufw allow "${HTTPS_P}/tcp" comment "${SLUG}:public-https" >/dev/null
 
 for PEER_IP in ${PEER_IPS}; do
-    ufw allow from "${PEER_IP}" to any port "${ETCD_C},${ETCD_P}" proto tcp comment "${SLUG}:peer:${PEER_IP}" >/dev/null
+    ufw allow from "${PEER_IP}" to any port "${ADMIN_SSH_PORT},${ETCD_C},${ETCD_P}" proto tcp comment "${SLUG}:peer:${PEER_IP}" >/dev/null
     ufw allow from "${PEER_IP}" to any port "${PG_PORT}" proto tcp comment "${SLUG}:peer:${PEER_IP}" >/dev/null
     ufw allow from "${PEER_IP}" to any port "${PATRONI_PORT}" proto tcp comment "${SLUG}:peer:${PEER_IP}" >/dev/null
     ufw allow from "${PEER_IP}" to any port "${SWFS_M},${SWFS_MG},${SWFS_V},${SWFS_VG},${SWFS_F},${SWFS_FG}" proto tcp comment "${SLUG}:peer:${PEER_IP}" >/dev/null
@@ -539,18 +604,24 @@ fi
 
 if [[ "${WAS_ACTIVE}" == "true" ]]; then
     ALLOWED_SET=" ${PEER_IPS} ${ARBITER_IP} "
-    STALE_NUMS=$(python3 - "${ALLOWED_SET}" "${SLUG}" "${HTTPS_P}" "${SFTP_PORT}" "${FTPS_PORT}" "${PG_PORT}" <<'PYEOF'
+    STALE_NUMS=$(python3 - "${ALLOWED_SET}" "${SLUG}" "${HTTPS_P}" "${SFTP_PORT}" "${FTPS_PORT}" "${PG_PORT}" "${PATRONI_PORT}" <<'PYEOF'
 import re, subprocess, sys
 allowed = set(sys.argv[1].split())
 slug = re.escape(sys.argv[2])
-https_p, sftp_p, ftps_p, pg_p = sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6]
+https_p, sftp_p, ftps_p, pg_p, pat_p = sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6], sys.argv[7]
+valid_single_peer_ports = {f"{pg_p}/tcp", f"{pat_p}/tcp"}
 out = subprocess.check_output(["ufw", "status", "numbered"], text=True, stderr=subprocess.DEVNULL)
 nums = []
 for line in out.splitlines():
-    m = re.match(rf"\[\s*(\d+)\]\s+(\S+).*#\s*(?:{slug}|cluster-b):(?:peer|arbiter):(\S+)", line)
-    if m and (m.group(3) not in allowed or (pg_p != "5432" and m.group(2) == "5432/tcp")):
-        nums.append(int(m.group(1)))
-        continue
+    m = re.match(rf"\[\s*(\d+)\]\s+(\S+).*#\s*(?:{slug}|cluster-b):(peer|arbiter):(\S+)", line)
+    if m:
+        rule_num, port_spec, role_kind, src_ip = int(m.group(1)), m.group(2), m.group(3), m.group(4)
+        if src_ip not in allowed:
+            nums.append(rule_num)
+            continue
+        if role_kind == "peer" and port_spec.endswith("/tcp") and "," not in port_spec and port_spec not in valid_single_peer_ports:
+            nums.append(rule_num)
+            continue
     m_pub = re.match(rf"\[\s*(\d+)\]\s+(\d+)/tcp\b.*#\s*{slug}:public-(https|sftp|ftps)\b", line)
     if m_pub:
         port_val, kind = m_pub.group(2), m_pub.group(3)
@@ -566,7 +637,7 @@ PYEOF
     done
 fi
 
-nohup bash -c 'sleep 120 && ufw --force disable && echo "$(date): UFW ROLLBACK TRIGGERED" >> /var/log/ufw-rollback.log' >/dev/null 2>&1 &
+nohup bash -c 'sleep 120 && ufw --force disable && echo "$(date): UFW ROLLBACK TRIGGERED" >> /var/log/ufw-rollback.log' </dev/null >/dev/null 2>&1 &
 echo $! > /run/ufw-rollback.pid
 
 if [[ "${WAS_ACTIVE}" == "false" ]]; then
@@ -574,6 +645,16 @@ if [[ "${WAS_ACTIVE}" == "false" ]]; then
 else
     ufw reload >/dev/null
 fi
+
+# Гарантируем приоритетный /32 допуск кластерных портов выше любых f2b-*/кастомных цепочек в INPUT
+PEER_FAST_PORTS="${ADMIN_SSH_PORT},${ETCD_C},${ETCD_P},${PG_PORT},${PATRONI_PORT},${SWFS_M},${SWFS_MG},${SWFS_V},${SWFS_VG},${SWFS_F},${SWFS_FG},${SWFS_A},${SWFS_AG}"
+iptables -S INPUT 2>/dev/null | grep "${SLUG}:peer-fast:" | sed 's/^-A /-D /' | while read -r r; do
+    # shellcheck disable=SC2086
+    iptables $r 2>/dev/null || true
+done
+for PEER_IP in ${PEER_IPS}; do
+    iptables -I INPUT 1 -p tcp -s "${PEER_IP}/32" -m multiport --dports "${PEER_FAST_PORTS}" -m comment --comment "${SLUG}:peer-fast:${PEER_IP}" -j ACCEPT 2>/dev/null || true
+done
 REMOTE_UFW
 
     if [[ "${DRY_RUN:-false}" != "true" ]]; then
@@ -586,10 +667,377 @@ REMOTE_UFW
     fi
 }
 
+get_node_index_by_ip() {
+    local target_ip="$1" count i
+    count=$(get_node_count)
+    for i in $(seq 1 "${count}"); do
+        if [[ "$(get_node_ip "$i")" == "${target_ip}" ]]; then
+            echo "$i"
+            return 0
+        fi
+    done
+    echo "1"
+}
+
+get_node_name_by_ip() {
+    local target_ip="$1" count i
+    count=$(get_node_count)
+    for i in $(seq 1 "${count}"); do
+        if [[ "$(get_node_ip "$i")" == "${target_ip}" ]]; then
+            get_node_name "$i"
+            return 0
+        fi
+    done
+    echo "node1"
+}
+
+# shellcheck disable=SC2034
+ASYMMETRIC_BLOCKED_PAIRS=()
+# shellcheck disable=SC2034
+PROBED_SELECTED_PORT=""
+
+# Параллельное тестирование кандидатов портов PG на узле cand_ip со всех остальных узлов кластера.
+# Результат записывается в глобальную переменную PROBED_SELECTED_PORT (во избежание subshell),
+# а пары с полной блокировкой прямого TCP добавляются в ASYMMETRIC_BLOCKED_PAIRS.
+probe_node_candidate_ports() {
+    local cand_ip="$1" cand_name="$2" cand_ports="$3"
+    PROBED_SELECTED_PORT=""
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        PROBED_SELECTED_PORT="${PG_PORT:-15432}"
+        return 0
+    fi
+    local peer_ips
+    peer_ips=$(get_all_peer_ips | tr '\n' ' ')
+
+    local free_ports
+    free_ports=$(remote_exec_stdin "${cand_ip}" "${cand_ports}" "${peer_ips}" <<'REMOTE_PROBE_START' || true
+set -euo pipefail
+PORTS="$1"; PEERS="$2"
+if [[ -f /run/ligament-pg-probe.pid ]]; then
+    kill "$(cat /run/ligament-pg-probe.pid)" 2>/dev/null || true
+    rm -f /run/ligament-pg-probe.pid
+fi
+iptables -S INPUT 2>/dev/null | grep 'ligament-pg-probe' | sed 's/^-A /-D /' | while read -r r; do
+    # shellcheck disable=SC2086
+    iptables $r 2>/dev/null || true
+done
+
+FREE_LIST=$(python3 - "${PORTS}" <<'PYFREE'
+import subprocess, sys
+cand = [p for p in sys.argv[1].split() if p.isdigit()]
+out = subprocess.check_output(["ss", "-H", "-tln"], text=True, stderr=subprocess.DEVNULL)
+busy = set()
+for line in out.splitlines():
+    parts = line.split()
+    if len(parts) >= 4:
+        port = parts[3].rsplit(":", 1)[-1]
+        if port.isdigit():
+            busy.add(port)
+free = []
+for p in cand:
+    if p not in busy and p not in free:
+        free.append(p)
+print(" ".join(free))
+PYFREE
+)
+[[ -n "${FREE_LIST}" ]] || exit 0
+FREE_CSV="${FREE_LIST// /,}"
+for pip in ${PEERS}; do
+    iptables -I INPUT 1 -p tcp -s "${pip}/32" -m multiport --dports "${FREE_CSV}" -m comment --comment "ligament-pg-probe" -j ACCEPT 2>/dev/null || true
+done
+
+nohup python3 -c '
+import select, socket, sys, time
+socks = []
+for p_str in sys.argv[1].split():
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        s.bind(("0.0.0.0", int(p_str)))
+        s.listen(32)
+        s.setblocking(False)
+        socks.append(s)
+    except Exception:
+        s.close()
+deadline = time.monotonic() + 25.0
+while time.monotonic() < deadline and socks:
+    r, _, _ = select.select(socks, [], [], 0.5)
+    for ls in r:
+        try:
+            conn, _ = ls.accept()
+            conn.close()
+        except Exception:
+            pass
+for s in socks:
+    s.close()
+' "${FREE_LIST}" </dev/null >/dev/null 2>&1 &
+echo $! > /run/ligament-pg-probe.pid
+sleep 0.3
+echo "${FREE_LIST}"
+REMOTE_PROBE_START
+    )
+    free_ports=$(echo "${free_ports}" | tail -n1 | xargs 2>/dev/null || true)
+    if [[ -z "${free_ports}" ]]; then
+        return 0
+    fi
+
+    local count common_ports="${free_ports}"
+    count=$(get_node_count)
+    for i in $(seq 1 "${count}"); do
+        local pip pname reached
+        pip=$(get_node_ip "$i")
+        pname=$(get_node_name "$i")
+        [[ "${pip}" == "${cand_ip}" ]] && continue
+
+        reached=$(remote_exec_stdin "${pip}" "${cand_ip}" "${free_ports}" <<'REMOTE_PROBE_CLIENT' 2>/dev/null || true
+set -euo pipefail
+TARGET="$1"; PORTS="$2"
+python3 - "${TARGET}" "${PORTS}" <<'PYCLIENT'
+import concurrent.futures, socket, sys
+target = sys.argv[1]
+ports = [int(p) for p in sys.argv[2].split() if p.isdigit()]
+def check(p):
+    try:
+        s = socket.create_connection((target, p), timeout=3.5)
+        s.close()
+        return p
+    except Exception:
+        return None
+with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(ports))) as ex:
+    res = [p for p in ex.map(check, ports) if p is not None]
+print(" ".join(str(p) for p in res))
+PYCLIENT
+REMOTE_PROBE_CLIENT
+        )
+        reached=$(echo "${reached}" | tail -n1 | xargs 2>/dev/null || true)
+        if [[ -z "${reached}" ]]; then
+            log_warn "  ⚠️  Прямой TCP ${pname} (${pip}) -> ${cand_name} (${cand_ip}) закрыт провайдером на всех проверенных портах [${free_ports}]"
+            ASYMMETRIC_BLOCKED_PAIRS+=("${pip}|${pname}|${cand_ip}|${cand_name}")
+            common_ports=""
+        else
+            log_info "  🔎 Доступные порты ${pname} -> ${cand_name}: [${reached}]"
+            local next_common="" cp
+            for cp in ${common_ports}; do
+                if [[ " ${reached} " == *" ${cp} "* ]]; then
+                    next_common+="${next_common:+ }${cp}"
+                fi
+            done
+            common_ports="${next_common}"
+        fi
+    done
+
+    remote_exec_stdin "${cand_ip}" <<'REMOTE_PROBE_STOP' >/dev/null 2>&1 || true
+if [[ -f /run/ligament-pg-probe.pid ]]; then
+    kill "$(cat /run/ligament-pg-probe.pid)" 2>/dev/null || true
+    rm -f /run/ligament-pg-probe.pid
+fi
+iptables -S INPUT 2>/dev/null | grep 'ligament-pg-probe' | sed 's/^-A /-D /' | while read -r r; do
+    # shellcheck disable=SC2086
+    iptables $r 2>/dev/null || true
+done
+REMOTE_PROBE_STOP
+
+    if [[ -n "${common_ports}" ]]; then
+        # shellcheck disable=SC2034
+        PROBED_SELECTED_PORT="${common_ports%% *}"
+    fi
+}
+
+# Автоматический прозрачный SSH port-forward + OUTPUT DNAT мост при полной фильтрации прямого TCP между двумя нодами
+ensure_ssh_peer_bridge() {
+    local src_ip="$1" src_name="$2" dst_ip="$3" dst_name="$4"
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        log_info "[DRY-RUN] ensure_ssh_peer_bridge ${src_name} (${src_ip}) -> ${dst_name} (${dst_ip})"
+        return 0
+    fi
+
+    local dst_idx swfs_mg swfs_vg swfs_fg base_lport ssh_p mode=""
+    dst_idx=$(get_node_index_by_ip "${dst_ip}")
+    swfs_mg=$(( ${SWFS_MASTER_PORT:-9333} + 10000 ))
+    swfs_vg=$(( ${SWFS_VOLUME_PORT:-8082} + 10000 ))
+    swfs_fg=$(( ${SWFS_FILER_PORT:-8888} + 10000 ))
+    base_lport=$(( 30000 + dst_idx * 100 ))
+    ssh_p="${ADMIN_SSH_PORT:-22}"
+
+    if remote_tcp_probe "${src_ip}" "${dst_ip}" "${ssh_p}" 5; then
+        mode="L"
+    elif remote_tcp_probe "${dst_ip}" "${src_ip}" "${ssh_p}" 5; then
+        mode="R"
+    else
+        log_error "Невозможно построить резервный SSH-мост ${src_name} -> ${dst_name}: порт SSH (${ssh_p}) недоступен в обе стороны!"
+        return 1
+    fi
+
+    log_info "  🌉 Настройка автоматического защищенного TCP-моста (${mode}) для ${src_name} (${src_ip}) -> ${dst_name} (${dst_ip})..."
+
+    local raw_ports=(
+        "${ETCD_CLIENT_PORT:-2379}"
+        "${ETCD_PEER_PORT:-2380}"
+        "${PG_PORT:-15432}"
+        "${PATRONI_API_PORT:-8008}"
+        "${SWFS_MASTER_PORT:-9333}"
+        "${swfs_mg}"
+        "${SWFS_VOLUME_PORT:-8082}"
+        "${swfs_vg}"
+        "${SWFS_FILER_PORT:-8888}"
+        "${swfs_fg}"
+        "${SWFS_ADMIN_PORT:-12535}"
+        "${SWFS_ADMIN_GRPC_PORT:-22535}"
+    )
+    local uniq_ports=() rp seen_str=" "
+    for rp in "${raw_ports[@]}"; do
+        if [[ "${seen_str}" != *" ${rp} "* ]]; then
+            uniq_ports+=("${rp}")
+            seen_str+="${rp} "
+        fi
+    done
+
+    local fwd_flags="" dnat_pairs="" k=0 dport lport first_lport=""
+    for dport in "${uniq_ports[@]}"; do
+        k=$(( k + 1 ))
+        lport=$(( base_lport + k ))
+        [[ -z "${first_lport}" ]] && first_lport="${lport}"
+        if [[ "${mode}" == "L" ]]; then
+            fwd_flags+=" -L 127.0.0.1:${lport}:${dst_ip}:${dport}"
+        else
+            fwd_flags+=" -R 127.0.0.1:${lport}:${dst_ip}:${dport}"
+        fi
+        dnat_pairs+="${dport}:${lport} "
+    done
+
+    local client_ip server_ip client_name server_name pubkey unit_name
+    if [[ "${mode}" == "L" ]]; then
+        client_ip="${src_ip}"; client_name="${src_name}"
+        server_ip="${dst_ip}"; server_name="${dst_name}"
+        unit_name="${CLUSTER_SLUG}-bridge-to-${dst_name}"
+    else
+        client_ip="${dst_ip}"; client_name="${dst_name}"
+        server_ip="${src_ip}"; server_name="${src_name}"
+        unit_name="${CLUSTER_SLUG}-bridge-push-${src_name}"
+    fi
+
+    pubkey=$(remote_exec_stdin "${client_ip}" <<'REMOTE_BR_KEY'
+set -euo pipefail
+mkdir -p /etc/ligament-bridge && chmod 700 /etc/ligament-bridge
+if [[ ! -f /etc/ligament-bridge/id_ed25519 ]]; then
+    ssh-keygen -t ed25519 -f /etc/ligament-bridge/id_ed25519 -N "" -C "ligament-bridge" >/dev/null
+fi
+chmod 600 /etc/ligament-bridge/id_ed25519
+awk '{print $1 " " $2}' /etc/ligament-bridge/id_ed25519.pub
+REMOTE_BR_KEY
+    )
+    pubkey=$(echo "${pubkey}" | tail -n1)
+
+    remote_exec_stdin "${server_ip}" "${pubkey}" "${CLUSTER_SLUG}-bridge-${client_name}" <<'REMOTE_BR_AUTH'
+set -euo pipefail
+PUB="$1"; TAG="$2"
+if [[ -d /etc/ssh/sshd_config.d ]]; then
+    cat > /etc/ssh/sshd_config.d/98-ligament-bridge.conf <<'SSHD_BR'
+AllowTcpForwarding yes
+GatewayPorts no
+SSHD_BR
+fi
+if [[ -f /etc/ssh/sshd_config ]]; then
+    sed -i 's/^[[:space:]]*AllowTcpForwarding[[:space:]]\+no/AllowTcpForwarding yes/I' /etc/ssh/sshd_config || true
+fi
+if sshd -t 2>/dev/null; then
+    systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
+fi
+mkdir -p /root/.ssh && chmod 700 /root/.ssh
+touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys
+sed -i "/${TAG}/d" /root/.ssh/authorized_keys
+echo "restrict,port-forwarding,command=\"/bin/false\" ${PUB} ${TAG}" >> /root/.ssh/authorized_keys
+REMOTE_BR_AUTH
+
+    remote_exec_stdin "${client_ip}" "${unit_name}" "${server_ip}" "${ssh_p}" "${fwd_flags}" <<'REMOTE_BR_UNIT'
+set -euo pipefail
+UNIT="$1"; SRV_IP="$2"; SSH_P="$3"; FLAGS="$4"
+mkdir -p /etc/ligament-bridge && chmod 700 /etc/ligament-bridge
+touch /etc/ligament-bridge/known_hosts && chmod 600 /etc/ligament-bridge/known_hosts
+ssh-keygen -R "${SRV_IP}" -f /etc/ligament-bridge/known_hosts >/dev/null 2>&1 || true
+ssh-keygen -R "[${SRV_IP}]:${SSH_P}" -f /etc/ligament-bridge/known_hosts >/dev/null 2>&1 || true
+
+cat > "/etc/systemd/system/${UNIT}.service" <<EOF
+[Unit]
+Description=Ligament Vault Peer TCP Bridge (${UNIT})
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ssh -N -T -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/etc/ligament-bridge/known_hosts -o BatchMode=yes -p ${SSH_P} -i /etc/ligament-bridge/id_ed25519${FLAGS} root@${SRV_IP}
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable "${UNIT}.service" >/dev/null 2>&1 || true
+systemctl restart "${UNIT}.service"
+REMOTE_BR_UNIT
+
+    wait_for_remote_health "${src_ip}" "SSH-мост ${src_name} -> ${dst_name} (127.0.0.1:${first_lport})" \
+        "ss -H -tln | awk '{print \$4}' | grep -Fxq '127.0.0.1:${first_lport}'" 15 1 \
+        "systemctl status '${unit_name}.service' --no-pager -l 2>/dev/null || true"
+
+    remote_exec_stdin "${src_ip}" "${CLUSTER_SLUG}" "${dst_name}" "${dst_ip}" "${dst_idx}" "${dnat_pairs}" <<'REMOTE_BR_DNAT'
+set -euo pipefail
+SLUG="$1"; DST_NAME="$2"; DST_IP="$3"; DST_IDX="$4"; PAIRS="$5"
+CHAIN="LIG_BR_${DST_IDX}"
+SCRIPT="/usr/local/sbin/${SLUG}-dnat-${DST_NAME}.sh"
+
+cat > /etc/sysctl.d/98-ligament-bridge.conf <<'SYSBR'
+net.ipv4.conf.all.route_localnet = 1
+net.ipv4.conf.lo.route_localnet = 1
+SYSBR
+sysctl -w net.ipv4.conf.all.route_localnet=1 >/dev/null 2>&1 || true
+sysctl -w net.ipv4.conf.lo.route_localnet=1 >/dev/null 2>&1 || true
+
+cat > "${SCRIPT}" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+sysctl -w net.ipv4.conf.all.route_localnet=1 >/dev/null 2>&1 || true
+sysctl -w net.ipv4.conf.lo.route_localnet=1 >/dev/null 2>&1 || true
+iptables -t nat -N "${CHAIN}" 2>/dev/null || iptables -t nat -F "${CHAIN}"
+iptables -t nat -C OUTPUT -p tcp -d "${DST_IP}/32" -j "${CHAIN}" 2>/dev/null || iptables -t nat -I OUTPUT 1 -p tcp -d "${DST_IP}/32" -j "${CHAIN}"
+iptables -t nat -C POSTROUTING -o lo -p tcp -d 127.0.0.1/32 --dport 30100:30999 -j SNAT --to-source 127.0.0.1 2>/dev/null || iptables -t nat -A POSTROUTING -o lo -p tcp -d 127.0.0.1/32 --dport 30100:30999 -j SNAT --to-source 127.0.0.1
+for pair in ${PAIRS}; do
+    dp="\${pair%%:*}"
+    lp="\${pair##*:}"
+    iptables -t nat -A "${CHAIN}" -p tcp -d "${DST_IP}/32" --dport "\${dp}" -j DNAT --to-destination "127.0.0.1:\${lp}"
+done
+EOF
+chmod 700 "${SCRIPT}"
+"${SCRIPT}"
+
+cat > "/etc/systemd/system/${SLUG}-dnat-${DST_NAME}.service" <<EOF
+[Unit]
+Description=Ligament Vault OUTPUT DNAT for Peer Bridge to ${DST_NAME} (${DST_IP})
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=${SCRIPT}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable "${SLUG}-dnat-${DST_NAME}.service" >/dev/null 2>&1 || true
+REMOTE_BR_DNAT
+
+    log_info "  ✅ Прозрачный мост ${src_name} -> ${dst_name} активен (сквозной mTLS сохранен)"
+}
+
 tune_node_wan_and_swap() {
     local ip="$1"
     local peer_ips
-    peer_ips=$(get_node_ips | tr '\n' ' ')
+    peer_ips=$(get_all_peer_ips | tr '\n' ' ')
     remote_exec_stdin "${ip}" "${ADMIN_SSH_PORT:-22}" "${peer_ips}" <<'REMOTE_TUNE'
 set -euo pipefail
 SSH_PORT="$1"; PEER_IPS="$2"
@@ -632,7 +1080,7 @@ REMOTE_TUNE
 harden_node_full() {
     local ip="$1" dc="$2" name="$3" idx="$4"
     local peer_ips
-    peer_ips=$(get_node_ips | tr '\n' ' ')
+    peer_ips=$(get_all_peer_ips | tr '\n' ' ')
     log_info "Укрепление ОС на ${name} (${ip})..."
 
     remote_exec_stdin "${ip}" \

@@ -127,7 +127,7 @@
     "port": 0,
     "username": "sftpgo",
     "password": "${SFTPGO_DB_PASSWORD}",
-    "connection_string": "host=${PG_HOSTS} port=${PG_PORT} dbname=sftpgo user=sftpgo password=${SFTPGO_DB_PASSWORD} sslmode=verify-full sslrootcert=/certs/ca.crt sslcert=/certs/pg-client.crt sslkey=/certs/pg-client.key target_session_attrs=read-write connect_timeout=10",
+    "connection_string": "host=127.0.0.1,${PG_HOSTS} port=${HAPROXY_PG_PORT},${PG_PORTS_CSV} dbname=sftpgo user=sftpgo password=${SFTPGO_DB_PASSWORD} sslmode=verify-full sslrootcert=/certs/ca.crt sslcert=/certs/pg-client.crt sslkey=/certs/pg-client.key target_session_attrs=read-write connect_timeout=5",
     "sql_tables_prefix": "",
     "track_quota": 2,
     "delayed_quota_update": 0,

@@ -65,8 +65,9 @@ ensure_fallback_or_distribute_ssl() {
 ensure_fallback_or_distribute_ssl
 
 # --- 2. Однократный sftpgo initprovider ДО старта SFTPGo ---
-log_step "2/7 — SFTPGo initprovider (update_mode=1, однократно на Node 1)"
-remote_exec "${NODE1_IP}" "cd '${REMOTE_BASE_DIR}' && docker compose run --rm --no-deps sftpgo sftpgo initprovider --config-file /etc/sftpgo/sftpgo.json"
+PRIMARY_PG_IP=$(find_patroni_primary_ip || echo "${NODE1_IP}")
+log_step "2/7 — SFTPGo initprovider (update_mode=1, однократно на Primary ${PRIMARY_PG_IP})"
+remote_exec "${PRIMARY_PG_IP}" "cd '${REMOTE_BASE_DIR}' && docker compose run --rm --no-deps sftpgo sftpgo initprovider --config-file /etc/sftpgo/sftpgo.json"
 log_info "  ✅ Схема SFTPGo в PostgreSQL инициализирована"
 
 _ensure_sftpgo_unprivileged_ports_cb() {
@@ -215,7 +216,8 @@ fi
 # --- 7. Проверка бэкапов ---
 log_step "7/7 — Проверка бэкапов"
 if [[ "${BACKUP_S3_ACCESS_KEY:-FIXME}" != *FIXME* && "${BACKUP_S3_ACCESS_KEY:-}" != "" ]]; then
-    remote_exec "${NODE1_IP}" "CID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q patroni | head -n1); [[ -n \"\${CID}\" ]] && docker exec -u postgres \"\${CID}\" pgbackrest --stanza='${CLUSTER_SLUG}' check" \
+    PRIMARY_PG_IP=$(find_patroni_primary_ip || echo "${NODE1_IP}")
+    remote_exec "${PRIMARY_PG_IP}" "CID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q patroni | head -n1); [[ -n \"\${CID}\" ]] && docker exec -u postgres \"\${CID}\" pgbackrest --stanza='${CLUSTER_SLUG}' check" \
         || log_warn "pgBackRest check вернул предупреждение — проверьте configs/pgbackrest.conf"
 else
     log_warn "Бэкапы pgBackRest/filer.backup ожидают заполнения BACKUP_S3_* в секретах"

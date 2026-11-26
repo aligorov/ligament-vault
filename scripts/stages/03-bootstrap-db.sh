@@ -21,25 +21,14 @@ log_step "Стадия 3: Bootstrap DB (etcd + Patroni + HAProxy + pgBackRest)"
 PG_PORT_MIGRATED=false
 if [[ ! -f "$(state_root)/.cluster_installed" && "${PG_PORT:-15432}" == "5432" ]]; then
     log_warn "🔒 Автоперевод PostgreSQL со стандартного порта 5432 на закрытый mTLS-порт 15432..."
-    ENV_FILE="${CONFIG_ROOT:-${SCRIPT_DIR}}/cluster.env"
-    if [[ "${DRY_RUN:-false}" != "true" && -f "${ENV_FILE}" ]]; then
-        python3 - "${ENV_FILE}" <<'PYENV'
-import pathlib, re, sys
-p = pathlib.Path(sys.argv[1])
-txt = p.read_text(encoding="utf-8")
-if re.search(r"^PG_PORT=", txt, flags=re.M):
-    txt = re.sub(r"^PG_PORT=.*$", "PG_PORT=15432", txt, flags=re.M)
-else:
-    txt = txt.rstrip("\n") + "\nPG_PORT=15432\n"
-p.write_text(txt, encoding="utf-8")
-PYENV
-    fi
+    persist_cluster_env_var "PG_PORT" "15432"
     export PG_PORT=15432
     PG_PORT_MIGRATED=true
 fi
 export PG_PORT="${PG_PORT:-15432}"
 
 ensure_quorum_nodes_initialized
+discover_extra_peer_ips
 for_each_node tune_node_wan_and_swap
 for_each_node harden_node_ufw
 for_each_node build_patroni_image_on_node
@@ -86,6 +75,7 @@ fi
 
 log_step "Запуск Patroni Primary -> Replicas"
 ACTIVE_PRIMARY_IP="${NODE1_IP}"
+ACTIVE_PRIMARY_NAME="${NODE1_NAME}"
 
 if [[ "${DRY_RUN:-false}" == "true" ]]; then
     remote_exec "${NODE1_IP}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d --force-recreate patroni"
@@ -96,7 +86,7 @@ if [[ "${DRY_RUN:-false}" == "true" ]]; then
     }
     for_each_node for_each_node_dry_rep
 else
-    # Проверяем, есть ли уже здоровый лидер Patroni на целевом порту PG_PORT
+    # 1. Проверяем, есть ли уже действующий лидер Patroni, напрямую видимый со всех узлов на текущем PG_PORT
     REUSE_EXISTING_PRIMARY=""
     CANDIDATE_PRIMARY=""
     if [[ "${PG_PORT_MIGRATED}" != "true" ]]; then
@@ -107,7 +97,7 @@ else
         check_pg_reach_cb() {
             local ip="$1" name="$3"
             [[ "${ip}" == "${CANDIDATE_PRIMARY}" ]] && return 0
-            if ! remote_exec "${ip}" "nc -z -w 8 '${CANDIDATE_PRIMARY}' '${PG_PORT:-15432}'" >/dev/null 2>&1; then
+            if ! remote_tcp_probe "${ip}" "${CANDIDATE_PRIMARY}" "${PG_PORT:-15432}" 6; then
                 log_warn "  ⚠️  Узел ${name} (${ip}) не видит порт PostgreSQL ${CANDIDATE_PRIMARY}:${PG_PORT:-15432}"
                 PEER_REACH_OK=false
             fi
@@ -120,14 +110,15 @@ else
 
     if [[ -n "${REUSE_EXISTING_PRIMARY}" ]]; then
         ACTIVE_PRIMARY_IP="${REUSE_EXISTING_PRIMARY}"
-        log_info "Обнаружен действующий лидер Patroni на ${ACTIVE_PRIMARY_IP} — обновляем его конфиг и поднимаем реплики..."
+        ACTIVE_PRIMARY_NAME=$(get_node_name_by_ip "${ACTIVE_PRIMARY_IP}")
+        log_info "Обнаружен действующий лидер Patroni на ${ACTIVE_PRIMARY_NAME} (${ACTIVE_PRIMARY_IP}:${PG_PORT}) — обновляем его конфиг и поднимаем реплики..."
         remote_exec "${ACTIVE_PRIMARY_IP}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d --force-recreate patroni"
         wait_for_remote_health "${ACTIVE_PRIMARY_IP}" "Patroni Primary (${ACTIVE_PRIMARY_IP})" \
             "curl -sf --cacert '${REMOTE_BASE_DIR}/certs/ca.crt' https://127.0.0.1:${PATRONI_API_PORT:-8008}/primary" 60 3 \
             "cd '${REMOTE_BASE_DIR}' && docker compose logs --tail 60 patroni || true"
     else
         if [[ ! -f "$(state_root)/.cluster_installed" ]]; then
-            log_info "Очистка незавершенного состояния Patroni после прерванной первичной установки..."
+            log_info "Очистка незавершенного состояния Patroni и автоподбор доступного маршрута/порта PostgreSQL..."
             stop_and_clean_pg_cb() {
                 local ip="$1"
                 remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose stop patroni 2>/dev/null || true; rm -rf '${PG_DATA_DIR}/data' && mkdir -p '${PG_DATA_DIR}/data'"
@@ -141,12 +132,73 @@ else
                         del --prefix '/${CLUSTER_SLUG}/' >/dev/null 2>&1 || true
                 fi
             "
+
+            # Формируем список портов-кандидатов (текущий PG_PORT, 2382 рядом с рабочим etcd, HTTPS-alt 8445/6443/4433/8080)
+            RESERVED_PORTS=" ${ADMIN_SSH_PORT:-22} ${HTTPS_PORT:-443} ${SFTP_PORT:-2022} ${FTPS_PORT:-21} ${PANEL_PORT:-9443} ${PATRONI_API_PORT:-8008} ${HAPROXY_PG_PORT:-5433} ${ETCD_CLIENT_PORT:-2379} ${ETCD_PEER_PORT:-2380} ${ETCD_METRICS_PORT:-2381} "
+            CAND_PORTS=""
+            for _cp in "${PG_PORT}" 2382 8445 6443 4433 8080; do
+                if [[ "${RESERVED_PORTS}" != *" ${_cp} "* && " ${CAND_PORTS} " != *" ${_cp} "* ]]; then
+                    CAND_PORTS+="${CAND_PORTS:+ }${_cp}"
+                fi
+            done
+
+            ASYMMETRIC_BLOCKED_PAIRS=()
+            SELECTED_PORT=""
+            SELECTED_PRIMARY_IP=""
+            SELECTED_PRIMARY_NAME=""
+            NODE_CNT=$(get_node_count)
+            for _qi in $(seq 1 "${NODE_CNT}"); do
+                _qip=$(get_node_ip "${_qi}")
+                _qname=$(get_node_name "${_qi}")
+                if ! is_quorum_node "${_qi}" "${_qname}"; then
+                    continue
+                fi
+                probe_node_candidate_ports "${_qip}" "${_qname}" "${CAND_PORTS}"
+                if [[ -n "${PROBED_SELECTED_PORT}" ]]; then
+                    SELECTED_PORT="${PROBED_SELECTED_PORT}"
+                    SELECTED_PRIMARY_IP="${_qip}"
+                    SELECTED_PRIMARY_NAME="${_qname}"
+                    break
+                fi
+            done
+
+            if [[ -z "${SELECTED_PRIMARY_IP}" ]]; then
+                SELECTED_PRIMARY_IP="${NODE1_IP}"
+                SELECTED_PRIMARY_NAME="${NODE1_NAME}"
+                SELECTED_PORT="${PG_PORT}"
+                log_warn "🔄 Прямой межсетевой порт PostgreSQL закрыт на всех кворум-узлах — включаем автоматический защищенный SSH-мост..."
+            else
+                if [[ "${SELECTED_PORT}" != "${PG_PORT}" ]]; then
+                    log_warn "🔄 Автопереключение PostgreSQL с фильтруемого порта ${PG_PORT} на открытый mTLS-порт ${SELECTED_PORT} (Primary: ${SELECTED_PRIMARY_NAME})..."
+                    persist_cluster_env_var "PG_PORT" "${SELECTED_PORT}"
+                    export PG_PORT="${SELECTED_PORT}"
+                    for_each_node harden_node_ufw
+                    for_each_node render_and_push_cb
+                fi
+                if [[ "${SELECTED_PRIMARY_IP}" != "${NODE1_IP}" ]]; then
+                    log_warn "🔄 Автовыбор узла ${SELECTED_PRIMARY_NAME} (${SELECTED_PRIMARY_IP}:${PG_PORT}) в качестве начального Patroni Primary (прямая связность со всеми репликами)"
+                fi
+            fi
+
+            # Если между какими-то узлами обнаружена полная блокировка прямого TCP провайдером — поднимаем прозрачный SSH-мост
+            if (( ${#ASYMMETRIC_BLOCKED_PAIRS[@]} > 0 )); then
+                SEEN_BRIDGES=" "
+                for _pair in "${ASYMMETRIC_BLOCKED_PAIRS[@]}"; do
+                    [[ "${SEEN_BRIDGES}" == *" ${_pair} "* ]] && continue
+                    SEEN_BRIDGES+="${_pair} "
+                    IFS='|' read -r _sip _sname _dip _dname <<< "${_pair}"
+                    ensure_ssh_peer_bridge "${_sip}" "${_sname}" "${_dip}" "${_dname}" || \
+                        log_warn "Дополнительный SSH-мост ${_sname} -> ${_dname} пропущен (основной маршрут идет через ${SELECTED_PRIMARY_NAME})"
+                done
+            fi
+
+            ACTIVE_PRIMARY_IP="${SELECTED_PRIMARY_IP}"
+            ACTIVE_PRIMARY_NAME="${SELECTED_PRIMARY_NAME}"
         fi
 
-        ACTIVE_PRIMARY_IP="${NODE1_IP}"
-        log_info "Старт Patroni Primary на $(get_node_name 1) (${NODE1_IP})..."
-        remote_exec "${NODE1_IP}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d --force-recreate patroni"
-        wait_for_remote_health "${NODE1_IP}" "Patroni Primary /primary" \
+        log_info "Старт Patroni Primary на ${ACTIVE_PRIMARY_NAME} (${ACTIVE_PRIMARY_IP}:${PG_PORT})..."
+        remote_exec "${ACTIVE_PRIMARY_IP}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d --force-recreate patroni"
+        wait_for_remote_health "${ACTIVE_PRIMARY_IP}" "Patroni Primary /primary (${ACTIVE_PRIMARY_NAME})" \
             "curl -sf --cacert '${REMOTE_BASE_DIR}/certs/ca.crt' https://127.0.0.1:${PATRONI_API_PORT:-8008}/primary" 60 3 \
             "cd '${REMOTE_BASE_DIR}' && docker compose logs --tail 60 patroni || true; curl -sk https://127.0.0.1:${PATRONI_API_PORT:-8008}/patroni || true"
     fi
@@ -154,9 +206,15 @@ else
     start_replica_cb() {
         local ip="$1" name="$3"
         [[ "${ip}" == "${ACTIVE_PRIMARY_IP}" ]] && return 0
-        if ! remote_exec "${ip}" "nc -z -w 10 '${ACTIVE_PRIMARY_IP}' '${PG_PORT:-15432}' || (sleep 2 && nc -z -w 10 '${ACTIVE_PRIMARY_IP}' '${PG_PORT:-15432}')" >/dev/null 2>&1; then
-            log_error "❌ Сетевой порт PostgreSQL ${ACTIVE_PRIMARY_IP}:${PG_PORT:-15432} недоступен с узла ${name} (${ip})!"
-            log_error "   Проверьте внешний облачный файрвол хостинга (Security Group / Cloud Firewall) между ${ip} и ${ACTIVE_PRIMARY_IP} для TCP ${PG_PORT:-15432}."
+        if ! remote_tcp_probe "${ip}" "${ACTIVE_PRIMARY_IP}" "${PG_PORT:-15432}" 8; then
+            sleep 2
+            if ! remote_tcp_probe "${ip}" "${ACTIVE_PRIMARY_IP}" "${PG_PORT:-15432}" 8; then
+                log_warn "  ⚠️  Прямой TCP ${name} (${ip}) -> ${ACTIVE_PRIMARY_NAME} (${ACTIVE_PRIMARY_IP}:${PG_PORT}) недоступен — включаем резервный SSH-мост..."
+                ensure_ssh_peer_bridge "${ip}" "${name}" "${ACTIVE_PRIMARY_IP}" "${ACTIVE_PRIMARY_NAME}"
+            fi
+        fi
+        if ! remote_tcp_probe "${ip}" "${ACTIVE_PRIMARY_IP}" "${PG_PORT:-15432}" 10; then
+            log_error "❌ Сетевой порт PostgreSQL ${ACTIVE_PRIMARY_IP}:${PG_PORT:-15432} недоступен с узла ${name} (${ip}) даже после включения моста!"
             exit 1
         fi
         remote_exec_stdin "${ip}" "${PG_DATA_DIR}" <<'REMOTE_PREP_REPLICA'

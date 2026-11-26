@@ -110,11 +110,11 @@ check_rtt() {
                       awk -F'/' '/rtt|round-trip/{printf "%.0f", $5}') || rtt_avg=9999
             [[ -z "${rtt_avg}" ]] && rtt_avg=9999
 
-            if (( rtt_avg > ${RTT_HARD_STOP:-250} )); then
-                log_error "  ❌ HARD STOP: RTT ${src_name}<->${dst_name} = ${rtt_avg}ms > ${RTT_HARD_STOP:-250}ms!"
+            if (( rtt_avg > ${RTT_HARD_STOP:-1000} )); then
+                log_error "  ❌ HARD STOP: RTT ${src_name}<->${dst_name} = ${rtt_avg}ms > ${RTT_HARD_STOP:-1000}ms!"
                 PREFLIGHT_PASS=false
-            elif (( rtt_avg > ${RTT_WARN:-150} )); then
-                log_warn "  ⚠️  RTT ${src_name}<->${dst_name} = ${rtt_avg}ms > ${RTT_WARN:-150}ms"
+            elif (( rtt_avg > ${RTT_WARN:-250} )); then
+                log_warn "  ⚠️  RTT ${src_name}<->${dst_name} = ${rtt_avg}ms > ${RTT_WARN:-250}ms (WAN-link — SSH-мост активируется автоматически)"
             else
                 log_info "  ✅ RTT ${src_name}<->${dst_name}: ${rtt_avg}ms"
             fi
@@ -123,8 +123,9 @@ check_rtt() {
         done
     done
 
-    if (( max_rtt <= ${RTT_HARD_STOP:-250} )); then
-        local rec_hb=$(( max_rtt > 100 ? max_rtt : 250 ))
+    if (( max_rtt > 0 )); then
+        # cap heartbeat at 500ms for WAN-class clusters; etcd election = 10x heartbeat
+        local rec_hb=$(( max_rtt > 500 ? 500 : ( max_rtt > 100 ? max_rtt : 250 ) ))
         local rec_el=$(( rec_hb * 10 ))
         log_info "Макс. RTT=${max_rtt}ms -> рекомендовано: ETCD_HEARTBEAT_INTERVAL=${rec_hb}ms, ETCD_ELECTION_TIMEOUT=${rec_el}ms"
     fi

@@ -419,6 +419,38 @@ jobs:
           print(f"Zero-Trust PG verified: port=15432, ssl={ssl_on}, version={tls_ver}, client_dn={client_dn}, crl={crl_file}")
           PYSEC
 
+          # 4. Verify kernel OUTPUT DNAT + POSTROUTING SNAT bridge preserves end-to-end TLSv1.3 mTLS to PG
+          sudo sysctl -w net.ipv4.conf.all.route_localnet=1 >/dev/null
+          sudo sysctl -w net.ipv4.conf.lo.route_localnet=1 >/dev/null
+          sudo iptables -t nat -N LIG_BR_CI
+          sudo iptables -t nat -I OUTPUT 1 -p tcp -d 198.51.100.99/32 -j LIG_BR_CI
+          sudo iptables -t nat -A POSTROUTING -o lo -p tcp -d 127.0.0.1/32 --dport 15432 -j SNAT --to-source 127.0.0.1
+          sudo iptables -t nat -A LIG_BR_CI -p tcp -d 198.51.100.99/32 --dport 15432 -j DNAT --to-destination 127.0.0.1:15432
+          docker exec -i -u postgres -e "SUPER_PW=${PG_SUPERUSER_PASSWORD}" "$(docker ps -qf name=patroni)" python3 - <<'PYBR'
+          import os, psycopg2
+          conn = psycopg2.connect(
+              host="198.51.100.99",
+              port=15432,
+              dbname="postgres",
+              user="postgres",
+              password=os.environ["SUPER_PW"],
+              sslmode="verify-ca",
+              sslrootcert="/run/pg-certs/ca.crt",
+              sslcert="/run/pg-certs/pg-client.crt",
+              sslkey="/run/pg-certs/pg-client.key",
+              connect_timeout=5,
+          )
+          cur = conn.cursor()
+          cur.execute("SELECT ssl, version FROM pg_stat_ssl WHERE pid = pg_backend_pid()")
+          assert cur.fetchone() == (True, "TLSv1.3")
+          conn.close()
+          print("Kernel OUTPUT DNAT bridge verified over TLSv1.3 mTLS!")
+          PYBR
+          sudo iptables -t nat -D OUTPUT -p tcp -d 198.51.100.99/32 -j LIG_BR_CI
+          sudo iptables -t nat -D POSTROUTING -o lo -p tcp -d 127.0.0.1/32 --dport 15432 -j SNAT --to-source 127.0.0.1
+          sudo iptables -t nat -F LIG_BR_CI
+          sudo iptables -t nat -X LIG_BR_CI
+
           docker exec -i -e "SFTPGO_PW=${SFTPGO_DB_PASSWORD}" -e "SWFS_PW=${SWFS_FILER_DB_PASSWORD}" "$(docker ps -qf name=patroni)" python3 - <<'PYEOF'
           import os, psycopg2
           from psycopg2 import sql
