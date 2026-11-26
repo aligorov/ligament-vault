@@ -71,10 +71,11 @@ for_each_node start_filer_s3_cb
 
 # 4. fs.configure (с полным списком мастеров)
 log_step "Применение fs.configure (volumeGrowthCount=${SWFS_VOLUME_GROWTH_COUNT:-2}, replication=${SWFS_DEFAULT_REPLICATION:-100})"
-remote_exec_stdin "${NODE1_IP}" "${SWFS_VOLUME_GROWTH_COUNT:-2}" "${SWFS_DEFAULT_REPLICATION:-100}" "${MASTER_PEERS}" <<'REMOTE_FS_CONF'
+remote_exec_stdin "${NODE1_IP}" "${REMOTE_BASE_DIR}" "${SWFS_VOLUME_GROWTH_COUNT:-2}" "${SWFS_DEFAULT_REPLICATION:-100}" "${MASTER_PEERS}" <<'REMOTE_FS_CONF'
 set -euo pipefail
-VGC="$1"; REPL="$2"; MASTERS="$3"
-FILER_CID=$(docker ps -qf name=swfs-filer)
+BASE_DIR="$1"; VGC="$2"; REPL="$3"; MASTERS="$4"
+FILER_CID=$(cd "${BASE_DIR}" && docker compose ps -q swfs-filer | head -n1)
+[[ -n "${FILER_CID}" ]] || { echo "swfs-filer container not found" >&2; exit 1; }
 docker exec -i "${FILER_CID}" weed shell -master="${MASTERS}" <<WEED
 fs.configure -locationPrefix=/ -volumeGrowthCount=${VGC} -replication=${REPL} -apply
 WEED

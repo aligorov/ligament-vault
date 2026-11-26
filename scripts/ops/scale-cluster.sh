@@ -52,7 +52,7 @@ PYEOF
 purge_stopped_patroni_member_from_dcs() {
     local helper_ip="$1" dead_node_name="$2"
     remote_exec "${helper_ip}" "
-        ETCD_CID=\$(docker ps -qf name=etcd)
+        ETCD_CID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q etcd | head -n1 || true)
         if [[ -n \"\${ETCD_CID}\" ]]; then
             docker exec \"\${ETCD_CID}\" etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} \
                 --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key \
@@ -98,6 +98,7 @@ cmd_add() {
     current_count=$(get_node_count)
     next_idx=$((current_count + 1))
     new_name="${new_name:-node${next_idx}}"
+    ensure_quorum_nodes_initialized
 
     log_step "Добавление узла ${new_name} (${new_ip}, DC=${new_dc}, role=${role})"
 
@@ -173,7 +174,7 @@ cmd_add() {
     log_info "5/8 — Регистрация permanent slot '${new_name}' в Patroni..."
     local primary_ip
     primary_ip=$(find_patroni_primary_ip || get_node_ip 1)
-    remote_exec "${primary_ip}" "docker exec \$(docker ps -qf name=patroni) patronictl edit-config '${CLUSTER_SLUG}' --force --set 'slots.${new_name}.type=physical'"
+    remote_exec "${primary_ip}" "CID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q patroni | head -n1); docker exec \"\${CID}\" patronictl edit-config '${CLUSTER_SLUG}' --force --set 'slots.${new_name}.type=physical'"
 
     # 7. Запуск сервисов
     if [[ "${role}" == "quorum" ]]; then
@@ -181,17 +182,18 @@ cmd_add() {
         local member_id=""
         if [[ "${DRY_RUN:-false}" != "true" ]]; then
             member_id=$(remote_exec "${primary_ip}" "
-                docker exec \$(docker ps -qf name=etcd) etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} \
+                ETCD_CID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q etcd | head -n1)
+                docker exec \"\${ETCD_CID}\" etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} \
                     --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key \
                     member add 'etcd-${new_name}' --peer-urls='https://${new_ip}:${ETCD_PEER_PORT:-2380}' --learner -w json | jq -r '.member.ID'
             " || echo "")
         fi
         remote_exec "${new_ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d etcd"
         wait_for_remote_health "${new_ip}" "etcd learner ${new_name}" \
-            "docker exec \$(docker ps -qf name=etcd) etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key endpoint health" 25 3
+            "CID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q etcd | head -n1) && docker exec \"\${CID}\" etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key endpoint health" 25 3
         if [[ -n "${member_id}" && "${DRY_RUN:-false}" != "true" ]]; then
             for _ in $(seq 1 10); do
-                if remote_exec "${primary_ip}" "docker exec \$(docker ps -qf name=etcd) etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key member promote '${member_id}'"; then
+                if remote_exec "${primary_ip}" "CID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q etcd | head -n1); docker exec \"\${CID}\" etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key member promote '${member_id}'"; then
                     break
                 fi
                 sleep 3
@@ -207,7 +209,7 @@ cmd_add() {
     for i in $(seq 1 "${current_count}"); do
         local oip
         oip=$(get_node_ip "$i")
-        remote_exec "${oip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d --no-deps haproxy && docker kill -s HUP \$(docker ps -qf name=sftpgo)"
+        remote_exec "${oip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d --no-deps haproxy && SFTP_CID=\$(docker compose ps -q sftpgo | head -n1) && [[ -n \"\${SFTP_CID}\" ]] && docker kill -s HUP \"\${SFTP_CID}\""
     done
 
     # 8. SeaweedFS cluster.status и балансировка томов (со всеми мастерами!)
@@ -215,8 +217,9 @@ cmd_add() {
     local mpeers
     mpeers=$(build_swfs_master_peers)
     if [[ "${rebalance}" == "true" || "${VOLUME_BALANCE_AFTER_ADD:-true}" == "true" ]]; then
-        remote_exec_stdin "${primary_ip}" "${mpeers}" <<'REMOTE_REBAL'
-docker exec -i "$(docker ps -qf name=swfs-filer)" weed shell -master="$1" <<'WEED'
+        remote_exec_stdin "${primary_ip}" "${REMOTE_BASE_DIR}" "${mpeers}" <<'REMOTE_REBAL'
+FILER_CID=$(cd "$1" && docker compose ps -q swfs-filer | head -n1)
+docker exec -i "${FILER_CID}" weed shell -master="$2" <<'WEED'
 cluster.status
 volume.balance -apply
 volume.fix.replication -apply
@@ -250,6 +253,7 @@ cmd_replace() {
         exit 1
     }
     IFS=':' read -r old_ip old_dc old_name old_idx <<< "${node_info}"
+    ensure_quorum_nodes_initialized
 
     log_step "Замена узла ${old_name} (${old_ip}) -> ${new_ip} (DC=${old_dc})"
     confirm_action "Отозвать сертификаты ${old_name}, перенести IP ${old_ip} -> ${new_ip} и перезалить ноду?" || exit 0
@@ -292,10 +296,10 @@ cmd_replace() {
     purge_stopped_patroni_member_from_dcs "${helper_ip}" "${old_name}"
 
     if is_quorum_node "${old_idx}" "${old_name}"; then
-        remote_exec_stdin "${helper_ip}" "${old_name}" "${new_ip}" "${ETCD_CLIENT_PORT:-2379}" "${ETCD_PEER_PORT:-2380}" <<'REMOTE_ETCD_REP'
+        remote_exec_stdin "${helper_ip}" "${old_name}" "${new_ip}" "${ETCD_CLIENT_PORT:-2379}" "${ETCD_PEER_PORT:-2380}" "${REMOTE_BASE_DIR}" <<'REMOTE_ETCD_REP'
 set -euo pipefail
-NAME="$1"; NEW_IP="$2"; EC="$3"; EP="$4"
-ETCD_CID=$(docker ps -qf name=etcd)
+NAME="$1"; NEW_IP="$2"; EC="$3"; EP="$4"; BDIR="$5"
+ETCD_CID=$(cd "${BDIR}" && docker compose ps -q etcd | head -n1)
 OLD_ID=$(docker exec "${ETCD_CID}" etcdctl --endpoints="https://127.0.0.1:${EC}" \
     --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key \
     member list -w json | jq -r ".members[] | select(.name==\"etcd-${NAME}\") | .ID")
@@ -332,10 +336,10 @@ REMOTE_ETCD_REP
     if is_quorum_node "${old_idx}" "${old_name}"; then
         remote_exec "${new_ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d etcd"
         wait_for_remote_health "${new_ip}" "etcd learner ${old_name}" \
-            "docker exec \$(docker ps -qf name=etcd) etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key endpoint health" 25 3
-        remote_exec_stdin "${helper_ip}" "${old_name}" "${ETCD_CLIENT_PORT:-2379}" <<'REMOTE_PROMOTE'
-NAME="$1"; EC="$2"
-ETCD_CID=$(docker ps -qf name=etcd)
+            "ETCD_CID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q etcd | head -n1); [ -n \"\${ETCD_CID}\" ] && docker exec \"\${ETCD_CID}\" etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key endpoint health" 25 3
+        remote_exec_stdin "${helper_ip}" "${old_name}" "${ETCD_CLIENT_PORT:-2379}" "${REMOTE_BASE_DIR}" <<'REMOTE_PROMOTE'
+NAME="$1"; EC="$2"; BDIR="$3"
+ETCD_CID=$(cd "${BDIR}" && docker compose ps -q etcd | head -n1)
 LID=$(docker exec "${ETCD_CID}" etcdctl --endpoints="https://127.0.0.1:${EC}" \
     --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key \
     member list -w json | jq -r ".members[] | select(.name==\"etcd-${NAME}\") | .ID")
@@ -356,12 +360,12 @@ REMOTE_PROMOTE
     log_info "6/6 — Восстановление потерянных копий томов (volume.fix.replication -apply) и reload..."
     local mpeers
     mpeers=$(build_swfs_master_peers)
-    remote_exec "${helper_ip}" "docker exec -i \$(docker ps -qf name=swfs-filer) weed shell -master='${mpeers}' <<< 'volume.fix.replication -apply'"
+    remote_exec "${helper_ip}" "FILER_CID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q swfs-filer | head -n1); docker exec -i \"\${FILER_CID}\" weed shell -master='${mpeers}' <<< 'volume.fix.replication -apply'"
     for i in $(seq 1 "${count}"); do
         local cip cname
         cip=$(get_node_ip "$i"); cname=$(get_node_name "$i")
         [[ "${cname}" == "${old_name}" ]] && continue
-        remote_exec "${cip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d --no-deps haproxy && docker kill -s HUP \$(docker ps -qf name=sftpgo)"
+        remote_exec "${cip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d --no-deps haproxy && SCID=\$(docker compose ps -q sftpgo | head -n1) && [[ -n \"\${SCID}\" ]] && docker kill -s HUP \"\${SCID}\""
     done
 
     log_info "✅ Замена ${old_name} -> ${new_ip} полностью выполнена"
@@ -390,11 +394,22 @@ cmd_remove() {
     }
     IFS=':' read -r rm_ip _ rm_name rm_idx <<< "${node_info}"
 
+    ensure_quorum_nodes_initialized
     local count
     count=$(get_node_count)
     if (( count <= 3 )); then
         log_error "Нельзя удалить узел: останется < 3 узлов (нарушение кворума etcd и defaultReplication=100)"
         exit 1
+    fi
+    if is_quorum_node "${rm_idx}" "${rm_name}"; then
+        local qcount=0
+        for i in $(seq 1 "${count}"); do
+            is_quorum_node "$i" "$(get_node_name "$i")" && qcount=$((qcount + 1))
+        done
+        if (( qcount <= 3 )); then
+            log_error "Нельзя удалить quorum-узел '${rm_name}': в кластере всего ${qcount} quorum-узла(ов), минимум для кворума etcd/SeaweedFS — 3. Используйте 'scale replace' или добавьте сначала новую quorum-ноду."
+            exit 1
+        fi
     fi
 
     log_step "Безопасное удаление узла ${rm_name} (${rm_ip})"
@@ -412,7 +427,7 @@ cmd_remove() {
     fi
     if patroni_is_primary "${rm_ip}"; then
         log_info "  ${rm_name} — PG Primary; выполняем switchover..."
-        remote_exec "${rm_ip}" "docker exec \$(docker ps -qf name=patroni) patronictl switchover '${CLUSTER_SLUG}' --force"
+        remote_exec "${rm_ip}" "CID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q patroni | head -n1); docker exec \"\${CID}\" patronictl switchover '${CLUSTER_SLUG}' --force"
         run_or_dry sleep 8
     fi
 
@@ -421,23 +436,37 @@ cmd_remove() {
     remote_exec "${rm_ip}" "cd '${REMOTE_BASE_DIR}' && docker compose stop sftpgo swfs-s3 swfs-filer swfs-volume swfs-worker || true"
     local mpeers
     mpeers=$(build_swfs_master_peers)
-    remote_exec "${helper_ip}" "docker exec -i \$(docker ps -qf name=swfs-filer) weed shell -master='${mpeers}' <<< 'volume.fix.replication -apply'"
+    remote_exec "${helper_ip}" "FILER_CID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q swfs-filer | head -n1); docker exec -i \"\${FILER_CID}\" weed shell -master='${mpeers}' <<< 'volume.fix.replication -apply'"
 
     # 3. Остановка Patroni, точечная очистка member-записи в DCS и удаление permanent slot
     log_info "3/5 — Вывод ${rm_name} из Patroni DCS и очистка permanent slot..."
     remote_exec "${rm_ip}" "cd '${REMOTE_BASE_DIR}' && docker compose stop patroni haproxy || true"
     purge_stopped_patroni_member_from_dcs "${helper_ip}" "${rm_name}"
-    remote_exec "${helper_ip}" "docker exec \$(docker ps -qf name=patroni) patronictl edit-config '${CLUSTER_SLUG}' --force --set 'slots.${rm_name}=null'" || true
     local cur_primary_ip
     cur_primary_ip=$(find_patroni_primary_ip || echo "${helper_ip}")
-    remote_exec "${cur_primary_ip}" "docker exec -u postgres \$(docker ps -qf name=patroni) psql -U postgres -c \"SELECT pg_drop_replication_slot('${rm_name}') FROM pg_replication_slots WHERE slot_name = '${rm_name}';\" >/dev/null" || true
+    remote_exec_stdin "${cur_primary_ip}" "${PATRONI_API_PORT:-8008}" "${PATRONI_API_PASSWORD}" "${rm_name}" <<'REMOTE_DEL_SLOT' || true
+set -euo pipefail
+python3 - "$1" "$2" "$3" <<'PYEOF'
+import base64, json, sys, urllib.request
+port, pw, rname = sys.argv[1:]
+b64 = base64.b64encode(f"patroni:{pw}".encode()).decode()
+req = urllib.request.Request(
+    f"http://127.0.0.1:{port}/config",
+    data=json.dumps({"slots": {rname: None}}).encode(),
+    headers={"Authorization": f"Basic {b64}", "Content-Type": "application/json"},
+    method="PATCH",
+)
+urllib.request.urlopen(req, timeout=10).read()
+PYEOF
+REMOTE_DEL_SLOT
+    remote_exec "${cur_primary_ip}" "CID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q patroni | head -n1); docker exec -u postgres \"\${CID}\" psql -U postgres -c \"SELECT pg_drop_replication_slot('${rm_name}') FROM pg_replication_slots WHERE slot_name = '${rm_name}';\" >/dev/null" || true
 
     # 4. Вывод из etcd (если quorum) и отзыв сертификатов
     log_info "4/5 — Проверка etcd и отзыв сертификатов..."
     if is_quorum_node "${rm_idx}" "${rm_name}"; then
-        remote_exec_stdin "${helper_ip}" "${rm_name}" "${ETCD_CLIENT_PORT:-2379}" <<'REMOTE_ETCD_RM'
-NAME="$1"; EC="$2"
-ETCD_CID=$(docker ps -qf name=etcd)
+        remote_exec_stdin "${helper_ip}" "${REMOTE_BASE_DIR}" "${rm_name}" "${ETCD_CLIENT_PORT:-2379}" <<'REMOTE_ETCD_RM'
+BDIR="$1"; NAME="$2"; EC="$3"
+ETCD_CID=$(cd "${BDIR}" && docker compose ps -q etcd | head -n1)
 ID=$(docker exec "${ETCD_CID}" etcdctl --endpoints="https://127.0.0.1:${EC}" \
     --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key \
     member list -w json | jq -r ".members[] | select(.name==\"etcd-${NAME}\") | .ID")
@@ -445,29 +474,47 @@ ID=$(docker exec "${ETCD_CID}" etcdctl --endpoints="https://127.0.0.1:${EC}" \
     --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key member remove "${ID}"
 REMOTE_ETCD_RM
         remote_exec "${rm_ip}" "cd '${REMOTE_BASE_DIR}' && docker compose stop etcd swfs-master || true"
-        [[ -f "$(state_root)/.quorum_nodes" && "${DRY_RUN:-false}" != "true" ]] && sed -i.bak "/^${rm_name}$/d" "$(state_root)/.quorum_nodes" || true
+        if [[ -f "$(state_root)/.quorum_nodes" && "${DRY_RUN:-false}" != "true" ]]; then
+            sed -i.bak "/^${rm_name}$/d" "$(state_root)/.quorum_nodes" && rm -f "$(state_root)/.quorum_nodes.bak" || true
+        fi
     fi
     revoke_node_certs "${rm_name}"
 
-    # 5. Обновляем CLUSTER_NODES и синхронизируем оставшиеся ноды
+    # 5. Обновляем CLUSTER_NODES (и SWFS_ADMIN_NODE_INDEX при сдвиге) и синхронизируем оставшиеся ноды
     log_info "5/5 — Очистка UFW и синхронизация конфигов на оставшихся узлах..."
-    local new_nodes=""
+    local admin_idx="${SWFS_ADMIN_NODE_INDEX:-2}"
+    local admin_name=""
+    admin_name=$(get_node_name "${admin_idx}" 2>/dev/null || echo "")
+    local new_nodes="" new_admin_idx="1" new_idx=0
     for i in $(seq 1 "${count}"); do
         local nip ndc nname
         nip=$(get_node_ip "$i"); ndc=$(get_node_dc "$i"); nname=$(get_node_name "$i")
         [[ "${nname}" == "${rm_name}" ]] && continue
+        new_idx=$((new_idx + 1))
+        [[ "${nname}" == "${admin_name}" ]] && new_admin_idx="${new_idx}"
         [[ -n "${new_nodes}" ]] && new_nodes+=" "
         new_nodes+="${nip}:${ndc}:${nname}"
     done
+    if [[ "${rm_name}" == "${admin_name}" ]]; then
+        new_admin_idx=$(( new_idx >= 2 ? 2 : 1 ))
+    fi
     if [[ "${DRY_RUN:-false}" != "true" ]]; then
         update_cluster_env_var "CLUSTER_NODES" "${new_nodes}"
+        update_cluster_env_var "SWFS_ADMIN_NODE_INDEX" "${new_admin_idx}"
     else
         export CLUSTER_NODES="${new_nodes}"
+        export SWFS_ADMIN_NODE_INDEX="${new_admin_idx}"
     fi
     local sync_flags=()
+    [[ -n "${ENV_NAME:-}" ]] && sync_flags+=("--env" "${ENV_NAME}")
     [[ "${DRY_RUN:-false}" == "true" ]] && sync_flags+=("--dry-run")
     [[ "${AUTO_YES:-false}" == "true" ]] && sync_flags+=("--yes")
-    bash "${SCRIPT_DIR}/clusterctl" sync-config "${sync_flags[@]}"
+    bash "${SCRIPT_DIR}/clusterctl" "${sync_flags[@]}" sync-config
+    if [[ "${rm_name}" == "${admin_name}" ]]; then
+        local new_admin_ip
+        new_admin_ip=$(get_node_ip "${new_admin_idx}")
+        remote_exec "${new_admin_ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d swfs-admin" || true
+    fi
 
     log_info "✅ Узел ${rm_name} безопасно выведен из кластера"
 }

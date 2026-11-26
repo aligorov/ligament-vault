@@ -57,11 +57,12 @@ dr_step_etcd_and_pg_restore() {
     for_each_node start_etcd_cb
 
     wait_for_remote_health "${node1_ip}" "etcd quorum" \
-        "docker exec \$(docker ps -qf name=etcd) etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key endpoint health" 30 3
+        "ETCD_CID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q etcd | head -n1); [ -n \"\${ETCD_CID}\" ] && docker exec \"\${ETCD_CID}\" etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key endpoint health" 30 3
 
     # Очищаем ключи старой эпохи Patroni в DCS перед стартом восстановленного PGDATA
     remote_exec "${node1_ip}" "
-        docker exec \$(docker ps -qf name=etcd) etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} \
+        ECID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q etcd | head -n1 || true)
+        [[ -n \"\${ECID}\" ]] && docker exec \"\${ECID}\" etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} \
             --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key \
             del --prefix '/${CLUSTER_SLUG}/' >/dev/null 2>&1 || true
     "
@@ -107,6 +108,7 @@ dr_step_swfs_restore() {
     node1_ip=$(get_node_ip 1)
     if [[ "${BACKUP_S3_ACCESS_KEY:-FIXME}" != *FIXME* && -n "${BACKUP_S3_ACCESS_KEY:-}" ]]; then
         remote_exec_stdin "${node1_ip}" \
+            "${REMOTE_BASE_DIR}" \
             "${SWFS_FILER_PORT:-8888}" \
             "${BACKUP_S3_ENDPOINT}" \
             "${BACKUP_S3_REGION:-us-east-1}" \
@@ -115,15 +117,18 @@ dr_step_swfs_restore() {
             "${BACKUP_S3_SECRET_KEY}" \
             "${BACKUP_ENCRYPTION_KEY}" <<'REMOTE_SWFS_RESTORE' || log_warn "Дамп filer-meta/LATEST не найден — используются метаданные из восстановленной БД PostgreSQL"
 set -euo pipefail
-FPORT="$1"; ENDPOINT="$2"; REGION="$3"; BUCKET="$4"; AK="$5"; SK="$6"; ENC_KEY="$7"
+BDIR="$1"; FPORT="$2"; ENDPOINT="$3"; REGION="$4"; BUCKET="$5"; AK="$6"; SK="$7"; ENC_KEY="$8"
 TMP_ENC="/tmp/dr-filer.meta.gz.enc"
 TMP_RAW="/tmp/dr-filer.meta"
-CID=$(docker ps -qf name=swfs-filer)
+CID=$(cd "${BDIR}" && docker compose ps -q swfs-filer | head -n1)
+[[ -n "${CID}" ]] || exit 1
 trap 'rm -f "${TMP_ENC}" "${TMP_RAW}"; docker exec "${CID}" rm -f "${TMP_RAW}" 2>/dev/null || true' EXIT
 
 python3 - "${ENDPOINT}" "${REGION}" "${BUCKET}" "${AK}" "${SK}" "${TMP_ENC}" <<'PYEOF'
 import datetime, hashlib, hmac, sys, urllib.parse, urllib.request
 endpoint, region, bucket, ak, sk, dst = sys.argv[1:]
+if not endpoint.startswith(("http://", "https://")):
+    endpoint = "https://" + endpoint
 endpoint = endpoint.rstrip("/")
 host = urllib.parse.urlparse(endpoint).netloc
 def sign(k, m): return hmac.new(k, m.encode(), hashlib.sha256).digest()

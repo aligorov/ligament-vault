@@ -12,6 +12,8 @@ export SCRIPT_DIR
 
 # shellcheck source=../lib/common.sh
 source "${SCRIPT_DIR}/scripts/lib/common.sh"
+# shellcheck source=../lib/deploy.sh
+source "${SCRIPT_DIR}/scripts/lib/deploy.sh"
 
 load_cluster_env "${CONFIG_ROOT:-${SCRIPT_DIR}}"
 
@@ -42,15 +44,19 @@ check_node_health() {
     fi
 
     local raw ntp_offset="N/A" disk_pct="N/A" patroni_role="DOWN" swfs_vol="DOWN" swfs_filer="DOWN" sftpgo_up="DOWN" haproxy_up="DOWN"
-    raw=$(remote_exec_stdin "${ip}" "${PATRONI_API_PORT:-8008}" "${SWFS_VOLUME_PORT:-8082}" "${SWFS_FILER_PORT:-8888}" "${HAPROXY_PG_PORT:-5433}" <<'REMOTE_HEALTH' || true
-PPORT="$1"; VPORT="$2"; FPORT="$3"; HPORT="$4"
+    raw=$(remote_exec_stdin "${ip}" "${REMOTE_BASE_DIR}" "${PATRONI_API_PORT:-8008}" "${SWFS_VOLUME_PORT:-8082}" "${SWFS_FILER_PORT:-8888}" "${HAPROXY_PG_PORT:-5433}" <<'REMOTE_HEALTH' || true
+BDIR="$1"; PPORT="$2"; VPORT="$3"; FPORT="$4"; HPORT="$5"
 NTP=$(chronyc tracking 2>/dev/null | awk '/System time/{printf "%.1fms", $4*1000}' || echo "N/A")
 DISK=$(df -h / | awk 'NR==2{print $5}' || echo "N/A")
 PROLE=$(curl -sf --max-time 3 "http://127.0.0.1:${PPORT}/patroni" 2>/dev/null | jq -r '.role // "ERR"' || echo "DOWN")
 VSTAT=$(curl -sf --max-time 3 "http://127.0.0.1:${VPORT}/healthz" >/dev/null 2>&1 || curl -sf --max-time 3 "http://127.0.0.1:${VPORT}/status" >/dev/null 2>&1 && echo "OK" || echo "DOWN")
 FSTAT=$(curl -sf --max-time 3 "http://127.0.0.1:${FPORT}/healthz" >/dev/null 2>&1 && echo "OK" || echo "DOWN")
 HSTAT=$(nc -z 127.0.0.1 "${HPORT}" 2>/dev/null && echo "OK" || echo "DOWN")
-SSTAT=$(docker exec "$(docker ps -qf name=sftpgo)" sftpgo ping --config-file /etc/sftpgo/sftpgo.json >/dev/null 2>&1 && echo "OK" || echo "DOWN")
+SCID=$(cd "${BDIR}" 2>/dev/null && docker compose ps -q sftpgo | head -n1 || true)
+SSTAT="DOWN"
+if [[ -n "${SCID}" ]] && docker exec "${SCID}" sftpgo ping --config-file /etc/sftpgo/sftpgo.json >/dev/null 2>&1; then
+    SSTAT="OK"
+fi
 echo "${NTP}|${DISK}|${PROLE}|${VSTAT}|${FSTAT}|${HSTAT}|${SSTAT}"
 REMOTE_HEALTH
     )
@@ -78,21 +84,31 @@ ssl_days="N/A"
 last_backup="N/A"
 
 if [[ "${DRY_RUN:-false}" != "true" ]]; then
-    local_ip=$(get_node_ip 1)
+    local_ip=""
+    for i in $(seq 1 "$(get_node_count)"); do
+        cand_ip=$(get_node_ip "$i")
+        if remote_exec "${cand_ip}" "echo ok" >/dev/null 2>&1; then
+            local_ip="${cand_ip}"
+            break
+        fi
+    done
+    local_ip="${local_ip:-$(get_node_ip 1)}"
 
     if [[ "${JSON_OUT}" != "true" ]]; then
         log_step "Кворум etcd и Patroni"
         remote_exec "${local_ip}" "
-            docker exec \$(docker ps -qf name=etcd) etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} \
+            ECID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q etcd | head -n1 || true)
+            [[ -n \"\${ECID}\" ]] && docker exec \"\${ECID}\" etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} \
                 --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key \
                 endpoint status -w table 2>/dev/null || true
-            docker exec \$(docker ps -qf name=patroni) patronictl list 2>/dev/null || true
+            PCID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q patroni | head -n1 || true)
+            [[ -n \"\${PCID}\" ]] && docker exec \"\${PCID}\" patronictl list 2>/dev/null || true
         " || WARNINGS=$((WARNINGS + 1))
     fi
 
-    master_peers=$(echo "${CLUSTER_NODES}" | xargs -n1 | head -n3 | awk -F: -v p="${SWFS_MASTER_PORT:-9333}" '{print $1 ":" p}' | paste -sd, -)
-    dry_fix=$(remote_exec "${local_ip}" "docker exec -i \$(docker ps -qf name=swfs-filer) weed shell -master='${master_peers}' <<< 'volume.fix.replication'" 2>/dev/null || echo "ERR")
-    if echo "${dry_fix}" | grep -qiE "replicate|under-replicated|ERR"; then
+    master_peers=$(build_swfs_master_peers)
+    dry_fix=$(remote_exec "${local_ip}" "FCID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q swfs-filer | head -n1); [[ -n \"\${FCID}\" ]] && docker exec -i \"\${FCID}\" weed shell -master='${master_peers}' <<< 'volume.fix.replication -n' || echo 'ERR'" 2>/dev/null || echo "ERR")
+    if echo "${dry_fix}" | grep -qiE "replicating|copying|deleting|under-replicated|over-replicated|\bERR\b|error:"; then
         swfs_repl_ok=false
         WARNINGS=$((WARNINGS + 1))
         if [[ "${JSON_OUT}" != "true" ]]; then
@@ -121,7 +137,8 @@ PYEOF
         WARNINGS=$((WARNINGS + 1))
     fi
 
-    last_backup=$(remote_exec "${local_ip}" "docker exec -u postgres \$(docker ps -qf name=patroni) pgbackrest --stanza='${CLUSTER_SLUG}' info --output=json 2>/dev/null | jq -r '.[0].backup[-1].label // \"none\"'" 2>/dev/null || echo "N/A")
+    last_backup=$(remote_exec "${local_ip}" "PCID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q patroni | head -n1); [[ -n \"\${PCID}\" ]] && docker exec -u postgres \"\${PCID}\" pgbackrest --stanza='${CLUSTER_SLUG}' info --output=json 2>/dev/null | jq -r '.[0].backup[-1].label // \"none\"' 2>/dev/null || echo 'none'" 2>/dev/null || echo "N/A")
+    [[ -z "${last_backup}" || "${last_backup}" == "null" ]] && last_backup="none"
 
     if [[ "${JSON_OUT}" != "true" ]]; then
         log_step "SSL и Бэкапы"

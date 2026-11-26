@@ -24,7 +24,7 @@ NODE1_IP=$(get_node_ip 1)
 # --- 1. Выпуск SSL-сертификата через lego DNS-01 ---
 log_step "1/7 — Выпуск SSL (${DOMAIN}) через lego DNS-01"
 mkdir -p "${SSL_DIR}"
-if [[ -f "${SSL_DIR}/certificates/${DOMAIN}.crt" ]]; then
+if [[ -f "${SSL_DIR}/certificates/${DOMAIN}.crt" && ! -f "${SSL_DIR}/.selfsigned" ]]; then
     log_info "Сертификат ${DOMAIN} уже выпущен в ${SSL_DIR} — пропускаем первичный выпуск"
 else
     LEGO_ENV="${SSL_DIR}/.lego.env"
@@ -33,12 +33,15 @@ else
     if [[ ! -s "${LEGO_ENV}" ]]; then
         log_warn "Токены DNS-провайдера (${DNS_PROVIDER:-cloudflare}) не заданы — пропуск lego DNS-01"
     else
+        rm -f "${SSL_DIR}/certificates/${DOMAIN}.crt" "${SSL_DIR}/certificates/${DOMAIN}.key" "${SSL_DIR}/.selfsigned"
+        ACME_MAIL="${ACME_EMAIL:-}"
+        [[ -z "${ACME_MAIL}" || "${ACME_MAIL}" == "admin@company.com" ]] && ACME_MAIL="admin@${DOMAIN}"
         run_or_dry docker run --rm \
             -v "${SSL_DIR}:/lego" \
             --env-file "${LEGO_ENV}" \
             "$(resolve_image_ref "${LEGO_IMAGE}" "${LEGO_DIGEST:-}")" \
             --accept-tos \
-            --email "${ACME_EMAIL:-admin@${DOMAIN}}" \
+            --email "${ACME_MAIL}" \
             --dns "${DNS_PROVIDER:-cloudflare}" \
             --domains "${DOMAIN}" \
             --path /lego \
@@ -55,6 +58,7 @@ ensure_fallback_or_distribute_ssl() {
             -keyout "${SSL_DIR}/certificates/${DOMAIN}.key" \
             -out "${SSL_DIR}/certificates/${DOMAIN}.crt" \
             -subj "/CN=${DOMAIN}" -addext "subjectAltName=DNS:${DOMAIN},DNS:*.${DOMAIN}" 2>/dev/null
+        touch "${SSL_DIR}/.selfsigned"
     fi
     for_each_node distribute_ssl_to_node
 }
@@ -83,7 +87,7 @@ start_edge_cb() {
     log_info "  Старт SFTPGo и node-exporter на ${name} (${ip})..."
     remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d --force-recreate sftpgo node-exporter"
     wait_for_remote_health "${ip}" "SFTPGo ${name}" \
-        "docker exec \$(docker ps -qf name=sftpgo) sftpgo ping --config-file /etc/sftpgo/sftpgo.json" 25 2 \
+        "CID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q sftpgo | head -n1) && [[ -n \"\${CID}\" ]] && docker exec \"\${CID}\" sftpgo ping --config-file /etc/sftpgo/sftpgo.json" 25 2 \
         "cd '${REMOTE_BASE_DIR}' && docker compose logs --tail 50 sftpgo || true"
 }
 for_each_node start_edge_cb
@@ -210,7 +214,7 @@ fi
 # --- 7. Проверка бэкапов ---
 log_step "7/7 — Проверка бэкапов"
 if [[ "${BACKUP_S3_ACCESS_KEY:-FIXME}" != *FIXME* && "${BACKUP_S3_ACCESS_KEY:-}" != "" ]]; then
-    remote_exec "${NODE1_IP}" "docker exec -u postgres \$(docker ps -qf name=patroni) pgbackrest --stanza='${CLUSTER_SLUG}' check" \
+    remote_exec "${NODE1_IP}" "CID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q patroni | head -n1); [[ -n \"\${CID}\" ]] && docker exec -u postgres \"\${CID}\" pgbackrest --stanza='${CLUSTER_SLUG}' check" \
         || log_warn "pgBackRest check вернул предупреждение — проверьте configs/pgbackrest.conf"
 else
     log_warn "Бэкапы pgBackRest/filer.backup ожидают заполнения BACKUP_S3_* в секретах"

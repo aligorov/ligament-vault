@@ -88,23 +88,34 @@ def get_admin_credentials():
     return user, pw
 
 
+def _escape_env_value(val):
+    return (
+        str(val)
+        .replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("$", "\\$")
+        .replace("`", "\\`")
+    )
+
+
 def update_env_file(path, updates):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    text = open(path, "r", encoding="utf-8").read() if os.path.exists(path) else ""
-    for k, v in updates.items():
-        if v is None:
-            continue
-        safe_v = str(v).replace('"', '\\"')
-        newline = f'{k}="{safe_v}"'
-        if re.search(rf"^{re.escape(k)}=.*$", text, flags=re.M):
-            text = re.sub(rf"^{re.escape(k)}=.*$", newline, text, flags=re.M)
-        else:
-            text += ("\n" if text and not text.endswith("\n") else "") + newline + "\n"
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(text)
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
+    with LOCK:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        text = open(path, "r", encoding="utf-8").read() if os.path.exists(path) else ""
+        for k, v in updates.items():
+            if v is None:
+                continue
+            safe_v = _escape_env_value(v)
+            newline = f'{k}="{safe_v}"'
+            if re.search(rf"^{re.escape(k)}=.*$", text, flags=re.M):
+                text = re.sub(rf"^{re.escape(k)}=.*$", newline, text, flags=re.M)
+            else:
+                text += ("\n" if text and not text.endswith("\n") else "") + newline + "\n"
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
 
 
 def update_secrets(updates):
@@ -116,27 +127,32 @@ def update_secrets(updates):
         "AGE_KEY_FILE",
         os.environ.get("SOPS_AGE_KEY_FILE", os.path.expanduser("~/.config/ligament/age.key")),
     )
-    if os.path.exists(enc) and os.path.exists(age_key):
-        res = subprocess.run(["age", "-d", "-i", age_key, enc], capture_output=True, text=True, timeout=5)
-        text = res.stdout if res.returncode == 0 else ""
-        for k, v in updates.items():
-            if v is None or v == "":
-                continue
-            safe_v = str(v).replace('"', '\\"')
-            newline = f'{k}="{safe_v}"'
-            if re.search(rf"^{re.escape(k)}=.*$", text, flags=re.M):
-                text = re.sub(rf"^{re.escape(k)}=.*$", newline, text, flags=re.M)
-            else:
-                text += ("\n" if text and not text.endswith("\n") else "") + newline + "\n"
-        rec = subprocess.check_output(["age-keygen", "-y", age_key], text=True, timeout=5).strip()
-        p = subprocess.run(["age", "-r", rec, "-o", enc + ".tmp"], input=text, text=True, timeout=5)
-        if p.returncode == 0:
+    with LOCK:
+        if os.path.exists(enc) and os.path.exists(age_key):
+            res = subprocess.run(["age", "-d", "-i", age_key, enc], capture_output=True, text=True, timeout=5)
+            if res.returncode != 0:
+                raise RuntimeError(f"Не удалось расшифровать secrets.env.age: {(res.stderr or '').strip()}")
+            text = res.stdout
+            for k, v in updates.items():
+                if v is None or v == "":
+                    continue
+                safe_v = _escape_env_value(v)
+                newline = f'{k}="{safe_v}"'
+                if re.search(rf"^{re.escape(k)}=.*$", text, flags=re.M):
+                    text = re.sub(rf"^{re.escape(k)}=.*$", newline, text, flags=re.M)
+                else:
+                    text += ("\n" if text and not text.endswith("\n") else "") + newline + "\n"
+            rec = subprocess.check_output(["age-keygen", "-y", age_key], text=True, timeout=5).strip()
+            p = subprocess.run(["age", "-r", rec, "-o", enc + ".tmp"], input=text, capture_output=True, text=True, timeout=5)
+            if p.returncode != 0:
+                raise RuntimeError(f"Не удалось перешифровать secrets.env.age: {(p.stderr or '').strip()}")
             os.chmod(enc + ".tmp", 0o600)
             os.replace(enc + ".tmp", enc)
-    else:
-        filtered = {k: v for k, v in updates.items() if v is not None and v != ""}
-        if filtered:
-            update_env_file(plain, filtered)
+            return
+
+    filtered = {k: v for k, v in updates.items() if v is not None and v != ""}
+    if filtered:
+        update_env_file(plain, filtered)
 
 
 def ensure_tls_cert():
@@ -416,11 +432,16 @@ class PanelHandler(BaseHTTPRequestHandler):
                         health["nodes"].append({"node": parts[2], "ip": parts[0], "dc": parts[1], "patroni_role": "NOT_INSTALLED" if not installed else "IDLE"})
 
             pubkey = get_orchestrator_pubkey()
+            senv = read_secrets_dict()
+            bk_ak = senv.get("BACKUP_S3_ACCESS_KEY", "")
+            bk_sk = senv.get("BACKUP_S3_SECRET_KEY", "")
+            backup_configured = bool(bk_ak and "FIXME" not in bk_ak and bk_sk and "FIXME" not in bk_sk)
             self.send_json(
                 200,
                 {
                     "installed": installed,
                     "orchestrator_pubkey": pubkey,
+                    "backup_configured": backup_configured,
                     "config": {
                         "PROJECT_NAME": cenv.get("PROJECT_NAME", "Ligament Vault"),
                         "CLUSTER_SLUG": cenv.get("CLUSTER_SLUG", "ligament-vault"),
@@ -434,8 +455,12 @@ class PanelHandler(BaseHTTPRequestHandler):
                         "WORM_RETENTION_DAYS": cenv.get("WORM_RETENTION_DAYS", "365"),
                         "LIGAMENT_2FA_ENABLED": cenv.get("LIGAMENT_2FA_ENABLED", "false"),
                         "LIGAMENT_2FA_API_URL": cenv.get("LIGAMENT_2FA_API_URL", ""),
+                        "LIGAMENT_2FA_FAIL_OPEN": cenv.get("LIGAMENT_2FA_FAIL_OPEN", "false"),
                         "FAILOVER_MODE": cenv.get("FAILOVER_MODE", "dns"),
                         "ARBITER_IP": cenv.get("ARBITER_IP", ""),
+                        "BACKUP_S3_ENDPOINT": "" if "backup-provider.com" in senv.get("BACKUP_S3_ENDPOINT", "") else senv.get("BACKUP_S3_ENDPOINT", ""),
+                        "BACKUP_S3_REGION": senv.get("BACKUP_S3_REGION", "us-east-1"),
+                        "BACKUP_S3_BUCKET": senv.get("BACKUP_S3_BUCKET", ""),
                     },
                     "health": health,
                 },
@@ -681,9 +706,9 @@ class PanelHandler(BaseHTTPRequestHandler):
 
         if path == "/api/v1/config":
             allowed_cluster = (
-                "CLUSTER_NODES", "DOMAIN", "ADMIN_SSH_NET", "SFTP_PORT", "FTPS_PORT",
+                "CLUSTER_NODES", "DOMAIN", "HTTPS_PORT", "ADMIN_SSH_NET", "SFTP_PORT", "FTPS_PORT",
                 "WORM_RETENTION_MODE", "WORM_RETENTION_DAYS", "LIGAMENT_2FA_ENABLED",
-                "LIGAMENT_2FA_API_URL", "FAILOVER_MODE", "ARBITER_IP",
+                "LIGAMENT_2FA_API_URL", "LIGAMENT_2FA_FAIL_OPEN", "FAILOVER_MODE", "ARBITER_IP",
             )
             c_updates = {k: body[k] for k in allowed_cluster if k in body}
             if c_updates:
@@ -691,11 +716,16 @@ class PanelHandler(BaseHTTPRequestHandler):
 
             allowed_secrets = (
                 "CF_DNS_API_TOKEN", "LIGAMENT_2FA_API_TOKEN",
-                "BACKUP_S3_ENDPOINT", "BACKUP_S3_BUCKET", "BACKUP_S3_ACCESS_KEY", "BACKUP_S3_SECRET_KEY",
+                "BACKUP_S3_ENDPOINT", "BACKUP_S3_REGION", "BACKUP_S3_BUCKET",
+                "BACKUP_S3_ACCESS_KEY", "BACKUP_S3_SECRET_KEY", "BACKUP_ENCRYPTION_KEY",
             )
             s_updates = {k: body[k] for k in allowed_secrets if k in body and body[k]}
             if s_updates:
-                update_secrets(s_updates)
+                try:
+                    update_secrets(s_updates)
+                except Exception as exc:
+                    self.send_json(500, {"error": str(exc)})
+                    return
             self.send_json(200, {"ok": True})
             return
 
@@ -750,13 +780,16 @@ class PanelHandler(BaseHTTPRequestHandler):
             res = subprocess.run(cmd, cwd=REPO_DIR, env={**os.environ, "CONFIG_ROOT": CONFIG_ROOT}, capture_output=True, text=True, timeout=30)
             if res.returncode != 0:
                 raw_err = (res.stderr.strip() or res.stdout.strip())
-                if "ConnectionRefusedError" in raw_err or "Errno 111" in raw_err:
+                if "ConnectionRefusedError" in raw_err or "Errno 111" in raw_err or "недоступен на 127.0.0.1:8081" in raw_err:
                     raw_err = "Сервис SFTPGo (127.0.0.1:8081) еще не запущен на активном узле — проверьте статус кластера во вкладке «Консоль задач»."
-                self.send_json(400, {"error": raw_err.splitlines()[-1] if raw_err else "Ошибка создания клиента"})
+                else:
+                    err_lines = [ln.strip() for ln in raw_err.splitlines() if ln.strip() and not ln.strip().startswith(("File ", "Traceback "))]
+                    raw_err = err_lines[-1] if err_lines else "Ошибка создания клиента"
+                self.send_json(400, {"error": raw_err})
                 return
             out_pw = pw
             if generated_pw:
-                m = re.search(r":\s*(\S+)\s*$", res.stdout.strip())
+                m = re.search(r"Сгенерированный пароль для '[^']+':\s*(\S+)", res.stdout)
                 if m:
                     out_pw = m.group(1)
             self.send_json(200, {"ok": True, "username": uname, "password": out_pw, "output": res.stdout})
@@ -791,8 +824,9 @@ class PanelHandler(BaseHTTPRequestHandler):
                 "pki-rotate": ("Бесшовная ротация mTLS сертификатов", [ligactl, "pki", "rotate", "--all", "--yes"]),
                 "backup-incr": ("Инкрементальный бэкап БД + SeaweedFS", ["bash", os.path.join(REPO_DIR, "scripts/ops/backup-job.sh"), "incr"]),
                 "backup-full": ("Полный бэкап БД + SeaweedFS", ["bash", os.path.join(REPO_DIR, "scripts/ops/backup-job.sh"), "full"]),
+                "backup-verify": ("Проверка восстановления из внешнего S3 (verify-restore)", ["bash", os.path.join(REPO_DIR, "scripts/ops/backup-job.sh"), "verify-restore"]),
                 "upgrade": ("Rolling-обновление кластера", [ligactl, "upgrade", "--yes"]),
-                "self-update": ("Обновление Ligament Vault с GitHub", ["bash", "-c", f"git -C '{REPO_DIR}' pull --ff-only && echo '✅ Код обновлен! Перезапускаем веб-панель...' && (nohup bash -c 'sleep 1 && systemctl restart ligament-vault-ui' >/dev/null 2>&1 &)"]),
+                "self-update": ("Обновление Ligament Vault с GitHub", ["bash", "-c", f"git -C '{REPO_DIR}' fetch --quiet origin main && git -C '{REPO_DIR}' reset --hard origin/main >/dev/null && chmod +x '{REPO_DIR}'/ligactl '{REPO_DIR}'/clusterctl '{REPO_DIR}'/web/panel.py '{REPO_DIR}'/scripts/lib/*.sh '{REPO_DIR}'/scripts/stages/*.sh '{REPO_DIR}'/scripts/ops/*.sh '{REPO_DIR}'/scripts/verify/*.sh '{REPO_DIR}'/scripts/hooks/*.sh && echo '✅ Код обновлен! Перезапускаем веб-панель...' && (nohup bash -c 'sleep 1 && systemctl restart ligament-vault-ui' >/dev/null 2>&1 &)"]),
             }
             if action == "scale-add":
                 ip = str(body.get("ip", "")).strip()

@@ -157,7 +157,7 @@ REMOTE_SWAP
 
     # Горячая перезагрузка сертификатов PostgreSQL без рестарта СУБД!
     remote_exec "${ip}" "
-        CID=\$(docker ps -qf name=patroni)
+        CID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q patroni | head -n1 || true)
         if [[ -n \"\${CID}\" ]]; then
             docker exec \"\${CID}\" bash -c 'cp -L /certs/*.crt /certs/*.key /run/pg-certs/ && chown postgres:postgres /run/pg-certs/* && chmod 600 /run/pg-certs/*.key && chmod 644 /run/pg-certs/*.crt'
             docker exec -u postgres \"\${CID}\" psql -U postgres -c 'SELECT pg_reload_conf();' >/dev/null
@@ -171,7 +171,7 @@ reload_rotated_node_services() {
     if is_quorum_node "${idx}" "${name}"; then
         remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose restart etcd swfs-master"
         wait_for_remote_health "${ip}" "etcd ${name}" \
-            "docker exec \$(docker ps -qf name=etcd) etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key endpoint health" 25 2
+            "ECID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q etcd | head -n1); docker exec \"\${ECID}\" etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key endpoint health" 25 2
     fi
     remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose restart swfs-volume swfs-filer swfs-s3 swfs-worker"
     wait_for_remote_health "${ip}" "SWFS Filer ${name}" \

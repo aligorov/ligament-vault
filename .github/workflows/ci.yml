@@ -49,6 +49,27 @@ jobs:
           ./ligactl secrets init
           ./ligactl secrets status
 
+          # YAML and inline JS syntax checks
+          python3 - <<'PYEOF'
+          import pathlib, re, subprocess, tempfile, yaml
+          for p in pathlib.Path("configs/prometheus").glob("*.yml*"):
+              raw = p.read_text(encoding="utf-8")
+              # Substitute template vars for *.tpl files before YAML parse check
+              rendered = re.sub(r"\$\{[A-Za-z0-9_]+\}", "placeholder", raw)
+              yaml.safe_load(rendered)
+              print(f"YAML OK: {p}")
+          html = pathlib.Path("web/index.html").read_text(encoding="utf-8")
+          scripts = re.findall(r"<script[^>]*>(.*?)</script>", html, flags=re.S)
+          assert scripts, "No <script> block found in web/index.html"
+          if subprocess.run(["bash", "-c", "command -v node >/dev/null"], check=False).returncode == 0:
+              for idx, js in enumerate(scripts):
+                  with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as tf:
+                      tf.write(js)
+                      tpath = tf.name
+                  subprocess.run(["node", "--check", tpath], check=True)
+                  print(f"JS syntax OK: script #{idx}")
+          PYEOF
+
           # Live HTTPS integration test of Web Panel (:18443) using real age-encrypted secrets!
           EXTRACTED_PW=$(
             source scripts/lib/common.sh
@@ -61,19 +82,70 @@ jobs:
           sleep 2
           curl -ksf https://127.0.0.1:18443/api/v1/health | jq -e '.ok == true'
           curl -ksf https://127.0.0.1:18443/ | grep -q "Ligament Vault"
+          # Auth failure checks
+          BAD_CODE=$(curl -ks -o /dev/null -w '%{http_code}' -X POST https://127.0.0.1:18443/api/v1/auth/login -H "Content-Type: application/json" -d '{"username":"admin","password":"wrong"}')
+          [[ "${BAD_CODE}" == "401" || "${BAD_CODE}" == "403" ]]
+          UNAUTH_CODE=$(curl -ks -o /dev/null -w '%{http_code}' https://127.0.0.1:18443/api/v1/overview)
+          [[ "${UNAUTH_CODE}" == "401" ]]
+
           curl -ksf -X POST https://127.0.0.1:18443/api/v1/auth/login \
             -H "Content-Type: application/json" \
             -d "{\"username\":\"admin\",\"password\":\"${EXTRACTED_PW}\"}" | jq -e '.ok == true'
-          curl -ksf -H "Authorization: Bearer ${EXTRACTED_PW}" https://127.0.0.1:18443/api/v1/overview | jq -e '.config.CLUSTER_SLUG == "ligament-vault"'
+          curl -ksf -H "Authorization: Bearer ${EXTRACTED_PW}" https://127.0.0.1:18443/api/v1/overview \
+            | jq -e '.config.CLUSTER_SLUG == "ligament-vault" and .config.backup_configured == false'
+
+          # Save S3 backup config with special chars ($, ", \) and verify age decrypt round-trip + overview
+          python3 - "${EXTRACTED_PW}" <<'PYEOF'
+          import json, ssl, sys, urllib.request
+          pw = sys.argv[1]
+          ctx = ssl._create_unverified_context()
+          payload = {
+              "BACKUP_S3_ENDPOINT": "https://s3.example.com",
+              "BACKUP_S3_REGION": "eu-central-1",
+              "BACKUP_S3_BUCKET": "vault-bk",
+              "BACKUP_S3_ACCESS_KEY": "AK_CI_TEST",
+              "BACKUP_S3_SECRET_KEY": 's3cr$t"key\\1',
+          }
+          req = urllib.request.Request(
+              "https://127.0.0.1:18443/api/v1/config",
+              data=json.dumps(payload).encode(),
+              headers={"Authorization": f"Bearer {pw}", "Content-Type": "application/json"},
+              method="POST",
+          )
+          with urllib.request.urlopen(req, context=ctx, timeout=10) as r:
+              assert r.status == 200, r.status
+          PYEOF
+          curl -ksf -H "Authorization: Bearer ${EXTRACTED_PW}" https://127.0.0.1:18443/api/v1/overview \
+            | jq -e '.config.backup_configured == true and .config.BACKUP_S3_REGION == "eu-central-1" and .config.BACKUP_S3_BUCKET == "vault-bk"'
+          ROUNDTRIP_SK=$(
+            source scripts/lib/common.sh
+            load_cluster_env "${WORKDIR}/repo"
+            printf '%s' "${BACKUP_S3_SECRET_KEY}"
+          )
+          python3 -c 'import sys; expected = "s3cr$t\"key\\1"; got = sys.argv[1]; assert got == expected, (got, expected)' "${ROUNDTRIP_SK}"
+
+          # Preinstall node remove & task endpoint test via Panel API
+          curl -ksf -X POST -H "Authorization: Bearer ${EXTRACTED_PW}" -H "Content-Type: application/json" \
+            -d '{"CLUSTER_NODES":"10.0.1.10:dc1:node1 10.0.2.10:dc2:node2 10.0.3.10:dc3:node3 10.0.4.10:dc4:node4"}' \
+            https://127.0.0.1:18443/api/v1/config >/dev/null
+          curl -ksf -X POST -H "Authorization: Bearer ${EXTRACTED_PW}" -H "Content-Type: application/json" \
+            -d '{"node":"node4","mode":"preinstall"}' \
+            https://127.0.0.1:18443/api/v1/nodes/remove | jq -e '.ok == true'
+          curl -ksf -H "Authorization: Bearer ${EXTRACTED_PW}" https://127.0.0.1:18443/api/v1/overview \
+            | jq -e '(.nodes | length) == 3 and .nodes[2].name == "node3"'
+          curl -ksf -H "Authorization: Bearer ${EXTRACTED_PW}" https://127.0.0.1:18443/api/v1/tasks | jq -e '.tasks | type == "array"'
           kill "${PANEL_PID}"
 
           ./ligactl preflight --dry-run
           ./ligactl install --dry-run --yes
+          ./ligactl install --stage=3 --dry-run --yes
           ./ligactl sync-config --dry-run
           ./ligactl user add --username alice --profile dual --quota-gb 50 --generate-password --require-2fa --dry-run
           ./ligactl user list --dry-run
           ./ligactl pki status --dry-run
           ./ligactl pki rotate --all --dry-run --yes
+          ./ligactl backup --dry-run
+          ./ligactl backup --verify --dry-run
           ./ligactl verify --sprint 1 --dry-run
           ./ligactl verify --disruptive --dry-run --yes
           ./ligactl status --json --dry-run
@@ -394,4 +466,163 @@ jobs:
           curl -sf http://127.0.0.1:8081/healthz
           nc -z 127.0.0.1 2022
           nc -z 127.0.0.1 21
+
+          # 1. Verify SFTPGo HTTPS WebClient endpoint serves HTTP 200
+          WC_CODE=$(curl -ks -o /dev/null -w '%{http_code}' https://127.0.0.1:8444/web/client/login)
+          echo "SFTPGo WebClient HTTP code: ${WC_CODE}"
+          [[ "${WC_CODE}" == "200" ]]
+
+          # 2. Verify SeaweedFS volume.fix.replication -n output and non-false-positive regex
+          FIX_OUT=$(docker exec -i "$(docker compose ps -q swfs-filer | head -n1)" weed shell -master=127.0.0.1:9333 <<< 'volume.fix.replication -n' 2>&1 || true)
+          echo "volume.fix.replication -n output:"
+          echo "${FIX_OUT}"
+          if echo "${FIX_OUT}" | grep -qiE "replicating|copying|deleting|under-replicated|over-replicated|\bERR\b|error:"; then
+              echo "ERROR: Unexpected match in volume.fix.replication -n output!"
+              exit 1
+          fi
+
+          # 3. Inspect real SeaweedFS 4.02 Prometheus metric names on :9325/metrics
+          echo "SeaweedFS :9325/metrics sample (disk/free):"
+          curl -sf http://127.0.0.1:9325/metrics | grep -iE 'volumeServer|disk|free_bytes' | head -n 25 || true
+
+          # 4. Verify weed filer.meta.backup and filer.meta.restore CLI flags
+          docker exec "$(docker compose ps -q swfs-filer | head -n1)" weed filer.meta.backup -filer=127.0.0.1:8888 -output=/tmp/ci-filer-meta.bin
+          docker exec "$(docker compose ps -q swfs-filer | head -n1)" sh -c 'ls -lh /tmp/ci-filer-meta.bin && rm -f /tmp/ci-filer-meta.bin'
+          docker exec "$(docker compose ps -q swfs-filer | head -n1)" weed filer.meta.restore -h 2>&1 | head -n 15 || true
+
+          # 5. Verify Patroni PATCH /config slot add + delete cleanup
+          curl -sf -X PATCH http://127.0.0.1:8008/config -H "Content-Type: application/json" -d '{"slots":{"ci_test_slot":{"type":"physical"}}}' | jq -e '.slots.ci_test_slot.type == "physical"'
+          curl -sf -X PATCH http://127.0.0.1:8008/config -H "Content-Type: application/json" -d '{"slots":{"ci_test_slot":null}}' | jq -e '.slots.ci_test_slot == null'
+
+          # 6. Live E2E SFTPGo REST API + --require-2fa totp_config + per-user S3 isolation + SFTP /work & /worm (Object Lock)
+          ssh-keygen -t ed25519 -f "${WORKDIR}/ci_user_key" -N "" >/dev/null
+          CI_PUBKEY=$(cat "${WORKDIR}/ci_user_key.pub")
+          python3 - "${SFTPGO_ADMIN_USERNAME:-admin}" "${SFTPGO_ADMIN_PASSWORD}" "${SWFS_S3_ACCESS_KEY}" "${SWFS_S3_SECRET_KEY}" "${CI_PUBKEY}" <<'PYEOF'
+          import base64, json, sys, urllib.error, urllib.request
+          admin_u, admin_p, s3_ak, s3_sk, pubkey = sys.argv[1:]
+          base = "http://127.0.0.1:8081/api/v2"
+          b64 = base64.b64encode(f"{admin_u}:{admin_p}".encode()).decode()
+
+          def req(method, path, body=None, hdr=None):
+              h = {"Content-Type": "application/json", **(hdr or {})}
+              r = urllib.request.Request(f"{base}{path}", data=json.dumps(body).encode() if body is not None else None, headers=h, method=method)
+              try:
+                  with urllib.request.urlopen(r, timeout=15) as resp:
+                      raw = resp.read().decode()
+                      return resp.status, (json.loads(raw) if raw else {})
+              except urllib.error.HTTPError as e:
+                  return e.code, e.read().decode("utf-8", "replace")
+
+          st, tok_res = req("GET", "/token", hdr={"Authorization": f"Basic {b64}"})
+          assert st == 200, (st, tok_res)
+          auth = {"Authorization": f"Bearer {tok_res['access_token']}"}
+
+          def mk_folder(name, bucket, prefix=""):
+              s3c = {
+                  "bucket": bucket, "region": "us-east-1", "endpoint": "http://127.0.0.1:8333",
+                  "access_key": s3_ak, "access_secret": {"status": "Plain", "payload": s3_sk},
+                  "force_path_style": True, "skip_tls_verify": True,
+              }
+              if prefix:
+                  s3c["key_prefix"] = prefix
+              payload = {"name": name, "filesystem": {"provider": 1, "s3config": s3c}}
+              st_f, res_f = req("POST", "/folders", body=payload, hdr=auth)
+              assert st_f in (200, 201), f"POST /folders {name} -> {st_f}: {res_f}"
+              return res_f
+
+          mk_folder("sftp-work", "sftp-work")
+          mk_folder("sftp-worm", "sftp-worm")
+          mk_folder("user-ciuser-work", "sftp-work", "users/ciuser/")
+          mk_folder("user-ciuser-worm", "sftp-worm", "users/ciuser/")
+
+          u_payload = {
+              "username": "ciuser", "status": 1, "password": "CiUserPass!2026",
+              "public_keys": [pubkey.strip()],
+              "permissions": {"/": ["list"], "/work": ["*"], "/worm": ["list", "upload", "download", "create_dirs"]},
+              "filesystem": {"provider": 0},
+              "virtual_folders": [
+                  {"name": "user-ciuser-work", "virtual_path": "/work", "quota_size": -1, "quota_files": -1},
+                  {"name": "user-ciuser-worm", "virtual_path": "/worm", "quota_size": -1, "quota_files": -1},
+              ],
+          }
+          st_u, res_u = req("POST", "/users", body=u_payload, hdr=auth)
+          assert st_u in (200, 201), f"POST /users ciuser -> {st_u}: {res_u}"
+
+          # Verify PUT user update works without sending redacted password back
+          st_g, existing = req("GET", "/users/ciuser", hdr=auth)
+          assert st_g == 200, (st_g, existing)
+          existing.pop("password", None)
+          existing["description"] = "updated-without-pw"
+          st_p, res_p = req("PUT", "/users/ciuser", body=existing, hdr=auth)
+          assert st_p in (200, 204), f"PUT /users/ciuser -> {st_p}: {res_p}"
+
+          # Verify SFTPGo v2.7 accepts totp_config (--require-2fa)
+          u2fa = {
+              "username": "ci2fa", "status": 1, "password": "Ci2faPass!2026",
+              "permissions": {"/": ["list"], "/work": ["*"]},
+              "filesystem": {"provider": 0},
+              "virtual_folders": [{"name": "sftp-work", "virtual_path": "/work", "quota_size": -1, "quota_files": -1}],
+              "filters": {"totp_config": {"enabled": True, "config_name": "Default", "protocols": ["SSH", "FTP", "HTTP"]}},
+          }
+          st_2fa, res_2fa = req("POST", "/users", body=u2fa, hdr=auth)
+          print(f"POST /users ci2fa (totp_config) -> {st_2fa}")
+          assert st_2fa in (200, 201), f"POST /users ci2fa failed -> {st_2fa}: {res_2fa}"
+          PYEOF
+
+          # Real SFTP transfer test into /work and /worm (Object Lock)
+          echo "hello work ci" > "${WORKDIR}/work_sample.txt"
+          echo "immutable worm ci" > "${WORKDIR}/worm_sample.txt"
+          sftp -b - -P 2022 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -i "${WORKDIR}/ci_user_key" ciuser@127.0.0.1 <<SFTPEOF
+          put ${WORKDIR}/work_sample.txt /work/work_sample.txt
+          get /work/work_sample.txt ${WORKDIR}/work_dl.txt
+          rm /work/work_sample.txt
+          put ${WORKDIR}/worm_sample.txt /worm/worm_sample.txt
+          ls -la /worm
+          bye
+          SFTPEOF
+          cmp -s "${WORKDIR}/work_sample.txt" "${WORKDIR}/work_dl.txt"
+
+          # Verify object stored under prefix users/ciuser/ in sftp-worm AND check Object Lock retention + delete denial
+          sudo python3 - "${SWFS_S3_ACCESS_KEY}" "${SWFS_S3_SECRET_KEY}" <<'PYEOF'
+          import datetime, hashlib, hmac, sys, urllib.error, urllib.request
+          ak, sk = sys.argv[1:]
+          endpoint = "http://127.0.0.1:8333"
+          region = "us-east-1"
+
+          def sign(k, m):
+              return hmac.new(k, m.encode("utf-8"), hashlib.sha256).digest()
+
+          def s3_req(method, path, query=""):
+              now = datetime.datetime.now(datetime.timezone.utc)
+              amz = now.strftime("%Y%m%dT%H%M%SZ")
+              ds = now.strftime("%Y%m%d")
+              ph = hashlib.sha256(b"").hexdigest()
+              hdrs = {"host": "127.0.0.1:8333", "x-amz-date": amz, "x-amz-content-sha256": ph}
+              sks = sorted(hdrs)
+              ch = "".join(f"{k}:{hdrs[k]}\n" for k in sks)
+              sh = ";".join(sks)
+              cr = f"{method}\n{path}\n{query}\n{ch}\n{sh}\n{ph}"
+              sc = f"{ds}/{region}/s3/aws4_request"
+              sts = f"AWS4-HMAC-SHA256\n{amz}\n{sc}\n{hashlib.sha256(cr.encode()).hexdigest()}"
+              ks = sign(sign(sign(sign(("AWS4" + sk).encode(), ds), region), "s3"), "aws4_request")
+              hdrs["authorization"] = f"AWS4-HMAC-SHA256 Credential={ak}/{sc}, SignedHeaders={sh}, Signature={hmac.new(ks, sts.encode(), hashlib.sha256).hexdigest()}"
+              req = urllib.request.Request(f"{endpoint}{path}" + (f"?{query}" if query else ""), headers=hdrs, method=method)
+              try:
+                  with urllib.request.urlopen(req, timeout=15) as r:
+                      return r.status, r.read().decode("utf-8", "replace")
+              except urllib.error.HTTPError as e:
+                  return e.code, e.read().decode("utf-8", "replace")
+
+          st_ls, xml_ls = s3_req("GET", "/sftp-worm", "list-type=2&prefix=users/ciuser/")
+          print(f"sftp-worm list (HTTP {st_ls}): {xml_ls}")
+          assert st_ls == 200 and "users/ciuser/worm_sample.txt" in xml_ls, (st_ls, xml_ls)
+
+          st_ret, xml_ret = s3_req("GET", "/sftp-worm/users/ciuser/worm_sample.txt", "retention=")
+          print(f"sftp-worm retention (HTTP {st_ret}): {xml_ret}")
+          assert st_ret == 200 and "COMPLIANCE" in xml_ret, (st_ret, xml_ret)
+
+          st_ver, xml_ver = s3_req("GET", "/sftp-worm", "prefix=users/ciuser/&versions=")
+          print(f"sftp-worm versions (HTTP {st_ver}): {xml_ver}")
+          PYEOF
+
           echo "LIVE_STACK_SMOKE_OK"

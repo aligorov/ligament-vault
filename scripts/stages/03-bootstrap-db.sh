@@ -18,6 +18,7 @@ source "${SCRIPT_DIR}/scripts/lib/deploy.sh"
 load_cluster_env "${CONFIG_ROOT:-${SCRIPT_DIR}}"
 log_step "Стадия 3: Bootstrap DB (etcd + Patroni + HAProxy + pgBackRest)"
 
+ensure_quorum_nodes_initialized
 for_each_node build_patroni_image_on_node
 
 render_and_push_cb() {
@@ -40,17 +41,17 @@ for_each_node start_etcd_cb
 
 NODE1_IP=$(get_node_ip 1)
 NODE1_NAME=$(get_node_name 1)
-ETCD_ALL_ENDPOINTS=$(get_node_entries | head -n 3 | awk -F: -v p="${ETCD_CLIENT_PORT:-2379}" '{print "https://" $1 ":" p}' | paste -sd, -)
+ETCD_ALL_ENDPOINTS=$(build_etcd_hosts | tr ',' '\n' | awk -v p="${ETCD_CLIENT_PORT:-2379}" '{sub(/:[0-9]+$/,""); print "https://" $1 ":" p}' | paste -sd, -)
 
 wait_for_remote_health "${NODE1_IP}" "etcd quorum" \
-    "docker exec \$(docker ps -qf name=etcd) etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key endpoint health && curl -sf --cacert '${REMOTE_BASE_DIR}/certs/${NODE1_NAME}/ca.crt' --cert '${REMOTE_BASE_DIR}/certs/${NODE1_NAME}/etcd-client.crt' --key '${REMOTE_BASE_DIR}/certs/${NODE1_NAME}/etcd-client.key' https://127.0.0.1:${ETCD_CLIENT_PORT:-2379}/version | grep -qE '\"etcdcluster\":\"3\\.[456]'" \
+    "CID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q etcd | head -n1) && [[ -n \"\${CID}\" ]] && docker exec \"\${CID}\" etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key endpoint health && curl -sf --cacert '${REMOTE_BASE_DIR}/certs/${NODE1_NAME}/ca.crt' --cert '${REMOTE_BASE_DIR}/certs/${NODE1_NAME}/etcd-client.crt' --key '${REMOTE_BASE_DIR}/certs/${NODE1_NAME}/etcd-client.key' https://127.0.0.1:${ETCD_CLIENT_PORT:-2379}/version | grep -qE '\"etcdcluster\":\"3\\.[456]'" \
     30 3 \
     "cd '${REMOTE_BASE_DIR}' && docker compose logs --tail 50 etcd || true"
 
 if [[ "${DRY_RUN:-false}" != "true" ]]; then
     log_info "Проверка всех участников etcd (${ETCD_ALL_ENDPOINTS}):"
     remote_exec "${NODE1_IP}" "
-        CID=\$(docker ps -qf name=etcd)
+        CID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q etcd | head -n1)
         curl -skf --cacert '${REMOTE_BASE_DIR}/certs/${NODE1_NAME}/ca.crt' --cert '${REMOTE_BASE_DIR}/certs/${NODE1_NAME}/etcd-client.crt' --key '${REMOTE_BASE_DIR}/certs/${NODE1_NAME}/etcd-client.key' https://127.0.0.1:${ETCD_CLIENT_PORT:-2379}/version || true
         echo ''
         docker exec \"\${CID}\" etcdctl --endpoints='${ETCD_ALL_ENDPOINTS}' --dial-timeout=5s --command-timeout=8s \
@@ -62,14 +63,14 @@ fi
 
 log_step "Запуск Patroni Primary -> Replicas"
 if [[ "${DRY_RUN:-false}" != "true" && ! -f "$(state_root)/.cluster_installed" ]]; then
-    remote_exec_stdin "${NODE1_IP}" "${PG_DATA_DIR}" "${ETCD_CLIENT_PORT:-2379}" "/${CLUSTER_SLUG}/${CLUSTER_SLUG}" <<'REMOTE_PREP_PRIMARY'
+    remote_exec_stdin "${NODE1_IP}" "${REMOTE_BASE_DIR}" "${PG_DATA_DIR}" "${ETCD_CLIENT_PORT:-2379}" "/${CLUSTER_SLUG}/${CLUSTER_SLUG}" <<'REMOTE_PREP_PRIMARY'
 set -euo pipefail
-PG_DIR="$1"; EC_PORT="$2"; PATRONI_PREFIX="$3"
+BASE_DIR="$1"; PG_DIR="$2"; EC_PORT="$3"; PATRONI_PREFIX="$4"
 if [[ ! -f "${PG_DIR}/data/PG_VERSION" ]]; then
     if [[ -d "${PG_DIR}/data" ]]; then
         find "${PG_DIR}/data" -mindepth 1 -delete 2>/dev/null || true
     fi
-    ETCD_CID=$(docker ps -qf name=etcd)
+    ETCD_CID=$(cd "${BASE_DIR}" && docker compose ps -q etcd | head -n1 || true)
     if [[ -n "${ETCD_CID}" ]]; then
         docker exec "${ETCD_CID}" etcdctl --endpoints="https://127.0.0.1:${EC_PORT}" \
             --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key \
@@ -115,12 +116,14 @@ start_haproxy_cb() {
 for_each_node start_haproxy_cb
 
 log_step "Создание пользователей и БД (sftpgo, seaweedfs_filer)"
-remote_exec_stdin "${NODE1_IP}" "${SFTPGO_DB_PASSWORD}" "${SWFS_FILER_DB_PASSWORD}" <<'REMOTE_DB_INIT'
+remote_exec_stdin "${NODE1_IP}" "${REMOTE_BASE_DIR}" "${SFTPGO_DB_PASSWORD}" "${SWFS_FILER_DB_PASSWORD}" <<'REMOTE_DB_INIT'
 set -euo pipefail
-SFTPGO_PW="$1"
-SWFS_PW="$2"
+BASE_DIR="$1"
+SFTPGO_PW="$2"
+SWFS_PW="$3"
 
-PATRONI_CID=$(docker ps -qf name=patroni)
+PATRONI_CID=$(cd "${BASE_DIR}" && docker compose ps -q patroni | head -n1)
+[[ -n "${PATRONI_CID}" ]] || { echo "Patroni container not found" >&2; exit 1; }
 docker exec -i -e "SFTPGO_PW=${SFTPGO_PW}" -e "SWFS_PW=${SWFS_PW}" "${PATRONI_CID}" python3 - <<'PYEOF'
 import os, psycopg2
 from psycopg2 import sql
@@ -150,7 +153,7 @@ REMOTE_DB_INIT
 log_step "Инициализация pgBackRest stanza '${CLUSTER_SLUG}'"
 if [[ "${BACKUP_S3_ACCESS_KEY:-FIXME}" != *FIXME* && "${BACKUP_S3_ACCESS_KEY:-}" != "" ]]; then
     remote_exec "${NODE1_IP}" "
-        PATRONI_CID=\$(docker ps -qf name=patroni) && \
+        PATRONI_CID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q patroni | head -n1) && \
         docker exec -u postgres \"\${PATRONI_CID}\" pgbackrest --stanza='${CLUSTER_SLUG}' stanza-create && \
         docker exec -u postgres \"\${PATRONI_CID}\" pgbackrest --stanza='${CLUSTER_SLUG}' check
     "

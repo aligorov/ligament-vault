@@ -38,7 +38,7 @@ guard_pg_major_version() {
     local primary_ip running_major
     primary_ip=$(find_patroni_primary_ip || get_node_ip 1)
     running_major=$(remote_exec "${primary_ip}" \
-        "docker exec \$(docker ps -qf name=patroni) psql -U postgres -tAc 'SHOW server_version_num;'" 2>/dev/null | cut -c1-2 || echo "16")
+        "PCID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q patroni | head -n1); [[ -n \"\${PCID}\" ]] && docker exec \"\${PCID}\" psql -U postgres -tAc 'SHOW server_version_num;'" 2>/dev/null | cut -c1-2 || echo "16")
     local dockerfile_major
     dockerfile_major=$(awk '/^FROM postgres:/{split($2,a,":"); split(a[2],b,"-"); print b[1]}' "${SCRIPT_DIR}/Dockerfile.patroni")
 
@@ -75,14 +75,15 @@ pre_upgrade_gate() {
 
     log_info "Снятие etcdctl snapshot save..."
     remote_exec "${primary_ip}" "
-        docker exec \$(docker ps -qf name=etcd) etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} \
+        ECID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q etcd | head -n1)
+        docker exec \"\${ECID}\" etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} \
             --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key \
             snapshot save /etcd-data/pre-upgrade-\$(date +%Y%m%d-%H%M%S).db
     "
 
     if [[ "${BACKUP_S3_ACCESS_KEY:-FIXME}" != *FIXME* && "${BACKUP_S3_ACCESS_KEY:-}" != "" ]]; then
         log_info "Снятие инкрементального бэкапа pgBackRest..."
-        remote_exec "${primary_ip}" "docker exec -u postgres \$(docker ps -qf name=patroni) pgbackrest --stanza='${CLUSTER_SLUG}' --type=incr backup"
+        remote_exec "${primary_ip}" "PCID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q patroni | head -n1); docker exec -u postgres \"\${PCID}\" pgbackrest --stanza='${CLUSTER_SLUG}' --type=incr backup"
     fi
 }
 
@@ -116,10 +117,10 @@ upgrade_etcd() {
     if [[ "${DRY_RUN:-false}" != "true" ]]; then
         local q1="${quorum_ips[0]}"
         local leader_id
-        leader_id=$(remote_exec "${q1}" "docker exec \$(docker ps -qf name=etcd) etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key endpoint status -w json | jq -r '.[0].Status.leader'")
+        leader_id=$(remote_exec "${q1}" "ECID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q etcd | head -n1); docker exec \"\${ECID}\" etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key endpoint status -w json | jq -r '.[0].Status.leader'")
         for qip in "${quorum_ips[@]}"; do
             local mid
-            mid=$(remote_exec "${qip}" "docker exec \$(docker ps -qf name=etcd) etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key endpoint status -w json | jq -r '.[0].Status.header.member_id'")
+            mid=$(remote_exec "${qip}" "ECID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q etcd | head -n1); docker exec \"\${ECID}\" etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key endpoint status -w json | jq -r '.[0].Status.header.member_id'")
             if [[ "${mid}" == "${leader_id}" ]]; then
                 leader_ip="${qip}"
             else
@@ -136,20 +137,20 @@ upgrade_etcd() {
         rerender_and_push_node_by_ip "${fip}"
         remote_exec "${fip}" "cd '${REMOTE_BASE_DIR}' && docker compose pull etcd && docker compose up -d --no-deps etcd"
         wait_for_remote_health "${fip}" "etcd ${fip}" \
-            "docker exec \$(docker ps -qf name=etcd) etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key endpoint health" 25 3
+            "ECID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q etcd | head -n1); docker exec \"\${ECID}\" etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key endpoint health" 25 3
     done
 
     if [[ -n "${leader_ip}" && ${#followers[@]} -gt 0 ]]; then
         if [[ "${DRY_RUN:-false}" != "true" ]]; then
             local target_mid
-            target_mid=$(remote_exec "${followers[0]}" "docker exec \$(docker ps -qf name=etcd) etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key endpoint status -w json | jq -r '.[0].Status.header.member_id'")
-            remote_exec "${leader_ip}" "docker exec \$(docker ps -qf name=etcd) etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key move-leader '${target_mid}'"
+            target_mid=$(remote_exec "${followers[0]}" "ECID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q etcd | head -n1); docker exec \"\${ECID}\" etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key endpoint status -w json | jq -r '.[0].Status.header.member_id'")
+            remote_exec "${leader_ip}" "ECID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q etcd | head -n1); docker exec \"\${ECID}\" etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key move-leader '${target_mid}'"
         fi
         log_info "Обновление бывшего etcd лидера (${leader_ip})..."
         rerender_and_push_node_by_ip "${leader_ip}"
         remote_exec "${leader_ip}" "cd '${REMOTE_BASE_DIR}' && docker compose pull etcd && docker compose up -d --no-deps etcd"
         wait_for_remote_health "${leader_ip}" "etcd ${leader_ip}" \
-            "docker exec \$(docker ps -qf name=etcd) etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key endpoint health" 25 3
+            "ECID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q etcd | head -n1); docker exec \"\${ECID}\" etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key endpoint health" 25 3
     fi
 }
 
@@ -180,7 +181,7 @@ upgrade_patroni() {
 
     if [[ -n "${primary_ip}" && ${#replicas[@]} -gt 0 ]]; then
         log_info "Управляемый patronictl switchover с ${primary_ip}..."
-        remote_exec "${primary_ip}" "docker exec \$(docker ps -qf name=patroni) patronictl switchover '${CLUSTER_SLUG}' --force"
+        remote_exec "${primary_ip}" "PCID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q patroni | head -n1); docker exec \"\${PCID}\" patronictl switchover '${CLUSTER_SLUG}' --force"
         run_or_dry sleep 8
         log_info "Обновление бывшего Primary (${primary_ip})..."
         rerender_and_push_node_by_ip "${primary_ip}"
@@ -264,7 +265,7 @@ upgrade_sftpgo() {
         log_info "Обновление Standby SFTPGo (${ip})..."
         rerender_and_push_node_by_ip "${ip}"
         remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose pull sftpgo && docker compose up -d --no-deps sftpgo"
-        wait_for_remote_health "${ip}" "SFTPGo ${ip}" "docker exec \$(docker ps -qf name=sftpgo) sftpgo ping --config-file /etc/sftpgo/sftpgo.json" 20 2
+        wait_for_remote_health "${ip}" "SFTPGo ${ip}" "SCID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q sftpgo | head -n1); [[ -n \"\${SCID}\" ]] && docker exec \"\${SCID}\" sftpgo ping --config-file /etc/sftpgo/sftpgo.json" 20 2
     done
 
     log_info "Запуск sftpgo initprovider (update_mode=1) на обновленном Standby (${standby_ip})..."
@@ -279,7 +280,7 @@ upgrade_sftpgo() {
 
     rerender_and_push_node_by_ip "${active_ip}"
     remote_exec "${active_ip}" "cd '${REMOTE_BASE_DIR}' && docker compose pull sftpgo && docker compose up -d --no-deps sftpgo"
-    wait_for_remote_health "${active_ip}" "SFTPGo former Active ${active_ip}" "docker exec \$(docker ps -qf name=sftpgo) sftpgo ping --config-file /etc/sftpgo/sftpgo.json" 20 2
+    wait_for_remote_health "${active_ip}" "SFTPGo former Active ${active_ip}" "SCID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q sftpgo | head -n1); [[ -n \"\${SCID}\" ]] && docker exec \"\${SCID}\" sftpgo ping --config-file /etc/sftpgo/sftpgo.json" 20 2
 }
 
 run_rollback() {
@@ -321,7 +322,7 @@ run_rollback() {
     done
     if [[ -n "${primary_ip}" ]]; then
         if (( ${#replicas[@]} > 0 )); then
-            remote_exec "${primary_ip}" "docker exec \$(docker ps -qf name=patroni) patronictl switchover '${CLUSTER_SLUG}' --force" || true
+            remote_exec "${primary_ip}" "PCID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q patroni | head -n1); docker exec \"\${PCID}\" patronictl switchover '${CLUSTER_SLUG}' --force" || true
             run_or_dry sleep 5
         fi
         log_info "Откат стека на бывшем Primary (${primary_ip})..."

@@ -9,15 +9,32 @@ state_root() {
     echo "${CONFIG_ROOT:-${SCRIPT_DIR}}"
 }
 
+ensure_quorum_nodes_initialized() {
+    local qfile
+    qfile="$(state_root)/.quorum_nodes"
+    [[ "${DRY_RUN:-false}" == "true" ]] && return 0
+    if [[ ! -s "${qfile}" ]]; then
+        mkdir -p "$(dirname "${qfile}")"
+        local count i
+        count=$(get_node_count)
+        for i in $(seq 1 "${count}"); do
+            if (( i <= 3 )); then
+                get_node_name "$i" >> "${qfile}"
+            fi
+        done
+    fi
+}
+
 is_quorum_node() {
     local idx="$1"
     local name="$2"
-    if (( idx <= 3 )); then
-        return 0
-    fi
     local qfile
     qfile="$(state_root)/.quorum_nodes"
-    if [[ -f "${qfile}" ]] && grep -qx "${name}" "${qfile}"; then
+    if [[ -s "${qfile}" ]]; then
+        grep -qx "${name}" "${qfile}"
+        return $?
+    fi
+    if (( idx <= 3 )); then
         return 0
     fi
     return 1
@@ -475,15 +492,23 @@ fi
 
 if [[ "${WAS_ACTIVE}" == "true" ]]; then
     ALLOWED_SET=" ${PEER_IPS} ${ARBITER_IP} "
-    STALE_NUMS=$(ufw status numbered | python3 - "${ALLOWED_SET}" "${SLUG}" <<'PYEOF'
+    STALE_NUMS=$(ufw status numbered | python3 - "${ALLOWED_SET}" "${SLUG}" "${HTTPS_P}" "${SFTP_PORT}" "${FTPS_PORT}" <<'PYEOF'
 import re, sys
 allowed = set(sys.argv[1].split())
 slug = re.escape(sys.argv[2])
+https_p, sftp_p, ftps_p = sys.argv[3], sys.argv[4], sys.argv[5]
 nums = []
 for line in sys.stdin:
-    m = re.match(rf"\[\s*(\d+)\].*#\s*(?:{slug}|cluster-b):(?:peer|arbiter):(\S+)", line)
-    if m and m.group(2) not in allowed:
+    m = re.match(rf"\[\s*(\d+)\]\s+(\S+).*#\s*(?:{slug}|cluster-b):(?:peer|arbiter):(\S+)", line)
+    if m and m.group(3) not in allowed:
         nums.append(int(m.group(1)))
+        continue
+    m_pub = re.match(rf"\[\s*(\d+)\]\s+(\d+)/tcp\b.*#\s*{slug}:public-(https|sftp|ftps)\b", line)
+    if m_pub:
+        port_val, kind = m_pub.group(2), m_pub.group(3)
+        expected = {"https": https_p, "sftp": sftp_p, "ftps": ftps_p}[kind]
+        if port_val != expected:
+            nums.append(int(m_pub.group(1)))
 for n in sorted(nums, reverse=True):
     print(n)
 PYEOF
@@ -635,15 +660,16 @@ case "\${CMD}" in
         echo "FENCED_OK"
         ;;
     check-gates)
-        ETCD_CID=\$(docker ps -qf name=etcd)
+        ETCD_CID=\$(cd "${BASE_DIR}" && docker compose ps -q etcd | head -n1 || true)
         if [[ -n "\${ETCD_CID}" ]]; then
             docker exec "\${ETCD_CID}" etcdctl --endpoints="https://127.0.0.1:${EC_PORT}" \
                 --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key \
                 endpoint health >/dev/null
         fi
-        FILER_CID=\$(docker ps -qf name=swfs-filer)
-        FIX_OUT=\$(docker exec -i "\${FILER_CID}" weed shell -master="${MASTER_PEERS}" <<< "volume.fix.replication" 2>/dev/null || echo "ERR")
-        if echo "\${FIX_OUT}" | grep -qiE "replicate|under-replicated|ERR"; then
+        FILER_CID=\$(cd "${BASE_DIR}" && docker compose ps -q swfs-filer | head -n1 || true)
+        [[ -n "\${FILER_CID}" ]] || { echo "FILER_DOWN"; exit 1; }
+        FIX_OUT=\$(docker exec -i "\${FILER_CID}" weed shell -master="${MASTER_PEERS}" <<< "volume.fix.replication -n" 2>/dev/null || echo "ERR")
+        if echo "\${FIX_OUT}" | grep -qiE "replicating|copying|deleting|under-replicated|over-replicated|\bERR\b|error:"; then
             echo "SWFS_DIRTY"
             exit 1
         fi
@@ -654,7 +680,7 @@ case "\${CMD}" in
         if [[ ! "\${EDGE_IP}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             exit 1
         fi
-        ETCD_CID=\$(docker ps -qf name=etcd)
+        ETCD_CID=\$(cd "${BASE_DIR}" && docker compose ps -q etcd | head -n1 || true)
         [[ -n "\${ETCD_CID}" ]] || exit 1
         LID=\$(docker exec "\${ETCD_CID}" etcdctl --endpoints="https://127.0.0.1:${EC_PORT}" \
             --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key \
@@ -1153,34 +1179,41 @@ def req(method, path, body=None, headers=None):
         return e.code, e.read().decode("utf-8", "replace")
 
 basic = base64.b64encode(f"{user}:{pw}".encode()).decode()
-st, tok_resp = req("GET", "/token", headers={"Authorization": f"Basic {basic}"})
-assert st == 200, f"Не удалось получить SFTPGo admin token (HTTP {st}): {tok_resp}"
-auth = {"Authorization": f"Bearer {tok_resp['access_token']}"}
+try:
+    st, tok_resp = req("GET", "/token", headers={"Authorization": f"Basic {basic}"})
+    if st != 200 or not isinstance(tok_resp, dict) or "access_token" not in tok_resp:
+        raise RuntimeError(f"Не удалось получить токен SFTPGo admin (HTTP {st}): {tok_resp}")
+    auth = {"Authorization": f"Bearer {tok_resp['access_token']}"}
 
-for bucket_name in ("sftp-work", "sftp-worm"):
-    folder_payload = {
-        "name": bucket_name,
-        "description": f"SeaweedFS S3 bucket {bucket_name}",
-        "filesystem": {
-            "provider": 1,
-            "s3config": {
-                "bucket": bucket_name,
-                "region": "us-east-1",
-                "endpoint": f"http://127.0.0.1:{s3_port}",
-                "access_key": ak,
-                "access_secret": {"status": "Plain", "payload": sk},
-                "force_path_style": True,
+    for bucket_name in ("sftp-work", "sftp-worm"):
+        folder_payload = {
+            "name": bucket_name,
+            "description": f"SeaweedFS S3 bucket {bucket_name}",
+            "filesystem": {
+                "provider": 1,
+                "s3config": {
+                    "bucket": bucket_name,
+                    "region": "us-east-1",
+                    "endpoint": f"http://127.0.0.1:{s3_port}",
+                    "access_key": ak,
+                    "access_secret": {"status": "Plain", "payload": sk},
+                    "force_path_style": True,
+                },
             },
-        },
-    }
-    st_f, _ = req("GET", f"/folders/{bucket_name}", headers=auth)
-    if st_f == 200:
-        st_u, body_u = req("PUT", f"/folders/{bucket_name}", body=folder_payload, headers=auth)
-        assert st_u in (200, 204), f"PUT folder {bucket_name}: {st_u} {body_u}"
-    else:
-        st_c, body_c = req("POST", "/folders", body=folder_payload, headers=auth)
-        assert st_c in (200, 201), f"POST folder {bucket_name}: {st_c} {body_c}"
-    print(f"SFTPGo virtual folder ensured: {bucket_name}")
+        }
+        st_f, _ = req("GET", f"/folders/{bucket_name}", headers=auth)
+        if st_f == 200:
+            st_u, body_u = req("PUT", f"/folders/{bucket_name}", body=folder_payload, headers=auth)
+            if st_u not in (200, 204):
+                raise RuntimeError(f"PUT folder {bucket_name} -> HTTP {st_u}: {body_u}")
+        else:
+            st_c, body_c = req("POST", "/folders", body=folder_payload, headers=auth)
+            if st_c not in (200, 201):
+                raise RuntimeError(f"POST folder {bucket_name} -> HTTP {st_c}: {body_c}")
+        print(f"SFTPGo virtual folder ensured: {bucket_name}")
+except Exception as exc:
+    sys.stderr.write(f"Ошибка SFTPGo S3 folders: {exc}\n")
+    sys.exit(1)
 PYEOF
 REMOTE_PROV
 }

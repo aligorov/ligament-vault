@@ -18,7 +18,7 @@ groups:
           summary: "Patroni/PostgreSQL не отвечает на {{ $labels.instance }}"
 
       - alert: PatroniNoLeader
-        expr: sum(patroni_master) == 0 and sum(patroni_primary) == 0
+        expr: (sum(patroni_primary) or vector(0)) == 0 and (sum(patroni_master) or vector(0)) == 0
         for: 30s
         labels:
           severity: critical

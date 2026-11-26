@@ -109,6 +109,9 @@
         "enabled_login_methods": 0
       }
     ],
+    "setup": {
+      "installation_code": "${SFTPGO_INSTALLATION_CODE}"
+    },
     "signing_passphrase": "${SFTPGO_SIGNING_PASSPHRASE}",
     "token_validation": 0,
     "cors": {
@@ -169,8 +172,6 @@
     "bind_port": ${SFTPGO_TELEMETRY_PORT},
     "bind_address": "${SFTPGO_TELEMETRY_BIND}"
   },
-
-  "installation_code": "${SFTPGO_INSTALLATION_CODE}",
 
   "smtp": {
     "host": "",

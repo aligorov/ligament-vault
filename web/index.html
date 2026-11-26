@@ -280,6 +280,11 @@
             </div>
             <label>Пароль root (используется 1 раз в памяти и не сохраняется)</label>
             <input id="vpsPass" type="password" placeholder="Пароль root от хостера (или пусто, если ключ уже там)" />
+            <label>Роль нового узла (при добавлении в работающий кластер 4+)</label>
+            <select id="vpsRole">
+              <option value="edge">Edge (SFTPGo + SeaweedFS Filer/Volume + PG Replica)</option>
+              <option value="quorum">Quorum (+ etcd + SWFS Master, для 5-узлового кворума)</option>
+            </select>
             <label style="display:flex;align-items:center;gap:8px;margin-top:12px;color:var(--text);">
               <input id="vpsAutoJoin" type="checkbox" checked style="width:auto;" />
               Если кластер уже развернут — сразу ввести этот VPS в живой кластер
@@ -377,18 +382,24 @@
         </div>
 
         <div class="card">
-          <h3>2. Внешний S3 для зашифрованных DR-бэкапов БД и кластера</h3>
-          <label>S3 Endpoint</label>
-          <input id="setS3Endpoint" placeholder="https://s3.eu-central-1.amazonaws.com" />
+          <h3>
+            <span>2. Внешний S3 для зашифрованных DR-бэкапов БД и кластера</span>
+            <span id="s3BackupBadge" class="badge b-warn">Не настроен</span>
+          </h3>
+          <div style="display:grid;grid-template-columns:2fr 1fr;gap:10px;">
+            <div><label>S3 Endpoint</label><input id="setS3Endpoint" placeholder="https://s3.twcstorage.ru" /></div>
+            <div><label>Регион</label><input id="setS3Region" value="us-east-1" placeholder="us-east-1 / ru-1" /></div>
+          </div>
           <label>S3 Bucket</label>
           <input id="setS3Bucket" placeholder="ligament-vault-backups" />
-          <label>S3 Access Key</label>
+          <label>S3 Access Key (оставьте пустым, чтобы не менять)</label>
           <input id="setS3Ak" placeholder="AKIA..." />
-          <label>S3 Secret Key</label>
+          <label>S3 Secret Key (оставьте пустым, чтобы не менять)</label>
           <input id="setS3Sk" type="password" placeholder="Secret Key" />
           <div class="btn-row">
-            <button class="btn" onclick="saveSettings(true)">Сохранить S3 и обновить конфиги</button>
+            <button class="btn" onclick="saveSettings(true)">Сохранить S3 и активировать</button>
             <button class="btn btn-sec" onclick="runTask('backup-full')">Запустить полный бэкап</button>
+            <button class="btn btn-sec" onclick="runTask('backup-verify')">Проверить S3 бэкап</button>
           </div>
         </div>
       </div>
@@ -426,8 +437,18 @@
 
 <script>
   let CSRF = "";
+  let CUR_CONFIG = {};
   let activeTaskId = null;
   let pollOffset = 0;
+
+  function escHtml(s) {
+    return String(s ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
 
   async function api(path, opts = {}) {
     const headers = { "Content-Type": "application/json", ...(opts.headers || {}) };
@@ -496,6 +517,7 @@
   async function loadOverview(live = false) {
     const d = await api(`/api/v1/overview?live=${live ? 1 : 0}`);
     const c = d.config;
+    CUR_CONFIG = c || {};
     document.getElementById("hdrTitle").textContent = c.PROJECT_NAME || "Ligament Vault";
     const hostForClient = (c.DOMAIN && c.DOMAIN !== "files.company.com") ? c.DOMAIN : location.hostname;
     const hport = c.HTTPS_PORT || "443";
@@ -512,6 +534,14 @@
     document.getElementById("set2faUrl").value = c.LIGAMENT_2FA_API_URL || "";
     document.getElementById("setWormDays").value = c.WORM_RETENTION_DAYS || "365";
     document.getElementById("setAdminNet").value = c.ADMIN_SSH_NET || "0.0.0.0/0";
+    document.getElementById("setS3Endpoint").value = c.BACKUP_S3_ENDPOINT || "";
+    document.getElementById("setS3Region").value = c.BACKUP_S3_REGION || "us-east-1";
+    document.getElementById("setS3Bucket").value = c.BACKUP_S3_BUCKET || "";
+    const bkBadge = document.getElementById("s3BackupBadge");
+    if (bkBadge) {
+      bkBadge.className = "badge " + (d.backup_configured ? "b-ok" : "b-warn");
+      bkBadge.textContent = d.backup_configured ? "Подключен" : "Не настроен";
+    }
 
     if (d.orchestrator_pubkey) {
       document.getElementById("sshKeyCmd").textContent =
@@ -531,18 +561,18 @@
     const tbody = document.getElementById("nodesBody");
     tbody.innerHTML = (h.nodes || []).map(n => `
       <tr>
-        <td><b>${n.node}</b></td>
-        <td><code>${n.ip}</code></td>
-        <td>${n.dc}</td>
-        <td><span class="badge ${n.patroni_role === 'primary' || n.patroni_role === 'master' ? 'b-ok' : 'b-warn'}">${n.patroni_role || '—'}</span></td>
-        <td>${n.haproxy || '—'}</td>
-        <td>${n.swfs_volume || '—'}</td>
-        <td>${n.swfs_filer || '—'}</td>
-        <td>${n.sftpgo || '—'}</td>
-        <td>${n.disk_root || '—'} / ${n.ntp_offset || '—'}</td>
+        <td><b>${escHtml(n.node)}</b></td>
+        <td><code>${escHtml(n.ip)}</code></td>
+        <td>${escHtml(n.dc)}</td>
+        <td><span class="badge ${n.patroni_role === 'primary' || n.patroni_role === 'master' ? 'b-ok' : 'b-warn'}">${escHtml(n.patroni_role || '—')}</span></td>
+        <td>${escHtml(n.haproxy || '—')}</td>
+        <td>${escHtml(n.swfs_volume || '—')}</td>
+        <td>${escHtml(n.swfs_filer || '—')}</td>
+        <td>${escHtml(n.sftpgo || '—')}</td>
+        <td>${escHtml(n.disk_root || '—')} / ${escHtml(n.ntp_offset || '—')}</td>
         <td style="display:flex;gap:6px;">
-          <button class="btn btn-sec btn-sm" onclick="replaceNodePrompt('${n.node}','${n.ip}')" title="Заменить сервер">🔄 Заменить</button>
-          <button class="btn btn-err btn-sm" onclick="removeNode('${n.node}','${n.ip}')" title="Удалить узел">🗑</button>
+          <button class="btn btn-sec btn-sm" onclick="replaceNodePrompt('${escHtml(n.node)}','${escHtml(n.ip)}')" title="Заменить сервер">🔄 Заменить</button>
+          <button class="btn btn-err btn-sm" onclick="removeNode('${escHtml(n.node)}','${escHtml(n.ip)}')" title="Удалить узел">🗑</button>
         </td>
       </tr>
     `).join("") || '<tr><td colspan="10">Узлы не заданы</td></tr>';
@@ -589,12 +619,12 @@
         return;
       }
       const sel = document.getElementById("uProfile");
-      const extraFolders = (d.folders || []).filter(f => f.name !== "sftp-work" && f.name !== "sftp-worm");
+      const extraFolders = (d.folders || []).filter(f => !f.name.startsWith("user-") && f.name !== "sftp-work" && f.name !== "sftp-worm");
       sel.innerHTML = `
-        <option value="dual">Двойной кластерный: /work + /worm (неудаляемый архив)</option>
-        <option value="work-only">Только рабочий каталог (/work)</option>
-        <option value="worm-only">Только неизменяемый архив (/worm COMPLIANCE)</option>
-      ` + extraFolders.map(f => `<option value="ext:${f.name}">Внешний S3 бакет: /${f.name} (${f.description})</option>`).join("");
+        <option value="dual">Двойной кластерный (изолированный): /work + /worm (неудаляемый архив)</option>
+        <option value="work-only">Только рабочий каталог (/work, изолированный)</option>
+        <option value="worm-only">Только неизменяемый архив (/worm COMPLIANCE, изолированный)</option>
+      ` + extraFolders.map(f => `<option value="ext:${escHtml(f.name)}">Внешний S3 бакет: /${escHtml(f.name)} (${escHtml(f.description)})</option>`).join("");
 
       tbody.innerHTML = (d.users || []).map(u => {
         const st = u.status === 1 ? '<span class="badge b-ok">Активен</span>' : '<span class="badge b-err">Отключен</span>';
@@ -603,18 +633,18 @@
         const toggleAct = u.status === 1 ? "disable" : "enable";
         const toggleLbl = u.status === 1 ? "Блок" : "Вкл";
         return `<tr>
-          <td><b>${u.username}</b></td>
+          <td><b>${escHtml(u.username)}</b></td>
           <td>${st}</td>
-          <td>${q}</td>
-          <td><code>${vfs}</code></td>
+          <td>${escHtml(q)}</td>
+          <td><code>${escHtml(vfs)}</code></td>
           <td style="display:flex;gap:6px;">
-            <button class="btn btn-sec btn-sm" onclick="userAction('${toggleAct}','${u.username}')">${toggleLbl}</button>
-            <button class="btn btn-sec btn-sm" onclick="userAction('disconnect','${u.username}')">Сброс сессий</button>
+            <button class="btn btn-sec btn-sm" onclick="userAction('${toggleAct}','${escHtml(u.username)}')">${toggleLbl}</button>
+            <button class="btn btn-sec btn-sm" onclick="userAction('disconnect','${escHtml(u.username)}')">Сброс сессий</button>
           </td>
         </tr>`;
       }).join("") || '<tr><td colspan="5" style="color:var(--muted);">Клиентов пока нет</td></tr>';
     } catch (e) {
-      tbody.innerHTML = `<tr><td colspan="5" style="color:var(--err);">${e.message}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="5" style="color:var(--err);">${escHtml(e.message)}</td></tr>`;
     }
   }
 
@@ -634,9 +664,13 @@
           require_2fa: document.getElementById("u2fa").checked,
         }),
       });
-      card.innerHTML = `<b>✅ Клиент ${res.username} создан!</b><br/>` +
-        (res.password ? `Пароль: <code>${res.password}</code><br/>` : "") +
-        `SFTP: <code>sftp -P 2022 ${res.username}@${location.hostname}</code> | Web: <code>https://${location.hostname}/web/client/login</code>`;
+      const hostClient = (CUR_CONFIG.DOMAIN && CUR_CONFIG.DOMAIN !== "files.company.com") ? CUR_CONFIG.DOMAIN : location.hostname;
+      const hport = CUR_CONFIG.HTTPS_PORT || "443";
+      const sport = CUR_CONFIG.SFTP_PORT || "2022";
+      const webUrl = `https://${hostClient}${hport === "443" ? "" : ":" + hport}/web/client/login`;
+      card.innerHTML = `<b>✅ Клиент ${escHtml(res.username)} создан!</b><br/>` +
+        (res.password ? `Пароль: <code>${escHtml(res.password)}</code><br/>` : "") +
+        `SFTP: <code>sftp -P ${escHtml(sport)} ${escHtml(res.username)}@${escHtml(hostClient)}</code> | Web: <code>${escHtml(webUrl)}</code>`;
       card.className = "msg b-ok";
       card.classList.remove("hidden");
       loadUsers();
@@ -684,6 +718,7 @@
       msg.className = "msg b-ok";
       msg.textContent = `✅ Внешний S3 подключен как папка /${res.name} — теперь ее можно выбирать при создании клиента!`;
       msg.classList.remove("hidden");
+      document.getElementById("extSk").value = "";
     } catch (err) {
       msg.className = "msg b-err";
       msg.textContent = "❌ " + err.message;
@@ -692,22 +727,30 @@
   };
 
   async function saveSettings(syncAfter) {
-    await api("/api/v1/config", {
-      method: "POST",
-      body: JSON.stringify({
-        LIGAMENT_2FA_ENABLED: document.getElementById("set2faEnabled").value,
-        LIGAMENT_2FA_API_URL: document.getElementById("set2faUrl").value.trim(),
-        LIGAMENT_2FA_API_TOKEN: document.getElementById("set2faToken").value.trim(),
-        WORM_RETENTION_DAYS: document.getElementById("setWormDays").value.trim(),
-        ADMIN_SSH_NET: document.getElementById("setAdminNet").value.trim(),
-        BACKUP_S3_ENDPOINT: document.getElementById("setS3Endpoint").value.trim(),
-        BACKUP_S3_BUCKET: document.getElementById("setS3Bucket").value.trim(),
-        BACKUP_S3_ACCESS_KEY: document.getElementById("setS3Ak").value.trim(),
-        BACKUP_S3_SECRET_KEY: document.getElementById("setS3Sk").value.trim(),
-      }),
-    });
-    if (syncAfter) await runTask("sync-config");
-    else alert("Настройки сохранены");
+    try {
+      await api("/api/v1/config", {
+        method: "POST",
+        body: JSON.stringify({
+          LIGAMENT_2FA_ENABLED: document.getElementById("set2faEnabled").value,
+          LIGAMENT_2FA_API_URL: document.getElementById("set2faUrl").value.trim(),
+          LIGAMENT_2FA_API_TOKEN: document.getElementById("set2faToken").value.trim(),
+          WORM_RETENTION_DAYS: document.getElementById("setWormDays").value.trim(),
+          ADMIN_SSH_NET: document.getElementById("setAdminNet").value.trim(),
+          BACKUP_S3_ENDPOINT: document.getElementById("setS3Endpoint").value.trim(),
+          BACKUP_S3_REGION: document.getElementById("setS3Region").value.trim(),
+          BACKUP_S3_BUCKET: document.getElementById("setS3Bucket").value.trim(),
+          BACKUP_S3_ACCESS_KEY: document.getElementById("setS3Ak").value.trim(),
+          BACKUP_S3_SECRET_KEY: document.getElementById("setS3Sk").value.trim(),
+        }),
+      });
+      document.getElementById("set2faToken").value = "";
+      document.getElementById("setS3Ak").value = "";
+      document.getElementById("setS3Sk").value = "";
+      if (syncAfter) await runTask("sync-config");
+      else { await loadOverview(false); alert("Настройки сохранены"); }
+    } catch (err) {
+      alert("❌ " + err.message);
+    }
   }
 
   document.getElementById("connectVpsForm").onsubmit = async (e) => {
@@ -725,6 +768,7 @@
           ssh_port: document.getElementById("vpsPort").value.trim(),
           dc: document.getElementById("vpsDc").value.trim(),
           password: document.getElementById("vpsPass").value,
+          role: document.getElementById("vpsRole").value,
           auto_join: document.getElementById("vpsAutoJoin").checked,
         }),
       });
@@ -867,7 +911,17 @@
         stEl.textContent = t.status === "success" ? "УСПЕШНО (100%)" : "ОШИБКА";
         loadOverview(false);
       }
-    } catch (_) {
+    } catch (e) {
+      if (String(e.message || "").includes("не найдена") || String(e.message || "").includes("404")) {
+        activeTaskId = null;
+        document.getElementById("taskBadge").classList.add("hidden");
+        const stEl = document.getElementById("consoleStatus");
+        stEl.className = "badge b-ok";
+        stEl.textContent = "ПЕРЕЗАПУЩЕНО";
+        document.getElementById("progHint").textContent = "Веб-панель перезагружена — можно обновить страницу (F5)";
+        loadOverview(false);
+        return;
+      }
       setTimeout(pollTask, 2000);
     }
   }

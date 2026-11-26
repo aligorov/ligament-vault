@@ -12,6 +12,8 @@ export SCRIPT_DIR
 
 # shellcheck source=../lib/common.sh
 source "${SCRIPT_DIR}/scripts/lib/common.sh"
+# shellcheck source=../lib/deploy.sh
+source "${SCRIPT_DIR}/scripts/lib/deploy.sh"
 
 load_cluster_env "${CONFIG_ROOT:-${SCRIPT_DIR}}"
 
@@ -56,7 +58,7 @@ if [[ "${DISRUPTIVE}" == "true" ]]; then
     log_warn "  Пауза контейнера patroni на ${old_primary} для симуляции отказа лидера..."
     remote_exec "${old_primary}" "cd '${REMOTE_BASE_DIR}' && docker compose pause patroni"
 else
-    remote_exec "${old_primary}" "docker exec \$(docker ps -qf name=patroni) patronictl switchover '${CLUSTER_SLUG}' --force"
+    remote_exec "${old_primary}" "PCID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q patroni | head -n1); docker exec \"\${PCID}\" patronictl switchover '${CLUSTER_SLUG}' --force"
 fi
 
 new_primary=""
@@ -79,7 +81,7 @@ else
 fi
 
 wait_for_remote_health "${NODE2_IP}" "HAProxy :5433 -> новый Primary" \
-    "docker exec \$(docker ps -qf name=patroni) pg_isready -h 127.0.0.1 -p ${HAPROXY_PG_PORT:-5433} -U postgres" 15 2
+    "PCID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q patroni | head -n1); docker exec \"\${PCID}\" pg_isready -h 127.0.0.1 -p ${HAPROXY_PG_PORT:-5433} -U postgres" 15 2
 log_info "  ✅ PASS: HAProxy :5433 принимает подключения к новому Primary"
 
 if [[ "${DISRUPTIVE}" == "true" ]]; then
@@ -91,8 +93,8 @@ fi
 
 # --- Тест 3: Непрерывность Filer ---
 log_step "Тест 3/5 — Работа SeaweedFS Filer через HAProxy после смены PG Primary"
-MASTER_PEERS=$(echo "${CLUSTER_NODES}" | xargs -n1 | head -n3 | awk -F: -v p="${SWFS_MASTER_PORT:-9333}" '{print $1 ":" p}' | paste -sd, -)
-remote_exec "${NODE2_IP}" "docker exec -i \$(docker ps -qf name=swfs-filer) weed shell -master='${MASTER_PEERS}' <<< 'fs.ls /'" >/dev/null
+MASTER_PEERS=$(build_swfs_master_peers)
+remote_exec "${NODE2_IP}" "FCID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q swfs-filer | head -n1); docker exec -i \"\${FCID}\" weed shell -master='${MASTER_PEERS}' <<< 'fs.ls /'" >/dev/null
 log_info "  ✅ PASS: Filer отвечает через новый PG Primary"
 
 # --- Тест 4: Падение weed admin -> проверка fallback master.toml ---

@@ -37,7 +37,13 @@ before_mtime=""
 [[ -f "${cert_file}" ]] && before_mtime=$(stat -c '%Y' "${cert_file}" 2>/dev/null || stat -f '%m' "${cert_file}" 2>/dev/null || echo "")
 
 CMD="renew"
-[[ ! -f "${cert_file}" ]] && CMD="run"
+if [[ ! -f "${cert_file}" || -f "${SSL_DIR}/.selfsigned" ]]; then
+    rm -f "${cert_file}" "${SSL_DIR}/certificates/${DOMAIN}.key" "${SSL_DIR}/.selfsigned"
+    CMD="run"
+fi
+
+ACME_MAIL="${ACME_EMAIL:-}"
+[[ -z "${ACME_MAIL}" || "${ACME_MAIL}" == "admin@company.com" ]] && ACME_MAIL="admin@${DOMAIN}"
 
 # shellcheck disable=SC2086
 run_or_dry docker run --rm \
@@ -45,7 +51,7 @@ run_or_dry docker run --rm \
     --env-file "${LEGO_ENV}" \
     "$(resolve_image_ref "${LEGO_IMAGE}" "${LEGO_DIGEST:-}")" \
     --accept-tos \
-    --email "${ACME_EMAIL:-admin@${DOMAIN}}" \
+    --email "${ACME_MAIL}" \
     --dns "${DNS_PROVIDER:-cloudflare}" \
     --domains "${DOMAIN}" \
     --path /lego \
@@ -60,7 +66,7 @@ if [[ "${before_mtime}" != "${after_mtime}" || -n "${FORCE_FLAG}" ]]; then
     log_info "Сертификат обновлен — раскладка и SIGHUP SFTPGo без разрыва сессий..."
     distribute_and_hup() {
         distribute_ssl_to_node "$1" "$2" "$3" "$4"
-        remote_exec "$1" "docker kill -s HUP \$(docker ps -qf name=sftpgo)"
+        remote_exec "$1" "CID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q sftpgo | head -n1); [[ -n \"\${CID}\" ]] && docker kill -s HUP \"\${CID}\""
     }
     for_each_node distribute_and_hup
     log_info "✅ Новый SSL распространен, SFTPGo перезагрузил TLS через SIGHUP"

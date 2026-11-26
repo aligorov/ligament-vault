@@ -151,7 +151,8 @@ avail_gb=$(( ${avail_kb:-0} / 1048576 ))
 if (( avail_gb < 2 )); then
     export DEBIAN_FRONTEND=noninteractive
     rm -rf /root/.cache/go-build /root/.cache/pip /root/.cache/npm /root/.cache/uv /root/.cache/yarn \
-           /var/lib/apt/lists/* /var/log/*.gz /var/log/*.[0-9] /tmp/* >/dev/null 2>&1 || true
+           /var/lib/apt/lists/* /var/log/*.gz /var/log/*.[0-9] >/dev/null 2>&1 || true
+    find /tmp -mindepth 1 -maxdepth 1 -mtime +3 -exec rm -rf {} + >/dev/null 2>&1 || true
     # Удаляем старые неиспользуемые linux-headers / linux-image (кроме текущего ядра uname -r!)
     CUR_KVER=$(uname -r | sed 's/-generic//')
     OLD_PKGS=$(dpkg -l 'linux-headers-[0-9]*' 'linux-modules-extra-[0-9]*' 'linux-image-[0-9]*' 2>/dev/null | awk '/^ii/{print $2}' | grep -vF "${CUR_KVER}" || true)

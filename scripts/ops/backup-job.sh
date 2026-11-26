@@ -24,9 +24,9 @@ fi
 write_backup_metrics() {
     local node_ip="$1" status_val="$2" update_ts="${3:-false}"
     [[ "${DRY_RUN:-false}" == "true" ]] && return 0
-    remote_exec_stdin "${node_ip}" "${status_val}" "${update_ts}" <<'REMOTE_PROM' || true
+    remote_exec_stdin "${node_ip}" "${REMOTE_BASE_DIR}" "${status_val}" "${update_ts}" <<'REMOTE_PROM' || true
 set -euo pipefail
-ST="$1"; UPD="$2"
+BDIR="$1"; ST="$2"; UPD="$3"
 DIR="/var/lib/node_exporter/textfile_collector"
 FILE="${DIR}/ligament_backup.prom"
 mkdir -p "${DIR}"
@@ -36,7 +36,7 @@ if [[ "${UPD}" == "true" ]]; then
     PREV_TS=$(date +%s)
 fi
 SW_UP=0
-[[ -n "$(docker ps -qf name=swfs-backup)" ]] && SW_UP=1
+[[ -n "$(cd "${BDIR}" 2>/dev/null && docker compose ps -q swfs-backup | head -n1 || true)" ]] && SW_UP=1
 cat > "${FILE}.tmp" <<EOF
 # HELP ligament_backup_last_status Last backup execution status (1=ok, 0=failed)
 # TYPE ligament_backup_last_status gauge
@@ -58,7 +58,7 @@ run_pgbackrest() {
     primary_ip=$(find_patroni_primary_ip || get_node_ip 1)
 
     log_step "pgBackRest (${type}, stanza=${CLUSTER_SLUG}) на Primary ${primary_ip}"
-    if ! remote_exec "${primary_ip}" "docker exec -u postgres \$(docker ps -qf name=patroni) pgbackrest --stanza='${CLUSTER_SLUG}' --type=${type} backup"; then
+    if ! remote_exec "${primary_ip}" "CID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q patroni | head -n1); [[ -n \"\${CID}\" ]] && docker exec -u postgres \"\${CID}\" pgbackrest --stanza='${CLUSTER_SLUG}' --type=${type} backup"; then
         write_backup_metrics "${primary_ip}" 0 false
         return 1
     fi
@@ -72,12 +72,13 @@ run_swfs_backup() {
 
     remote_exec "${node_ip}" "
         cd '${REMOTE_BASE_DIR}'
-        if [[ -z \$(docker ps -qf name=swfs-backup) ]]; then
+        if [[ -z \$(docker compose ps -q swfs-backup | head -n1) ]]; then
             docker compose --profile backup up -d swfs-backup
         fi
     "
 
     if ! remote_exec_stdin "${node_ip}" \
+        "${REMOTE_BASE_DIR}" \
         "${SWFS_FILER_PORT:-8888}" \
         "${BACKUP_S3_ENDPOINT}" \
         "${BACKUP_S3_REGION:-us-east-1}" \
@@ -86,12 +87,13 @@ run_swfs_backup() {
         "${BACKUP_S3_SECRET_KEY}" \
         "${BACKUP_ENCRYPTION_KEY}" <<'REMOTE_META_BKP'
 set -euo pipefail
-FPORT="$1"; ENDPOINT="$2"; REGION="$3"; BUCKET="$4"; AK="$5"; SK="$6"; ENC_KEY="$7"
+BDIR="$1"; FPORT="$2"; ENDPOINT="$3"; REGION="$4"; BUCKET="$5"; AK="$6"; SK="$7"; ENC_KEY="$8"
 
 TS=$(date -u +%Y%m%dT%H%M%SZ)
 TMP_META="/tmp/filer-meta-${TS}.meta"
 TMP_ENC="/tmp/filer-meta-${TS}.meta.gz.enc"
-CID=$(docker ps -qf name=swfs-filer)
+CID=$(cd "${BDIR}" && docker compose ps -q swfs-filer | head -n1)
+[[ -n "${CID}" ]] || { echo "swfs-filer not running" >&2; exit 1; }
 
 trap 'rm -f "${TMP_META}" "${TMP_ENC}"; docker exec "${CID}" rm -f "${TMP_META}" 2>/dev/null || true' EXIT
 
@@ -105,6 +107,8 @@ python3 - "${ENDPOINT}" "${REGION}" "${BUCKET}" "${AK}" "${SK}" "${TMP_ENC}" "fi
 import datetime, hashlib, hmac, sys, urllib.parse, urllib.request
 
 endpoint, region, bucket, ak, sk, local_file, obj_key = sys.argv[1:]
+if not endpoint.startswith(("http://", "https://")):
+    endpoint = "https://" + endpoint
 endpoint = endpoint.rstrip("/")
 parsed = urllib.parse.urlparse(endpoint)
 host = parsed.netloc
@@ -148,6 +152,7 @@ run_verify_restore() {
     test_ip=$(get_node_ip "${SWFS_ADMIN_NODE_INDEX:-2}")
     log_step "Проверка целостности PostgreSQL + SeaweedFS бэкапов (verify-restore) на ${test_ip}"
     remote_exec_stdin "${test_ip}" \
+        "${REMOTE_BASE_DIR}" \
         "${CLUSTER_SLUG}" \
         "${BACKUP_S3_ENDPOINT}" \
         "${BACKUP_S3_REGION:-us-east-1}" \
@@ -156,17 +161,24 @@ run_verify_restore() {
         "${BACKUP_S3_SECRET_KEY}" \
         "${BACKUP_ENCRYPTION_KEY}" <<'REMOTE_VERIFY'
 set -euo pipefail
-SLUG="$1"; ENDPOINT="$2"; REGION="$3"; BUCKET="$4"; AK="$5"; SK="$6"; ENC_KEY="$7"
+BDIR="$1"; SLUG="$2"; ENDPOINT="$3"; REGION="$4"; BUCKET="$5"; AK="$6"; SK="$7"; ENC_KEY="$8"
 
-CID=$(docker ps -qf name=patroni)
+CID=$(cd "${BDIR}" && docker compose ps -q patroni | head -n1)
+[[ -n "${CID}" ]] || { echo "Patroni container not found" >&2; exit 1; }
+docker exec -u postgres "${CID}" pgbackrest --stanza="${SLUG}" check
 docker exec -u postgres "${CID}" pgbackrest --stanza="${SLUG}" info --output=json | jq '.[0].backup[-1]'
-docker exec -u postgres "${CID}" bash -c "
-    rm -rf /tmp/pgbr-verify && mkdir -p /tmp/pgbr-verify
-    pgbackrest --stanza='${SLUG}' --pg1-path=/tmp/pgbr-verify --delta=n restore --type=immediate || \
-    pgbackrest --stanza='${SLUG}' --pg1-path=/tmp/pgbr-verify restore
-    ls -la /tmp/pgbr-verify/PG_VERSION
-    rm -rf /tmp/pgbr-verify
-"
+AVAIL_MB=$(df -Pm /var/lib/docker 2>/dev/null | awk 'NR==2{print $4}' || echo 0)
+if (( AVAIL_MB >= 1200 )); then
+    docker exec -u postgres "${CID}" bash -c "
+        rm -rf /tmp/pgbr-verify && mkdir -p /tmp/pgbr-verify
+        pgbackrest --stanza='${SLUG}' --pg1-path=/tmp/pgbr-verify --no-delta --type=immediate restore || \
+        pgbackrest --stanza='${SLUG}' --pg1-path=/tmp/pgbr-verify restore
+        ls -la /tmp/pgbr-verify/PG_VERSION
+        rm -rf /tmp/pgbr-verify
+    "
+else
+    echo "Пропуск полного test-restore в /tmp (/var/lib/docker free=${AVAIL_MB}MB < 1200MB); stanza check и metadata info выполнены OK"
+fi
 
 # Проверяем скачивание и AES-256 расшифровку последнего дампа метаданных SeaweedFS
 TMP_DEC="/tmp/verify-meta-$$.enc"
@@ -174,6 +186,8 @@ trap 'rm -f "${TMP_DEC}"' EXIT
 python3 - "${ENDPOINT}" "${REGION}" "${BUCKET}" "${AK}" "${SK}" "${TMP_DEC}" <<'PYEOF'
 import datetime, hashlib, hmac, sys, urllib.parse, urllib.request
 endpoint, region, bucket, ak, sk, dst = sys.argv[1:]
+if not endpoint.startswith(("http://", "https://")):
+    endpoint = "https://" + endpoint
 endpoint = endpoint.rstrip("/")
 host = urllib.parse.urlparse(endpoint).netloc
 def sign(k, m): return hmac.new(k, m.encode(), hashlib.sha256).digest()

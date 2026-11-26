@@ -320,10 +320,11 @@ acquire_ops_lock() {
         q_ip=$(get_node_ip 1)
         local payload="{\"operator\":\"${operator_id}\",\"op\":\"${op_name}\",\"ts\":\"${ts}\"}"
         local etcd_res
-        etcd_res=$(remote_exec_stdin "${q_ip}" "${ETCD_CLIENT_PORT:-2379}" "/${CLUSTER_SLUG}/ops-lock" "${payload}" <<'REMOTE_LOCK' 2>/dev/null || echo "ETCD_UNREACHABLE"
+        etcd_res=$(remote_exec_stdin "${q_ip}" "${REMOTE_BASE_DIR}" "${ETCD_CLIENT_PORT:-2379}" "/${CLUSTER_SLUG}/ops-lock" "${payload}" <<'REMOTE_LOCK' 2>/dev/null || echo "ETCD_UNREACHABLE"
 set -euo pipefail
-EC="$1"; LKEY="$2"; LVAL="$3"
-CID=$(docker ps -qf name=etcd)
+BDIR="$1"; EC="$2"; LKEY="$3"; LVAL="$4"
+CID=$(cd "${BDIR}" 2>/dev/null && docker compose ps -q etcd | head -n1 || true)
+[[ -n "${CID}" ]] || CID=$(docker ps -qf "label=com.docker.compose.service=etcd" | head -n1)
 [[ -n "${CID}" ]] || { echo "ETCD_UNREACHABLE"; exit 0; }
 LID=$(docker exec "${CID}" etcdctl --endpoints="https://127.0.0.1:${EC}" \
     --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key \
@@ -367,7 +368,7 @@ release_ops_lock() {
     rm -f "${state_dir}/ops.lock"
     if [[ -n "${OPS_LOCK_ETCD_IP:-}" && "${DRY_RUN:-false}" != "true" ]]; then
         remote_exec "${OPS_LOCK_ETCD_IP}" "
-            CID=\$(docker ps -qf name=etcd)
+            CID=\$(cd '${REMOTE_BASE_DIR}' 2>/dev/null && docker compose ps -q etcd | head -n1 || true)
             [[ -n \"\${CID}\" ]] && docker exec \"\${CID}\" etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} \
                 --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key \
                 del '/${CLUSTER_SLUG}/ops-lock' >/dev/null 2>&1 || true
@@ -383,7 +384,7 @@ force_unlock_ops() {
         local q_ip
         q_ip=$(get_node_ip 1)
         remote_exec "${q_ip}" "
-            CID=\$(docker ps -qf name=etcd)
+            CID=\$(cd '${REMOTE_BASE_DIR}' 2>/dev/null && docker compose ps -q etcd | head -n1 || true)
             [[ -n \"\${CID}\" ]] && docker exec \"\${CID}\" etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} \
                 --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key \
                 del '/${CLUSTER_SLUG}/ops-lock' >/dev/null 2>&1 || true
