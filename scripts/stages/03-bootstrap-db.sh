@@ -123,7 +123,7 @@ else
         log_info "Обнаружен действующий лидер Patroni на ${ACTIVE_PRIMARY_IP} — обновляем его конфиг и поднимаем реплики..."
         remote_exec "${ACTIVE_PRIMARY_IP}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d --force-recreate patroni"
         wait_for_remote_health "${ACTIVE_PRIMARY_IP}" "Patroni Primary (${ACTIVE_PRIMARY_IP})" \
-            "curl -sf http://127.0.0.1:${PATRONI_API_PORT:-8008}/primary" 60 3 \
+            "curl -sf --cacert '${REMOTE_BASE_DIR}/certs/ca.crt' https://127.0.0.1:${PATRONI_API_PORT:-8008}/primary" 60 3 \
             "cd '${REMOTE_BASE_DIR}' && docker compose logs --tail 60 patroni || true"
     else
         if [[ ! -f "$(state_root)/.cluster_installed" ]]; then
@@ -147,8 +147,8 @@ else
         log_info "Старт Patroni Primary на $(get_node_name 1) (${NODE1_IP})..."
         remote_exec "${NODE1_IP}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d --force-recreate patroni"
         wait_for_remote_health "${NODE1_IP}" "Patroni Primary /primary" \
-            "curl -sf http://127.0.0.1:${PATRONI_API_PORT:-8008}/primary" 60 3 \
-            "cd '${REMOTE_BASE_DIR}' && docker compose logs --tail 60 patroni || true; curl -s http://127.0.0.1:${PATRONI_API_PORT:-8008}/patroni || true"
+            "curl -sf --cacert '${REMOTE_BASE_DIR}/certs/ca.crt' https://127.0.0.1:${PATRONI_API_PORT:-8008}/primary" 60 3 \
+            "cd '${REMOTE_BASE_DIR}' && docker compose logs --tail 60 patroni || true; curl -sk https://127.0.0.1:${PATRONI_API_PORT:-8008}/patroni || true"
     fi
 
     start_replica_cb() {
@@ -169,8 +169,8 @@ REMOTE_PREP_REPLICA
         log_info "Старт Patroni Replica на ${name} (${ip})..."
         remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d --force-recreate patroni"
         wait_for_remote_health "${ip}" "Patroni Replica ${name} /replica" \
-            "curl -sf http://127.0.0.1:${PATRONI_API_PORT:-8008}/replica" 80 3 \
-            "cd '${REMOTE_BASE_DIR}' && docker compose logs --tail 60 patroni || true; curl -s http://127.0.0.1:${PATRONI_API_PORT:-8008}/patroni || true"
+            "curl -sf --cacert '${REMOTE_BASE_DIR}/certs/ca.crt' https://127.0.0.1:${PATRONI_API_PORT:-8008}/replica" 80 3 \
+            "cd '${REMOTE_BASE_DIR}' && docker compose logs --tail 60 patroni || true; curl -sk https://127.0.0.1:${PATRONI_API_PORT:-8008}/patroni || true"
     }
     for_each_node start_replica_cb
 
@@ -188,15 +188,17 @@ start_haproxy_cb() {
 for_each_node start_haproxy_cb
 
 log_step "Создание пользователей и БД (sftpgo, seaweedfs_filer) на Primary (${ACTIVE_PRIMARY_IP})"
-remote_exec_stdin "${ACTIVE_PRIMARY_IP}" "${REMOTE_BASE_DIR}" "${SFTPGO_DB_PASSWORD}" "${SWFS_FILER_DB_PASSWORD}" <<'REMOTE_DB_INIT'
+remote_exec_env_stdin "${ACTIVE_PRIMARY_IP}" "SFTPGO_DB_PASSWORD,SWFS_FILER_DB_PASSWORD" "${REMOTE_BASE_DIR}" <<'REMOTE_DB_INIT'
 set -euo pipefail
 BASE_DIR="$1"
-SFTPGO_PW="$2"
-SWFS_PW="$3"
 
 PATRONI_CID=$(cd "${BASE_DIR}" && docker compose ps -q patroni | head -n1)
 [[ -n "${PATRONI_CID}" ]] || { echo "Patroni container not found" >&2; exit 1; }
-docker exec -i -e "SFTPGO_PW=${SFTPGO_PW}" -e "SWFS_PW=${SWFS_PW}" "${PATRONI_CID}" python3 - <<'PYEOF'
+TMP_DB_ENV=$(mktemp)
+chmod 600 "${TMP_DB_ENV}"
+trap 'rm -f "${TMP_DB_ENV}"' EXIT
+printf 'SFTPGO_PW=%s\nSWFS_PW=%s\n' "${SFTPGO_DB_PASSWORD}" "${SWFS_FILER_DB_PASSWORD}" > "${TMP_DB_ENV}"
+docker exec -i --env-file "${TMP_DB_ENV}" "${PATRONI_CID}" python3 - <<'PYEOF'
 import os, psycopg2
 from psycopg2 import sql
 

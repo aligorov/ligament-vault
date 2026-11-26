@@ -48,7 +48,7 @@ check_node_health() {
 BDIR="$1"; PPORT="$2"; VPORT="$3"; FPORT="$4"; HPORT="$5"
 NTP=$(chronyc tracking 2>/dev/null | awk '/System time/{printf "%.1fms", $4*1000}' || echo "N/A")
 DISK=$(df -h / | awk 'NR==2{print $5}' || echo "N/A")
-PROLE=$(curl -sf --max-time 3 "http://127.0.0.1:${PPORT}/patroni" 2>/dev/null | jq -r '.role // "ERR"' || echo "DOWN")
+PROLE=$(curl -sf --cacert "${BDIR}/certs/ca.crt" --max-time 3 "https://127.0.0.1:${PPORT}/patroni" 2>/dev/null | jq -r '.role // "ERR"' || echo "DOWN")
 VSTAT=$(curl -sf --max-time 3 "http://127.0.0.1:${VPORT}/healthz" >/dev/null 2>&1 || curl -sf --max-time 3 "http://127.0.0.1:${VPORT}/status" >/dev/null 2>&1 && echo "OK" || echo "DOWN")
 FSTAT=$(curl -sf --max-time 3 "http://127.0.0.1:${FPORT}/healthz" >/dev/null 2>&1 && echo "OK" || echo "DOWN")
 HSTAT=$(nc -z 127.0.0.1 "${HPORT}" 2>/dev/null && echo "OK" || echo "DOWN")

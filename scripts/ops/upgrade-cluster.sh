@@ -176,7 +176,7 @@ upgrade_patroni() {
         log_info "Обновление Patroni Replica (${rip})..."
         rerender_and_push_node_by_ip "${rip}"
         remote_exec "${rip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d --no-deps patroni"
-        wait_for_remote_health "${rip}" "Patroni Replica ${rip}" "curl -sf http://127.0.0.1:${PATRONI_API_PORT:-8008}/replica" 40 3
+        wait_for_remote_health "${rip}" "Patroni Replica ${rip}" "curl -sf --cacert '${REMOTE_BASE_DIR}/certs/ca.crt' https://127.0.0.1:${PATRONI_API_PORT:-8008}/replica" 40 3
     done
 
     if [[ -n "${primary_ip}" && ${#replicas[@]} -gt 0 ]]; then
@@ -186,7 +186,7 @@ upgrade_patroni() {
         log_info "Обновление бывшего Primary (${primary_ip})..."
         rerender_and_push_node_by_ip "${primary_ip}"
         remote_exec "${primary_ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d --no-deps patroni"
-        wait_for_remote_health "${primary_ip}" "Patroni former Primary ${primary_ip}" "curl -sf http://127.0.0.1:${PATRONI_API_PORT:-8008}/replica" 40 3
+        wait_for_remote_health "${primary_ip}" "Patroni former Primary ${primary_ip}" "curl -sf --cacert '${REMOTE_BASE_DIR}/certs/ca.crt' https://127.0.0.1:${PATRONI_API_PORT:-8008}/replica" 40 3
     fi
 }
 

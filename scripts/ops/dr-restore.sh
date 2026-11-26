@@ -87,13 +87,13 @@ dr_step_etcd_and_pg_restore() {
     log_info "Запуск Patroni Primary на $(get_node_name 1) -> клонирование реплик..."
     remote_exec "${node1_ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d patroni"
     wait_for_remote_health "${node1_ip}" "Restored Patroni Primary" \
-        "curl -sf http://127.0.0.1:${PATRONI_API_PORT:-8008}/primary" 45 3
+        "curl -sf --cacert '${REMOTE_BASE_DIR}/certs/ca.crt' https://127.0.0.1:${PATRONI_API_PORT:-8008}/primary" 45 3
 
     start_rep_cb() {
         local ip="$1" name="$3" idx="$4"
         if (( idx != 1 )); then
             remote_exec "${ip}" "rm -rf '${PG_DATA_DIR}/data' && mkdir -p '${PG_DATA_DIR}/data' && cd '${REMOTE_BASE_DIR}' && docker compose up -d patroni"
-            wait_for_remote_health "${ip}" "Patroni Replica ${name}" "curl -sf http://127.0.0.1:${PATRONI_API_PORT:-8008}/replica" 60 3
+            wait_for_remote_health "${ip}" "Patroni Replica ${name}" "curl -sf --cacert '${REMOTE_BASE_DIR}/certs/ca.crt' https://127.0.0.1:${PATRONI_API_PORT:-8008}/replica" 60 3
         fi
         remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d haproxy"
     }
@@ -108,27 +108,30 @@ dr_step_swfs_restore() {
     node1_ip=$(get_node_ip 1)
     mpeers=$(build_swfs_master_peers)
     if [[ "${BACKUP_S3_ACCESS_KEY:-FIXME}" != *FIXME* && -n "${BACKUP_S3_ACCESS_KEY:-}" ]]; then
-        remote_exec_stdin "${node1_ip}" \
+        remote_exec_env_stdin "${node1_ip}" \
+            "BACKUP_S3_ACCESS_KEY,BACKUP_S3_SECRET_KEY,BACKUP_ENCRYPTION_KEY" \
             "${REMOTE_BASE_DIR}" \
             "${mpeers}" \
             "${SWFS_FILER_PORT:-8888}" \
             "${BACKUP_S3_ENDPOINT}" \
             "${BACKUP_S3_REGION:-us-east-1}" \
-            "${BACKUP_S3_BUCKET}" \
-            "${BACKUP_S3_ACCESS_KEY}" \
-            "${BACKUP_S3_SECRET_KEY}" \
-            "${BACKUP_ENCRYPTION_KEY}" <<'REMOTE_SWFS_RESTORE' || log_warn "Дамп filer-meta/LATEST не найден — используются метаданные из восстановленной БД PostgreSQL"
+            "${BACKUP_S3_BUCKET}" <<'REMOTE_SWFS_RESTORE' || log_warn "Дамп filer-meta/LATEST не найден — используются метаданные из восстановленной БД PostgreSQL"
 set -euo pipefail
-BDIR="$1"; MPEERS="$2"; FPORT="$3"; ENDPOINT="$4"; REGION="$5"; BUCKET="$6"; AK="$7"; SK="$8"; ENC_KEY="$9"
-TMP_ENC="/tmp/dr-filer.meta.gz.enc"
-TMP_RAW="/tmp/dr-filer.meta"
+BDIR="$1"; MPEERS="$2"; FPORT="$3"; ENDPOINT="$4"; REGION="$5"; BUCKET="$6"
+ENC_KEY="${BACKUP_ENCRYPTION_KEY}"
+TMP_ENC=$(mktemp /tmp/dr-filer-XXXXXX.enc)
+TMP_CIPH=$(mktemp /tmp/dr-filer-XXXXXX.ciph)
+TMP_RAW=$(mktemp /tmp/dr-filer-XXXXXX.meta)
+chmod 600 "${TMP_ENC}" "${TMP_CIPH}" "${TMP_RAW}"
 CID=$(cd "${BDIR}" && docker compose ps -q swfs-filer | head -n1)
 [[ -n "${CID}" ]] || exit 1
-trap 'rm -f "${TMP_ENC}" "${TMP_RAW}"; docker exec "${CID}" rm -f "${TMP_RAW}" 2>/dev/null || true' EXIT
+trap 'rm -f "${TMP_ENC}" "${TMP_CIPH}" "${TMP_RAW}"; docker exec "${CID}" rm -f "${TMP_RAW}" 2>/dev/null || true' EXIT
 
-python3 - "${ENDPOINT}" "${REGION}" "${BUCKET}" "${AK}" "${SK}" "${TMP_ENC}" <<'PYEOF'
-import datetime, hashlib, hmac, sys, urllib.parse, urllib.request
-endpoint, region, bucket, ak, sk, dst = sys.argv[1:]
+python3 - "${ENDPOINT}" "${REGION}" "${BUCKET}" "${TMP_ENC}" <<'PYEOF'
+import datetime, hashlib, hmac, os, sys, urllib.parse, urllib.request
+endpoint, region, bucket, dst = sys.argv[1:]
+ak = os.environ["BACKUP_S3_ACCESS_KEY"]
+sk = os.environ["BACKUP_S3_SECRET_KEY"]
 if not endpoint.startswith(("http://", "https://")):
     endpoint = "https://" + endpoint
 endpoint = endpoint.rstrip("/")
@@ -153,7 +156,21 @@ latest = s3_get("filer-meta/LATEST").decode().strip()
 open(dst, "wb").write(s3_get(latest))
 PYEOF
 
-ENCK="${ENC_KEY}" openssl enc -d -aes-256-cbc -pbkdf2 -pass env:ENCK -in "${TMP_ENC}" | gunzip > "${TMP_RAW}"
+ENC_KEY="${ENC_KEY}" python3 - "${TMP_ENC}" "${TMP_CIPH}" <<'PYVER'
+import hashlib, hmac, os, sys
+src, dst = sys.argv[1], sys.argv[2]
+raw = open(src, "rb").read()
+if raw.startswith(b"ETM1:"):
+    _, tag, cipher = raw.split(b":", 2)
+    mac_key = hashlib.sha256(("ligament-etm:" + os.environ["ENC_KEY"]).encode("utf-8")).digest()
+    expected = hmac.new(mac_key, cipher, hashlib.sha256).hexdigest().encode("ascii")
+    if not hmac.compare_digest(tag, expected):
+        raise SystemExit("HMAC verification FAILED for DR filer metadata archive!")
+    open(dst, "wb").write(cipher)
+else:
+    open(dst, "wb").write(raw)
+PYVER
+ENCK="${ENC_KEY}" openssl enc -d -aes-256-cbc -pbkdf2 -pass env:ENCK -in "${TMP_CIPH}" | gunzip > "${TMP_RAW}"
 docker cp "${TMP_RAW}" "${CID}:${TMP_RAW}"
 docker exec -i "${CID}" weed shell -master="${MPEERS}" -filer="127.0.0.1:${FPORT}" <<< "fs.meta.load -v=false ${TMP_RAW}" || true
 REMOTE_SWFS_RESTORE

@@ -87,7 +87,7 @@ log_info "  ✅ PASS: HAProxy :5433 принимает подключения к
 if [[ "${DISRUPTIVE}" == "true" ]]; then
     log_info "  Возврат ${old_primary} (unpause patroni -> pg_rewind -> replica catch-up)..."
     remote_exec "${old_primary}" "cd '${REMOTE_BASE_DIR}' && docker compose unpause patroni"
-    wait_for_remote_health "${old_primary}" "Returned node /replica" "curl -sf http://127.0.0.1:${PATRONI_API_PORT:-8008}/replica" 30 3
+    wait_for_remote_health "${old_primary}" "Returned node /replica" "curl -sf --cacert '${REMOTE_BASE_DIR}/certs/ca.crt' https://127.0.0.1:${PATRONI_API_PORT:-8008}/replica" 30 3
     log_info "  ✅ PASS: Бывший лидер вернулся репликой без ручного вмешательства"
 fi
 

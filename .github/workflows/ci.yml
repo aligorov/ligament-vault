@@ -74,19 +74,23 @@ jobs:
           EXTRACTED_PW=$(
             source scripts/lib/common.sh
             load_cluster_env "${WORKDIR}/repo"
-            echo "${SFTPGO_ADMIN_PASSWORD}"
+            echo "${PANEL_ADMIN_PASSWORD:-${SFTPGO_ADMIN_PASSWORD}}"
           )
           PANEL_PORT=18443 PANEL_BIND=127.0.0.1 python3 web/panel.py &
           PANEL_PID=$!
           trap 'kill "${PANEL_PID}" 2>/dev/null || true' EXIT
           sleep 2
           curl -ksf https://127.0.0.1:18443/api/v1/health | jq -e '.ok == true'
+          curl -ksfD - https://127.0.0.1:18443/ | grep -qi "X-Content-Type-Options: nosniff"
+          curl -ksfD - https://127.0.0.1:18443/ | grep -qi "Content-Security-Policy:"
           curl -ksf https://127.0.0.1:18443/ | grep -q "Ligament Vault"
-          # Auth failure checks
+          # Auth & injection failure checks
           BAD_CODE=$(curl -ks -o /dev/null -w '%{http_code}' -X POST https://127.0.0.1:18443/api/v1/auth/login -H "Content-Type: application/json" -d '{"username":"admin","password":"wrong"}')
           [[ "${BAD_CODE}" == "401" || "${BAD_CODE}" == "403" ]]
           UNAUTH_CODE=$(curl -ks -o /dev/null -w '%{http_code}' https://127.0.0.1:18443/api/v1/overview)
           [[ "${UNAUTH_CODE}" == "401" ]]
+          INJ_CODE=$(curl -ks -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer ${EXTRACTED_PW}" -H "Content-Type: application/json" -d '{"DOMAIN":"evil.com\nRUN_CMD=id"}' https://127.0.0.1:18443/api/v1/config)
+          [[ "${INJ_CODE}" == "400" ]]
 
           curl -ksf -X POST https://127.0.0.1:18443/api/v1/auth/login \
             -H "Content-Type: application/json" \
@@ -134,6 +138,35 @@ jobs:
           curl -ksf -H "Authorization: Bearer ${EXTRACTED_PW}" https://127.0.0.1:18443/api/v1/overview \
             | jq -e '(.health.nodes | length) == 3 and .health.nodes[2].node == "node3"'
           curl -ksf -H "Authorization: Bearer ${EXTRACTED_PW}" https://127.0.0.1:18443/api/v1/tasks | jq -e '.tasks | type == "array"'
+
+          # Verify Bearer brute-force rate limit triggers 429 after 10 wrong tokens
+          for _ in $(seq 1 10); do
+              curl -ks -o /dev/null -H "Authorization: Bearer wrong_tok" https://127.0.0.1:18443/api/v1/overview
+          done
+          RL_CODE=$(curl -ks -o /dev/null -w '%{http_code}' -H "Authorization: Bearer wrong_tok" https://127.0.0.1:18443/api/v1/overview)
+          [[ "${RL_CODE}" == "429" ]]
+
+          # Verify ligament-2fa-hook.sh is strictly fail-closed on unexpected HTTP 200 without allowed=true
+          python3 - <<'PY2FA'
+          import http.server, subprocess, tempfile, threading
+          resp_body = b'{"status":"error_page"}'
+          class H(http.server.BaseHTTPRequestHandler):
+              def log_message(self, *a): pass
+              def do_POST(self):
+                  self.send_response(200)
+                  self.end_headers()
+                  self.wfile.write(resp_body)
+          srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+          threading.Thread(target=srv.serve_forever, daemon=True).start()
+          url = f"http://127.0.0.1:{srv.server_port}"
+          env = {"PATH": "/usr/bin:/bin", "LIGAMENT_2FA_ENABLED": "true", "LIGAMENT_2FA_API_URL": url, "SFTPGO_LOGIND_USER": '{"username":"alice"}', "SFTPGO_LOGIND_IP": "1.2.3.4", "SFTPGO_LOGIND_PROTOCOL": "SFTP", "SFTPGO_LOGIND_METHOD": "password"}
+          r_deny = subprocess.run(["sh", "scripts/hooks/ligament-2fa-hook.sh"], env=env)
+          assert r_deny.returncode != 0, "Expected fail-closed deny on missing allowed=true"
+          resp_body = b'{"allowed":true}'
+          r_ok = subprocess.run(["sh", "scripts/hooks/ligament-2fa-hook.sh"], env=env)
+          assert r_ok.returncode == 0, "Expected allow when allowed=true"
+          srv.shutdown()
+          PY2FA
           kill "${PANEL_PID}"
 
           ./ligactl preflight --dry-run
@@ -213,6 +246,9 @@ jobs:
           CERT_OUT="${WORKDIR}/repo/certs/node1"
           mkdir -p "${CERT_OUT}"
           cp "${CA_DIR}/ca.crt" "${CERT_OUT}/ca.crt"
+          cp "${CA_DIR}/ca.crt" "${WORKDIR}/repo/certs/ca.crt"
+          cp "${CA_DIR}/crl.pem" "${CERT_OUT}/crl.pem"
+          chmod 644 "${CERT_OUT}/crl.pem" "${CERT_OUT}/ca.crt" "${WORKDIR}/repo/certs/ca.crt"
           SAN="IP:${HOST_IP},IP:127.0.0.1,DNS:node1,DNS:localhost"
           ACTIVE_CA_KEY="${CA_DIR}/ca.key"
           for role in "${PKI_ROLES[@]}"; do
@@ -274,7 +310,7 @@ jobs:
           docker compose up -d patroni
           PRIMARY_OK=false
           for _ in $(seq 1 45); do
-              if curl -sf http://127.0.0.1:8008/primary >/dev/null; then
+              if curl -sf --cacert "${CERT_OUT}/ca.crt" https://127.0.0.1:8008/primary >/dev/null; then
                   PRIMARY_OK=true
                   break
               fi
@@ -282,10 +318,20 @@ jobs:
           done
           if [[ "${PRIMARY_OK}" != "true" ]]; then
               docker compose logs patroni || true
-              curl -s http://127.0.0.1:8008/patroni || true
+              curl -sk https://127.0.0.1:8008/patroni || true
               exit 1
           fi
           docker exec "$(docker ps -qf name=patroni)" patronictl list
+
+          # Verify Patroni REST API rejects plaintext HTTP and enforces client cert on unsafe PATCH
+          if curl -sf http://127.0.0.1:8008/primary >/dev/null 2>&1; then
+              echo "SECURITY FAILURE: Patroni REST API responded over plaintext HTTP!" >&2
+              exit 1
+          fi
+          if curl -sf --cacert "${CERT_OUT}/ca.crt" -u "patroni:${PATRONI_API_PASSWORD}" -X PATCH -H "Content-Type: application/json" -d '{}' https://127.0.0.1:8008/config >/dev/null 2>&1; then
+              echo "SECURITY FAILURE: Patroni REST API allowed PATCH without client cert!" >&2
+              exit 1
+          fi
 
           docker compose up -d haproxy
           HAPROXY_OK=false
@@ -357,9 +403,12 @@ jobs:
           assert ssl_on is True, f"Expected ssl=True, got {ssl_on}"
           assert tls_ver == "TLSv1.3", f"Expected TLSv1.3, got {tls_ver}"
           assert "pg-client" in (client_dn or ""), f"Expected pg-client in client_dn, got {client_dn}"
+          cur.execute("SHOW ssl_crl_file")
+          crl_file = cur.fetchone()[0]
+          assert crl_file == "/run/pg-certs/crl.pem", f"Expected CRL file active, got {crl_file}"
           cur.close()
           conn.close()
-          print(f"Zero-Trust PG verified: port=15432, ssl={ssl_on}, version={tls_ver}, client_dn={client_dn}")
+          print(f"Zero-Trust PG verified: port=15432, ssl={ssl_on}, version={tls_ver}, client_dn={client_dn}, crl={crl_file}")
           PYSEC
 
           docker exec -i -e "SFTPGO_PW=${SFTPGO_DB_PASSWORD}" -e "SWFS_PW=${SWFS_FILER_DB_PASSWORD}" "$(docker ps -qf name=patroni)" python3 - <<'PYEOF'
@@ -412,6 +461,26 @@ jobs:
           fi
 
           docker exec -i "$(docker ps -qf name=swfs-filer)" weed shell -master=127.0.0.1:9333 <<< 'fs.ls /'
+
+          # Verify SFTPGo container boots cleanly with hardened config (cap_drop ALL + mTLS PG + password_validation + min_tls_version)
+          sudo sysctl -w net.ipv4.ip_unprivileged_port_start=21
+          docker compose up -d sftpgo || {
+              docker compose ps -a || true
+              docker compose logs sftpgo || true
+              exit 1
+          }
+          SFTPGO_OK=false
+          for _ in $(seq 1 20); do
+              if docker exec "$(docker ps -qf name=sftpgo)" sftpgo ping --config-file /etc/sftpgo/sftpgo.json >/dev/null 2>&1; then
+                  SFTPGO_OK=true
+                  break
+              fi
+              sleep 2
+          done
+          if [[ "${SFTPGO_OK}" != "true" ]]; then
+              docker compose logs sftpgo || true
+              exit 1
+          fi
 
           sudo python3 - <<'PYEOF'
           import datetime, glob, hashlib, hmac, json, os, urllib.error, urllib.request

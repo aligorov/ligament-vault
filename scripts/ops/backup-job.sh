@@ -80,37 +80,49 @@ run_swfs_backup() {
         fi
     "
 
-    if ! remote_exec_stdin "${node_ip}" \
+    if ! remote_exec_env_stdin "${node_ip}" \
+        "BACKUP_S3_ACCESS_KEY,BACKUP_S3_SECRET_KEY,BACKUP_ENCRYPTION_KEY" \
         "${REMOTE_BASE_DIR}" \
         "${mpeers}" \
         "${SWFS_FILER_PORT:-8888}" \
         "${BACKUP_S3_ENDPOINT}" \
         "${BACKUP_S3_REGION:-us-east-1}" \
-        "${BACKUP_S3_BUCKET}" \
-        "${BACKUP_S3_ACCESS_KEY}" \
-        "${BACKUP_S3_SECRET_KEY}" \
-        "${BACKUP_ENCRYPTION_KEY}" <<'REMOTE_META_BKP'
+        "${BACKUP_S3_BUCKET}" <<'REMOTE_META_BKP'
 set -euo pipefail
-BDIR="$1"; MPEERS="$2"; FPORT="$3"; ENDPOINT="$4"; REGION="$5"; BUCKET="$6"; AK="$7"; SK="$8"; ENC_KEY="$9"
+BDIR="$1"; MPEERS="$2"; FPORT="$3"; ENDPOINT="$4"; REGION="$5"; BUCKET="$6"
+AK="${BACKUP_S3_ACCESS_KEY}"; SK="${BACKUP_S3_SECRET_KEY}"; ENC_KEY="${BACKUP_ENCRYPTION_KEY}"
 
 TS=$(date -u +%Y%m%dT%H%M%SZ)
-TMP_META="/tmp/filer-meta-${TS}.meta"
-TMP_ENC="/tmp/filer-meta-${TS}.meta.gz.enc"
+TMP_META=$(mktemp /tmp/filer-meta-XXXXXX.meta)
+TMP_CIPH=$(mktemp /tmp/filer-meta-XXXXXX.ciph)
+TMP_ENC=$(mktemp /tmp/filer-meta-XXXXXX.enc)
+chmod 600 "${TMP_META}" "${TMP_CIPH}" "${TMP_ENC}"
 CID=$(cd "${BDIR}" && docker compose ps -q swfs-filer | head -n1)
 [[ -n "${CID}" ]] || { echo "swfs-filer not running" >&2; exit 1; }
 
-trap 'rm -f "${TMP_META}" "${TMP_ENC}"; docker exec "${CID}" rm -f "${TMP_META}" 2>/dev/null || true' EXIT
+trap 'rm -f "${TMP_META}" "${TMP_CIPH}" "${TMP_ENC}"; docker exec "${CID}" rm -f "${TMP_META}" 2>/dev/null || true' EXIT
 
 docker exec -i "${CID}" weed shell -master="${MPEERS}" -filer="127.0.0.1:${FPORT}" <<< "fs.meta.save -o ${TMP_META} /"
 docker cp "${CID}:${TMP_META}" "${TMP_META}"
 docker exec "${CID}" rm -f "${TMP_META}"
 
-gzip -c "${TMP_META}" | ENCK="${ENC_KEY}" openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:ENCK -out "${TMP_ENC}"
+gzip -c "${TMP_META}" | ENCK="${ENC_KEY}" openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:ENCK -out "${TMP_CIPH}"
+python3 - "${TMP_CIPH}" "${TMP_ENC}" <<'PYETM'
+import hashlib, hmac, os, sys
+src, dst = sys.argv[1], sys.argv[2]
+mac_key = hashlib.sha256(("ligament-etm:" + os.environ["ENC_KEY"]).encode("utf-8")).digest()
+cipher = open(src, "rb").read()
+tag = hmac.new(mac_key, cipher, hashlib.sha256).hexdigest()
+with open(dst, "wb") as f:
+    f.write(b"ETM1:" + tag.encode("ascii") + b":" + cipher)
+PYETM
 
-python3 - "${ENDPOINT}" "${REGION}" "${BUCKET}" "${AK}" "${SK}" "${TMP_ENC}" "filer-meta/filer-meta-${TS}.meta.gz.enc" <<'PYEOF'
-import datetime, hashlib, hmac, sys, urllib.parse, urllib.request
+python3 - "${ENDPOINT}" "${REGION}" "${BUCKET}" "${TMP_ENC}" "filer-meta/filer-meta-${TS}.meta.gz.enc" <<'PYEOF'
+import datetime, hashlib, hmac, os, sys, urllib.parse, urllib.request
 
-endpoint, region, bucket, ak, sk, local_file, obj_key = sys.argv[1:]
+endpoint, region, bucket, local_file, obj_key = sys.argv[1:]
+ak = os.environ["BACKUP_S3_ACCESS_KEY"]
+sk = os.environ["BACKUP_S3_SECRET_KEY"]
 if not endpoint.startswith(("http://", "https://")):
     endpoint = "https://" + endpoint
 endpoint = endpoint.rstrip("/")
@@ -155,17 +167,16 @@ run_verify_restore() {
     local test_ip
     test_ip=$(get_node_ip "${SWFS_ADMIN_NODE_INDEX:-2}")
     log_step "Проверка целостности PostgreSQL + SeaweedFS бэкапов (verify-restore) на ${test_ip}"
-    remote_exec_stdin "${test_ip}" \
+    remote_exec_env_stdin "${test_ip}" \
+        "BACKUP_S3_ACCESS_KEY,BACKUP_S3_SECRET_KEY,BACKUP_ENCRYPTION_KEY" \
         "${REMOTE_BASE_DIR}" \
         "${CLUSTER_SLUG}" \
         "${BACKUP_S3_ENDPOINT}" \
         "${BACKUP_S3_REGION:-us-east-1}" \
-        "${BACKUP_S3_BUCKET}" \
-        "${BACKUP_S3_ACCESS_KEY}" \
-        "${BACKUP_S3_SECRET_KEY}" \
-        "${BACKUP_ENCRYPTION_KEY}" <<'REMOTE_VERIFY'
+        "${BACKUP_S3_BUCKET}" <<'REMOTE_VERIFY'
 set -euo pipefail
-BDIR="$1"; SLUG="$2"; ENDPOINT="$3"; REGION="$4"; BUCKET="$5"; AK="$6"; SK="$7"; ENC_KEY="$8"
+BDIR="$1"; SLUG="$2"; ENDPOINT="$3"; REGION="$4"; BUCKET="$5"
+ENC_KEY="${BACKUP_ENCRYPTION_KEY}"
 
 CID=$(cd "${BDIR}" && docker compose ps -q patroni | head -n1)
 [[ -n "${CID}" ]] || { echo "Patroni container not found" >&2; exit 1; }
@@ -184,12 +195,16 @@ else
     echo "Пропуск полного test-restore в /tmp (/var/lib/docker free=${AVAIL_MB}MB < 1200MB); stanza check и metadata info выполнены OK"
 fi
 
-# Проверяем скачивание и AES-256 расшифровку последнего дампа метаданных SeaweedFS
-TMP_DEC="/tmp/verify-meta-$$.enc"
-trap 'rm -f "${TMP_DEC}"' EXIT
-python3 - "${ENDPOINT}" "${REGION}" "${BUCKET}" "${AK}" "${SK}" "${TMP_DEC}" <<'PYEOF'
-import datetime, hashlib, hmac, sys, urllib.parse, urllib.request
-endpoint, region, bucket, ak, sk, dst = sys.argv[1:]
+# Проверяем скачивание, HMAC-целостность и AES-256 расшифровку последнего дампа метаданных SeaweedFS
+TMP_DEC=$(mktemp /tmp/verify-meta-XXXXXX.enc)
+TMP_CIPH=$(mktemp /tmp/verify-meta-XXXXXX.ciph)
+chmod 600 "${TMP_DEC}" "${TMP_CIPH}"
+trap 'rm -f "${TMP_DEC}" "${TMP_CIPH}"' EXIT
+python3 - "${ENDPOINT}" "${REGION}" "${BUCKET}" "${TMP_DEC}" <<'PYEOF'
+import datetime, hashlib, hmac, os, sys, urllib.parse, urllib.request
+endpoint, region, bucket, dst = sys.argv[1:]
+ak = os.environ["BACKUP_S3_ACCESS_KEY"]
+sk = os.environ["BACKUP_S3_SECRET_KEY"]
 if not endpoint.startswith(("http://", "https://")):
     endpoint = "https://" + endpoint
 endpoint = endpoint.rstrip("/")
@@ -215,8 +230,22 @@ open(dst, "wb").write(s3_get(latest_key))
 print(f"Downloaded {latest_key} for decryption verification")
 PYEOF
 
-ENCK="${ENC_KEY}" openssl enc -d -aes-256-cbc -pbkdf2 -pass env:ENCK -in "${TMP_DEC}" | gunzip -t
-echo "SeaweedFS encrypted metadata archive verified OK"
+ENC_KEY="${ENC_KEY}" python3 - "${TMP_DEC}" "${TMP_CIPH}" <<'PYVER'
+import hashlib, hmac, os, sys
+src, dst = sys.argv[1], sys.argv[2]
+raw = open(src, "rb").read()
+if raw.startswith(b"ETM1:"):
+    _, tag, cipher = raw.split(b":", 2)
+    mac_key = hashlib.sha256(("ligament-etm:" + os.environ["ENC_KEY"]).encode("utf-8")).digest()
+    expected = hmac.new(mac_key, cipher, hashlib.sha256).hexdigest().encode("ascii")
+    if not hmac.compare_digest(tag, expected):
+        raise SystemExit("HMAC verification FAILED for filer metadata archive!")
+    open(dst, "wb").write(cipher)
+else:
+    open(dst, "wb").write(raw)
+PYVER
+ENCK="${ENC_KEY}" openssl enc -d -aes-256-cbc -pbkdf2 -pass env:ENCK -in "${TMP_CIPH}" | gunzip -t
+echo "SeaweedFS encrypted metadata archive verified OK (AEAD/ETM)"
 REMOTE_VERIFY
     log_info "✅ Автотест восстановления PostgreSQL + SeaweedFS метаданных (verify-restore) пройден"
 }

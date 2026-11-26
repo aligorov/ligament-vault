@@ -122,8 +122,57 @@ load_cluster_env() {
         fi
         local decrypted_env
         decrypted_env=$(age -d -i "${age_key}" "${secrets_age}")
-        eval "${decrypted_env}"
-        unset decrypted_env
+        while IFS= read -r -d '' _k && IFS= read -r -d '' _v; do
+            if [[ "${_k}" =~ ^[A-Z][A-Z0-9_]*$ ]]; then
+                printf -v "${_k}" '%s' "${_v}"
+                export "${_k}"
+            fi
+        done < <(printf '%s\n' "${decrypted_env}" | python3 -c '
+import re, shlex, sys
+
+def unescape_dq(s):
+    out = []
+    i = 0
+    while i < len(s):
+        if s[i] == "\\" and i + 1 < len(s) and s[i + 1] in ("\\", "\"", "$", "`"):
+            out.append(s[i + 1])
+            i += 2
+        else:
+            out.append(s[i])
+            i += 1
+    return "".join(out)
+
+for raw in sys.stdin:
+    line = raw.strip()
+    if not line or line.startswith("#") or "=" not in line:
+        continue
+    m = re.match(r"^([A-Z][A-Z0-9_]*)=(.*)$", line)
+    if not m:
+        continue
+    k, rest = m.group(1), m.group(2).strip()
+    if rest.startswith("\""):
+        # Parse double-quoted value honoring bash escapes without executing commands
+        buf, i, closed = [], 1, False
+        while i < len(rest):
+            c = rest[i]
+            if c == "\\" and i + 1 < len(rest):
+                buf.append(rest[i:i+2])
+                i += 2
+            elif c == "\"":
+                closed = True
+                break
+            else:
+                buf.append(c)
+                i += 1
+        val = unescape_dq("".join(buf)) if closed else rest.strip("\"")
+    elif rest.startswith("\x27"):
+        end = rest.find("\x27", 1)
+        val = rest[1:end] if end != -1 else rest.strip("\x27")
+    else:
+        val = shlex.split(rest, comments=True)[0] if rest else ""
+    sys.stdout.buffer.write(k.encode("utf-8") + b"\x00" + val.encode("utf-8") + b"\x00")
+')
+        unset decrypted_env _k _v
     fi
 
     export PROJECT_NAME="${PROJECT_NAME:-Ligament Vault}"
@@ -285,6 +334,32 @@ remote_exec_stdin() {
         sleep 5
     done
     rm -f "${tmp_in}"
+    return "${rc}"
+}
+
+# Передача секретов удаленному скрипту через stdin (0600 в RAM), минуя argv / ps aux
+remote_exec_env_stdin() {
+    local ip="$1" env_csv="$2"; shift 2
+    local ram_dir tmp_script
+    ram_dir=$(make_ram_tempdir)
+    chmod 700 "${ram_dir}"
+    tmp_script="${ram_dir}/script.sh"
+    : > "${tmp_script}"
+    chmod 600 "${tmp_script}"
+
+    local IFS=','
+    local _vars=()
+    read -ra _vars <<< "${env_csv}"
+    for _vn in "${_vars[@]}"; do
+        [[ "${_vn}" =~ ^[A-Z][A-Z0-9_]*$ ]] || continue
+        printf 'export %s=%q\n' "${_vn}" "${!_vn:-}" >> "${tmp_script}"
+    done
+    cat >> "${tmp_script}"
+
+    local rc=0
+    remote_exec_stdin "${ip}" "$@" < "${tmp_script}" || rc=$?
+    secure_wipe_file "${tmp_script}"
+    rm -rf "${ram_dir}"
     return "${rc}"
 }
 
@@ -566,7 +641,7 @@ patroni_is_primary() {
         return $?
     fi
     local code
-    code=$(remote_exec "${ip}" "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:${PATRONI_API_PORT:-8008}/primary" 2>/dev/null || echo "000")
+    code=$(remote_exec "${ip}" "CA='${REMOTE_BASE_DIR}/certs/ca.crt'; if [[ -f \"\${CA}\" ]]; then curl -s --cacert \"\${CA}\" -o /dev/null -w '%{http_code}' 'https://127.0.0.1:${PATRONI_API_PORT:-8008}/primary' 2>/dev/null || curl -s -o /dev/null -w '%{http_code}' 'http://127.0.0.1:${PATRONI_API_PORT:-8008}/primary' 2>/dev/null; else curl -s -o /dev/null -w '%{http_code}' 'http://127.0.0.1:${PATRONI_API_PORT:-8008}/primary' 2>/dev/null; fi" 2>/dev/null || echo "000")
     [[ "${code}" == "200" ]]
 }
 

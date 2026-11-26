@@ -7,6 +7,7 @@ Ligament Vault — Единая HTTPS Веб-панель управления �
 import hashlib
 import hmac
 import http.cookies
+import ipaddress
 import json
 import os
 import re
@@ -35,6 +36,21 @@ LOCK = threading.Lock()
 SESSION_TTL = 43200  # 12 часов
 MAX_FAILED_LOGINS = 10
 FAIL_WINDOW_SEC = 300
+MAX_TASKS_KEEP = 20
+MAX_TASK_LOG_LINES = 5000
+
+
+def _unescape_dq(s):
+    out = []
+    i = 0
+    while i < len(s):
+        if s[i] == "\\" and i + 1 < len(s) and s[i + 1] in ("\\", '"', "$", "`"):
+            out.append(s[i + 1])
+            i += 2
+        else:
+            out.append(s[i])
+            i += 1
+    return "".join(out)
 
 
 def parse_env_text(text):
@@ -43,16 +59,33 @@ def parse_env_text(text):
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
+        m = re.match(r"^([A-Z][A-Z0-9_]*)=(.*)$", line)
+        if not m:
+            continue
+        k, rest = m.group(1), m.group(2).strip()
         try:
-            parts = shlex.split(line, comments=True)
-            if parts and "=" in parts[0]:
-                k, v = parts[0].split("=", 1)
-                data[k] = v
+            if rest.startswith('"'):
+                buf, i, closed = [], 1, False
+                while i < len(rest):
+                    c = rest[i]
+                    if c == "\\" and i + 1 < len(rest):
+                        buf.append(rest[i : i + 2])
+                        i += 2
+                    elif c == '"':
+                        closed = True
+                        break
+                    else:
+                        buf.append(c)
+                        i += 1
+                data[k] = _unescape_dq("".join(buf)) if closed else rest.strip('"')
+            elif rest.startswith("'"):
+                end = rest.find("'", 1)
+                data[k] = rest[1:end] if end != -1 else rest.strip("'")
+            else:
+                parts = shlex.split(rest, comments=True)
+                data[k] = parts[0] if parts else ""
         except Exception:
-            no_comment = line.split("#", 1)[0].strip()
-            if "=" in no_comment:
-                k, v = no_comment.split("=", 1)
-                data[k.strip()] = v.strip().strip('"').strip("'")
+            data[k] = rest.split("#", 1)[0].strip().strip('"').strip("'")
     return data
 
 
@@ -84,18 +117,87 @@ def get_admin_credentials():
     cenv = read_env_dict(os.path.join(CONFIG_ROOT, "cluster.env"))
     senv = read_secrets_dict()
     user = os.environ.get("PANEL_ADMIN_USER") or cenv.get("SFTPGO_ADMIN_USERNAME") or "admin"
-    pw = os.environ.get("PANEL_ADMIN_PASSWORD") or senv.get("SFTPGO_ADMIN_PASSWORD") or ""
+    pw = (
+        os.environ.get("PANEL_ADMIN_PASSWORD")
+        or senv.get("PANEL_ADMIN_PASSWORD")
+        or senv.get("SFTPGO_ADMIN_PASSWORD")
+        or ""
+    )
     return user, pw
 
 
 def _escape_env_value(val):
+    s = str(val)
+    if any(ch in s for ch in ("\r", "\n", "\x00")):
+        raise ValueError("Недопустимый символ перевода строки или NUL в значении конфигурации")
     return (
-        str(val)
-        .replace("\\", "\\\\")
+        s.replace("\\", "\\\\")
         .replace('"', '\\"')
         .replace("$", "\\$")
         .replace("`", "\\`")
     )
+
+
+def _validate_cluster_updates(updates):
+    cleaned = {}
+    for k, raw in updates.items():
+        v = str(raw).strip()
+        if any(ch in v for ch in ("\r", "\n", "\x00")):
+            raise ValueError(f"Поле {k} содержит недопустимый перенос строки")
+        if k == "CLUSTER_NODES":
+            tokens = v.split()
+            if not tokens:
+                raise ValueError("CLUSTER_NODES не может быть пустым")
+            for tok in tokens:
+                parts = tok.split(":")
+                if len(parts) != 3:
+                    raise ValueError(f"Некорректная запись узла: {tok} (ожидается IP:dc:node)")
+                ipaddress.IPv4Address(parts[0])
+                if not re.match(r"^[a-zA-Z0-9_-]{1,32}$", parts[1]) or not re.match(r"^[a-zA-Z0-9_-]{1,32}$", parts[2]):
+                    raise ValueError(f"Некорректный DC/имя узла: {tok}")
+            cleaned[k] = " ".join(tokens)
+        elif k == "DOMAIN":
+            if v and not re.match(r"^[a-zA-Z0-9.-]{1,253}$", v):
+                raise ValueError("Некорректный формат домена DOMAIN")
+            cleaned[k] = v
+        elif k in ("HTTPS_PORT", "SFTP_PORT", "FTPS_PORT"):
+            p = int(v)
+            if not (1 <= p <= 65535):
+                raise ValueError(f"Порт {k} должен быть в диапазоне 1..65535")
+            cleaned[k] = str(p)
+        elif k == "WORM_RETENTION_DAYS":
+            d = int(v)
+            if not (1 <= d <= 36500):
+                raise ValueError("WORM_RETENTION_DAYS должен быть от 1 до 36500")
+            cleaned[k] = str(d)
+        elif k == "WORM_RETENTION_MODE":
+            if v not in ("COMPLIANCE", "GOVERNANCE"):
+                raise ValueError("WORM_RETENTION_MODE должен быть COMPLIANCE или GOVERNANCE")
+            cleaned[k] = v
+        elif k == "ADMIN_SSH_NET":
+            nets = [x.strip() for x in re.split(r"[\s,]+", v) if x.strip()]
+            if not nets:
+                raise ValueError("ADMIN_SSH_NET не может быть пустым")
+            for net in nets:
+                ipaddress.ip_network(net, strict=False)
+            cleaned[k] = " ".join(nets)
+        elif k in ("LIGAMENT_2FA_ENABLED", "LIGAMENT_2FA_FAIL_OPEN"):
+            if v not in ("true", "false"):
+                raise ValueError(f"{k} должен быть true или false")
+            cleaned[k] = v
+        elif k == "LIGAMENT_2FA_API_URL":
+            if v and not re.match(r"^https?://[^\s'\"\\]+$", v):
+                raise ValueError("Некорректный URL Ligament 2FA")
+            cleaned[k] = v
+        elif k == "FAILOVER_MODE":
+            if v not in ("dns", "floating-ip", "hybrid"):
+                raise ValueError("FAILOVER_MODE должен быть dns, floating-ip или hybrid")
+            cleaned[k] = v
+        elif k == "ARBITER_IP":
+            if v:
+                ipaddress.IPv4Address(v)
+            cleaned[k] = v
+    return cleaned
 
 
 def update_env_file(path, updates):
@@ -105,10 +207,12 @@ def update_env_file(path, updates):
         for k, v in updates.items():
             if v is None:
                 continue
+            if not re.match(r"^[A-Z][A-Z0-9_]*$", k):
+                raise ValueError(f"Некорректный ключ env: {k}")
             safe_v = _escape_env_value(v)
             newline = f'{k}="{safe_v}"'
             if re.search(rf"^{re.escape(k)}=.*$", text, flags=re.M):
-                text = re.sub(rf"^{re.escape(k)}=.*$", newline, text, flags=re.M)
+                text = re.sub(rf"^{re.escape(k)}=.*$", lambda _m, nl=newline: nl, text, flags=re.M)
             else:
                 text += ("\n" if text and not text.endswith("\n") else "") + newline + "\n"
         tmp = path + ".tmp"
@@ -136,10 +240,12 @@ def update_secrets(updates):
             for k, v in updates.items():
                 if v is None or v == "":
                     continue
+                if not re.match(r"^[A-Z][A-Z0-9_]*$", k):
+                    raise ValueError(f"Некорректный ключ секрета: {k}")
                 safe_v = _escape_env_value(v)
                 newline = f'{k}="{safe_v}"'
                 if re.search(rf"^{re.escape(k)}=.*$", text, flags=re.M):
-                    text = re.sub(rf"^{re.escape(k)}=.*$", newline, text, flags=re.M)
+                    text = re.sub(rf"^{re.escape(k)}=.*$", lambda _m, nl=newline: nl, text, flags=re.M)
                 else:
                     text += ("\n" if text and not text.endswith("\n") else "") + newline + "\n"
             rec = subprocess.check_output(["age-keygen", "-y", age_key], text=True, timeout=5).strip()
@@ -285,12 +391,19 @@ def start_async_task(label, argv):
         for t in TASKS.values():
             if t["status"] == "running":
                 return None, "Другая задача уже выполняется — дождитесь ее завершения в консоли"
+        if len(TASKS) >= MAX_TASKS_KEEP:
+            done_ids = sorted(
+                (k for k, v in TASKS.items() if v["status"] != "running"),
+                key=lambda k: TASKS[k]["started"],
+            )
+            for old_id in done_ids[: len(TASKS) - MAX_TASKS_KEEP + 1]:
+                TASKS.pop(old_id, None)
         TASKS[task_id] = {
             "id": task_id,
             "label": label,
             "status": "running",
             "rc": None,
-            "log": [f"▶ Запуск: {label} ({' '.join(argv)})"],
+            "log": [f"▶ Запуск: {label}"],
             "started": time.time(),
         }
 
@@ -310,7 +423,10 @@ def start_async_task(label, argv):
             for line in proc.stdout:
                 clean = re.sub(r"\x1b\[[0-9;]*m", "", line.rstrip("\n"))
                 with LOCK:
-                    TASKS[task_id]["log"].append(clean)
+                    log_arr = TASKS[task_id]["log"]
+                    if len(log_arr) >= MAX_TASK_LOG_LINES:
+                        del log_arr[:500]
+                    log_arr.append(clean)
             rc = proc.wait()
             with LOCK:
                 TASKS[task_id]["rc"] = rc
@@ -330,12 +446,23 @@ class PanelHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
+    def send_security_headers(self):
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Strict-Transport-Security", "max-age=31536000")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+        )
+
     def send_json(self, code, payload, extra_headers=None):
         raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
         self.send_header("Cache-Control", "no-store")
+        self.send_security_headers()
         if extra_headers:
             for k, v in extra_headers.items():
                 self.send_header(k, v)
@@ -348,12 +475,42 @@ class PanelHandler(BaseHTTPRequestHandler):
             return {}
         return json.loads(self.rfile.read(length).decode("utf-8"))
 
+    def _is_rate_limited(self, client_ip):
+        now = time.time()
+        with LOCK:
+            attempts = [t for t in RATE_LIMIT.get(client_ip, []) if now - t < FAIL_WINDOW_SEC]
+            if attempts:
+                RATE_LIMIT[client_ip] = attempts
+            else:
+                RATE_LIMIT.pop(client_ip, None)
+            if len(RATE_LIMIT) > 4096:
+                stale = [ip for ip, ts_list in RATE_LIMIT.items() if not ts_list or now - ts_list[-1] >= FAIL_WINDOW_SEC]
+                for ip in stale:
+                    RATE_LIMIT.pop(ip, None)
+            return len(attempts) >= MAX_FAILED_LOGINS
+
+    def _record_auth_failure(self, client_ip):
+        now = time.time()
+        with LOCK:
+            attempts = [t for t in RATE_LIMIT.get(client_ip, []) if now - t < FAIL_WINDOW_SEC]
+            attempts.append(now)
+            RATE_LIMIT[client_ip] = attempts
+
     def check_session(self, require_csrf=False):
+        self._rate_limited = False
+        client_ip = self.client_address[0]
         auth_hdr = self.headers.get("Authorization", "")
         if auth_hdr.startswith("Bearer "):
+            if self._is_rate_limited(client_ip):
+                self._rate_limited = True
+                return False
             _, admin_pw = get_admin_credentials()
             if admin_pw and hmac.compare_digest(auth_hdr[7:].strip(), admin_pw):
+                with LOCK:
+                    RATE_LIMIT.pop(client_ip, None)
                 return True
+            self._record_auth_failure(client_ip)
+            return False
 
         cookie_hdr = self.headers.get("Cookie", "")
         jar = http.cookies.SimpleCookie()
@@ -361,6 +518,9 @@ class PanelHandler(BaseHTTPRequestHandler):
         sid = jar["lv_session"].value if "lv_session" in jar else ""
         now = time.time()
         with LOCK:
+            expired = [k for k, v in SESSIONS.items() if v["exp"] < now]
+            for k in expired:
+                SESSIONS.pop(k, None)
             sess = SESSIONS.get(sid)
             if not sess or sess["exp"] < now:
                 SESSIONS.pop(sid, None)
@@ -376,11 +536,12 @@ class PanelHandler(BaseHTTPRequestHandler):
         path = parsed.path
 
         if path in ("/", "/index.html"):
-            html = open(os.path.join(WEB_DIR, "index.html"), "rb").read()
+            with open(os.path.join(WEB_DIR, "index.html"), "rb") as f:
+                html = f.read()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(html)))
-            self.send_header("X-Frame-Options", "DENY")
+            self.send_security_headers()
             self.end_headers()
             self.wfile.write(html)
             return
@@ -391,7 +552,8 @@ class PanelHandler(BaseHTTPRequestHandler):
 
         if path == "/api/v1/auth/session":
             if not self.check_session():
-                self.send_json(401, {"authenticated": False})
+                code = 429 if getattr(self, "_rate_limited", False) else 401
+                self.send_json(code, {"authenticated": False})
                 return
             jar = http.cookies.SimpleCookie(self.headers.get("Cookie", ""))
             sid = jar["lv_session"].value if "lv_session" in jar else ""
@@ -400,7 +562,10 @@ class PanelHandler(BaseHTTPRequestHandler):
             return
 
         if not self.check_session():
-            self.send_json(401, {"error": "Требуется авторизация"})
+            if getattr(self, "_rate_limited", False):
+                self.send_json(429, {"error": "Слишком много неудачных попыток. Подождите 5 минут."})
+            else:
+                self.send_json(401, {"error": "Требуется авторизация"})
             return
 
         if path == "/api/v1/overview":
@@ -570,11 +735,14 @@ class PanelHandler(BaseHTTPRequestHandler):
             if "lv_session" in jar:
                 with LOCK:
                     SESSIONS.pop(jar["lv_session"].value, None)
-            self.send_json(200, {"ok": True}, extra_headers={"Set-Cookie": "lv_session=; HttpOnly; Secure; Path=/; Max-Age=0"})
+            self.send_json(200, {"ok": True}, extra_headers={"Set-Cookie": "lv_session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0"})
             return
 
         if not self.check_session(require_csrf=True):
-            self.send_json(403, {"error": "Сессия истекла или некорректный CSRF-токен"})
+            if getattr(self, "_rate_limited", False):
+                self.send_json(429, {"error": "Слишком много неудачных попыток. Подождите 5 минут."})
+            else:
+                self.send_json(403, {"error": "Сессия истекла или некорректный CSRF-токен"})
             return
 
         body = self.read_body_json()
@@ -710,9 +878,14 @@ class PanelHandler(BaseHTTPRequestHandler):
                 "WORM_RETENTION_MODE", "WORM_RETENTION_DAYS", "LIGAMENT_2FA_ENABLED",
                 "LIGAMENT_2FA_API_URL", "LIGAMENT_2FA_FAIL_OPEN", "FAILOVER_MODE", "ARBITER_IP",
             )
-            c_updates = {k: body[k] for k in allowed_cluster if k in body}
-            if c_updates:
-                update_env_file(os.path.join(CONFIG_ROOT, "cluster.env"), c_updates)
+            c_updates_raw = {k: body[k] for k in allowed_cluster if k in body}
+            try:
+                c_updates = _validate_cluster_updates(c_updates_raw)
+                if c_updates:
+                    update_env_file(os.path.join(CONFIG_ROOT, "cluster.env"), c_updates)
+            except ValueError as exc:
+                self.send_json(400, {"error": str(exc)})
+                return
 
             allowed_secrets = (
                 "CF_DNS_API_TOKEN", "LIGAMENT_2FA_API_TOKEN",
@@ -723,6 +896,9 @@ class PanelHandler(BaseHTTPRequestHandler):
             if s_updates:
                 try:
                     update_secrets(s_updates)
+                except ValueError as exc:
+                    self.send_json(400, {"error": str(exc)})
+                    return
                 except Exception as exc:
                     self.send_json(500, {"error": str(exc)})
                     return
@@ -745,9 +921,9 @@ class PanelHandler(BaseHTTPRequestHandler):
             cmd = [
                 os.path.join(REPO_DIR, "ligactl"), "user", "add-s3-folder",
                 "--name", fname, "--endpoint", endpoint, "--bucket", bucket,
-                "--region", region, "--access-key", ak, "--secret-key", sk,
+                "--region", region, "--access-key", ak,
             ]
-            res = subprocess.run(cmd, cwd=REPO_DIR, env={**os.environ, "CONFIG_ROOT": CONFIG_ROOT}, capture_output=True, text=True, timeout=25)
+            res = subprocess.run(cmd, cwd=REPO_DIR, env={**os.environ, "CONFIG_ROOT": CONFIG_ROOT, "S3_SECRET_KEY": sk}, capture_output=True, text=True, timeout=25)
             if res.returncode != 0:
                 self.send_json(400, {"error": (res.stderr.strip() or res.stdout.strip() or "Ошибка подключения S3").splitlines()[-1]})
                 return
@@ -766,9 +942,10 @@ class PanelHandler(BaseHTTPRequestHandler):
             req_2fa = bool(body.get("require_2fa", False))
 
             cmd = [os.path.join(REPO_DIR, "ligactl"), "user", "add", "--username", uname, "--profile", profile, "--quota-gb", quota_gb]
+            child_env = {**os.environ, "CONFIG_ROOT": CONFIG_ROOT}
             generated_pw = False
             if pw:
-                cmd += ["--password", pw]
+                child_env["USER_PASSWORD"] = pw
             elif not ssh_key:
                 cmd += ["--generate-password"]
                 generated_pw = True
@@ -777,7 +954,7 @@ class PanelHandler(BaseHTTPRequestHandler):
             if req_2fa:
                 cmd += ["--require-2fa"]
 
-            res = subprocess.run(cmd, cwd=REPO_DIR, env={**os.environ, "CONFIG_ROOT": CONFIG_ROOT}, capture_output=True, text=True, timeout=30)
+            res = subprocess.run(cmd, cwd=REPO_DIR, env=child_env, capture_output=True, text=True, timeout=30)
             if res.returncode != 0:
                 raw_err = (res.stderr.strip() or res.stdout.strip())
                 if "ConnectionRefusedError" in raw_err or "Errno 111" in raw_err or "недоступен на 127.0.0.1:8081" in raw_err:
@@ -859,7 +1036,7 @@ def main():
     crt, key = ensure_tls_cert()
 
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_3
     ctx.load_cert_chain(certfile=crt, keyfile=key)
 
     ThreadingHTTPServer.allow_reuse_address = True

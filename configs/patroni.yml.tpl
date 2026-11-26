@@ -18,15 +18,24 @@ etcd3:
   key: /run/pg-certs/etcd-client.key
   retry_timeout: 25
 
-# --- REST API Patroni ---
-# GET (/primary, /replica, /health, /metrics) открыты для HAProxy и Prometheus;
-# мутирующие POST/PUT/PATCH/DELETE защищены Basic Auth (закрывает localhost RCE!).
+# --- REST API Patroni (HTTPS + mTLS на мутирующих запросах) ---
+# GET (/primary, /replica, /health, /metrics) шифруются TLS;
+# мутирующие POST/PUT/PATCH/DELETE требуют клиентский сертификат CA (verify_client: optional) + Basic Auth.
 restapi:
   listen: 0.0.0.0:${PATRONI_API_PORT}
   connect_address: ${NODE_IP}:${PATRONI_API_PORT}
+  certfile: /run/pg-certs/pg-server.crt
+  keyfile: /run/pg-certs/pg-server.key
+  cafile: /run/pg-certs/ca.crt
+  verify_client: optional
   authentication:
     username: patroni
     password: ${PATRONI_API_PASSWORD}
+
+ctl:
+  cacert: /run/pg-certs/ca.crt
+  certfile: /run/pg-certs/pg-client.crt
+  keyfile: /run/pg-certs/pg-client.key
 
 # --- WAN тайминги (ttl >= loop_wait + 2 * retry_timeout) ---
 ttl: 75
@@ -69,6 +78,7 @@ ${PATRONI_SLOTS_YAML}
         ssl_cert_file: /run/pg-certs/pg-server.crt
         ssl_key_file: /run/pg-certs/pg-server.key
         ssl_ca_file: /run/pg-certs/ca.crt
+        ssl_crl_file: /run/pg-certs/crl.pem
 
   initdb:
     - encoding: UTF8

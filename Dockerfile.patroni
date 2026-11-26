@@ -44,12 +44,12 @@ RUN mkdir -p /etc/pgbackrest /var/log/pgbackrest /var/lib/pgbackrest /run/pg-cer
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Копируем сертификаты и patroni.yml в /run/pg-certs с правами postgres:postgres (0600)
+# Копируем сертификаты, CRL и patroni.yml в /run/pg-certs с правами postgres:postgres (0600)
 if [[ -d /certs ]]; then
     mkdir -p /run/pg-certs
-    cp -L /certs/*.crt /certs/*.key /run/pg-certs/ 2>/dev/null || true
+    cp -L /certs/*.crt /certs/*.key /certs/*.pem /run/pg-certs/ 2>/dev/null || true
     chown -R postgres:postgres /run/pg-certs
-    chmod 644 /run/pg-certs/*.crt 2>/dev/null || true
+    chmod 644 /run/pg-certs/*.crt /run/pg-certs/*.pem 2>/dev/null || true
     chmod 600 /run/pg-certs/*.key 2>/dev/null || true
 fi
 if [[ -f /etc/patroni/patroni.yml ]]; then
@@ -72,7 +72,7 @@ RUN chmod +x /usr/local/bin/patroni-entrypoint.sh
 
 # --- Healthcheck ---
 HEALTHCHECK --interval=10s --timeout=5s --retries=3 \
-    CMD curl -sf http://127.0.0.1:8008/health || exit 1
+    CMD curl -sf --cacert /run/pg-certs/ca.crt https://127.0.0.1:8008/health || curl -sf http://127.0.0.1:8008/health || exit 1
 
 ENTRYPOINT ["/usr/local/bin/patroni-entrypoint.sh"]
 CMD ["/etc/patroni/patroni.yml"]

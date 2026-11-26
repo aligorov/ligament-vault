@@ -169,7 +169,7 @@ ADMIN_PASS=$(
     # shellcheck disable=SC1091
     source "${INSTALL_DIR}/scripts/lib/common.sh"
     load_cluster_env "${INSTALL_DIR}"
-    echo "${SFTPGO_ADMIN_PASSWORD:-}"
+    echo "${PANEL_ADMIN_PASSWORD:-${SFTPGO_ADMIN_PASSWORD:-}}"
 )
 
 echo ""

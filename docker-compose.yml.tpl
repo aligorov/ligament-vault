@@ -28,6 +28,10 @@ services:
     profiles: ["quorum"]
     <<: [*default-restart]
     network_mode: host
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
     logging: *default-logging
     environment:
       ETCD_NAME: "etcd-${NODE_NAME}"
@@ -40,13 +44,15 @@ services:
       ETCD_INITIAL_CLUSTER: "${ETCD_INITIAL_CLUSTER}"
       ETCD_INITIAL_CLUSTER_TOKEN: "${CLUSTER_SLUG}-etcd"
       ETCD_INITIAL_CLUSTER_STATE: "${ETCD_CLUSTER_STATE}"
-      # --- mTLS ---
+      # --- mTLS + CRL ---
       ETCD_CERT_FILE: "/certs/etcd-server.crt"
       ETCD_KEY_FILE: "/certs/etcd-server.key"
       ETCD_TRUSTED_CA_FILE: "/certs/ca.crt"
+      ETCD_CLIENT_CRL_FILE: "/certs/crl.pem"
       ETCD_PEER_CERT_FILE: "/certs/etcd-peer.crt"
       ETCD_PEER_KEY_FILE: "/certs/etcd-peer.key"
       ETCD_PEER_TRUSTED_CA_FILE: "/certs/ca.crt"
+      ETCD_PEER_CRL_FILE: "/certs/crl.pem"
       ETCD_CLIENT_CERT_AUTH: "true"
       ETCD_PEER_CLIENT_CERT_AUTH: "true"
       # --- WAN Тайминги ---
@@ -70,6 +76,16 @@ services:
     image: "${PATRONI_PG_IMAGE_REF}"
     <<: [*default-restart]
     network_mode: host
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETUID
+      - SETGID
     logging: *default-logging
     volumes:
       - ${PG_DATA_DIR}:${PG_DATA_DIR}
@@ -83,7 +99,7 @@ services:
       PATRONICTL_CONFIG_FILE: "/run/pg-certs/patroni.yml"
       PGPORT: "${PG_PORT}"
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://127.0.0.1:${PATRONI_API_PORT}/health"]
+      test: ["CMD", "curl", "-sf", "--cacert", "/run/pg-certs/ca.crt", "https://127.0.0.1:${PATRONI_API_PORT}/health"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -95,9 +111,15 @@ services:
     image: "${HAPROXY_IMAGE_REF}"
     <<: [*default-restart]
     network_mode: host
+    read_only: true
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
     logging: *default-logging
     volumes:
       - ./configs/haproxy-pg.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - ./certs/${NODE_NAME}/ca.crt:/certs/ca.crt:ro
     depends_on:
       patroni:
         condition: service_started
@@ -115,6 +137,10 @@ services:
     profiles: ["quorum"]
     <<: [*default-restart]
     network_mode: host
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
     logging: *default-logging
     command: >-
       master
@@ -145,6 +171,10 @@ services:
     image: "${SEAWEEDFS_IMAGE_REF}"
     <<: [*default-restart]
     network_mode: host
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
     logging: *default-logging
     command: >-
       volume
@@ -175,6 +205,10 @@ ${SWFS_VOLUME_MOUNTS}
     image: "${SEAWEEDFS_IMAGE_REF}"
     <<: [*default-restart]
     network_mode: host
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
     logging: *default-logging
     command: >-
       filer
@@ -204,6 +238,10 @@ ${SWFS_VOLUME_MOUNTS}
     image: "${SEAWEEDFS_IMAGE_REF}"
     <<: [*default-restart]
     network_mode: host
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
     logging: *default-logging
     command: >-
       s3
@@ -232,6 +270,10 @@ ${SWFS_VOLUME_MOUNTS}
     profiles: ["admin"]
     <<: [*default-restart]
     network_mode: host
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
     logging: *default-logging
     command: >-
       admin
@@ -258,6 +300,10 @@ ${SWFS_VOLUME_MOUNTS}
     image: "${SEAWEEDFS_IMAGE_REF}"
     <<: [*default-restart]
     network_mode: host
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
     logging: *default-logging
     command: >-
       worker
@@ -281,6 +327,10 @@ ${SWFS_VOLUME_MOUNTS}
     profiles: ["backup"]
     <<: [*default-restart]
     network_mode: host
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
     logging: *default-logging
     command: >-
       filer.backup
@@ -299,6 +349,10 @@ ${SWFS_VOLUME_MOUNTS}
     image: "${SFTPGO_IMAGE_REF}"
     <<: [*default-restart]
     network_mode: host
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
     logging: *default-logging
     cap_add:
       - NET_BIND_SERVICE
@@ -333,6 +387,11 @@ ${SWFS_VOLUME_MOUNTS}
     image: "${NODE_EXPORTER_IMAGE_REF}"
     <<: [*default-restart]
     network_mode: host
+    read_only: true
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop:
+      - ALL
     logging: *default-logging
     command:
       - "--web.listen-address=${NODE_IP}:9100"

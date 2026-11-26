@@ -25,6 +25,7 @@ services:
       - prometheus-data:/prometheus
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - ./prometheus/ca.crt:/etc/prometheus/ca.crt:ro
 
   alertmanager:
     image: "${ALERTMANAGER_IMAGE_REF}"

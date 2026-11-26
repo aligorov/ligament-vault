@@ -24,7 +24,11 @@ scrape_configs:
       - targets: [${PROM_TARGETS_ETCD}]
 
   - job_name: "patroni"
+    scheme: https
     metrics_path: /metrics
+    tls_config:
+      ca_file: /etc/prometheus/ca.crt
+      insecure_skip_verify: false
     static_configs:
       - targets: [${PROM_TARGETS_PATRONI}]
 

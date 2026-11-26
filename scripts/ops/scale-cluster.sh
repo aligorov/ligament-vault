@@ -205,7 +205,7 @@ cmd_add() {
 
     log_info "7/8 — Запуск стека на ${new_name} + обновление HAProxy/SFTPGo на кластере..."
     remote_exec "${new_ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d"
-    wait_for_remote_health "${new_ip}" "Patroni Replica ${new_name}" "curl -sf http://127.0.0.1:${PATRONI_API_PORT:-8008}/replica" 45 3
+    wait_for_remote_health "${new_ip}" "Patroni Replica ${new_name}" "curl -sf --cacert '${REMOTE_BASE_DIR}/certs/ca.crt' https://127.0.0.1:${PATRONI_API_PORT:-8008}/replica" 45 3
     for i in $(seq 1 "${current_count}"); do
         local oip
         oip=$(get_node_ip "$i")
@@ -354,7 +354,7 @@ REMOTE_PROMOTE
     fi
 
     remote_exec "${new_ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d"
-    wait_for_remote_health "${new_ip}" "Patroni Replica ${old_name}" "curl -sf http://127.0.0.1:${PATRONI_API_PORT:-8008}/replica" 45 3
+    wait_for_remote_health "${new_ip}" "Patroni Replica ${old_name}" "curl -sf --cacert '${REMOTE_BASE_DIR}/certs/ca.crt' https://127.0.0.1:${PATRONI_API_PORT:-8008}/replica" 45 3
 
     # 6. Ремонт томов SeaweedFS и reload HAProxy/SFTPGo на живых нодах
     log_info "6/6 — Восстановление потерянных копий томов (volume.fix.replication -apply) и reload..."
@@ -444,19 +444,22 @@ cmd_remove() {
     purge_stopped_patroni_member_from_dcs "${helper_ip}" "${rm_name}"
     local cur_primary_ip
     cur_primary_ip=$(find_patroni_primary_ip || echo "${helper_ip}")
-    remote_exec_stdin "${cur_primary_ip}" "${PATRONI_API_PORT:-8008}" "${PATRONI_API_PASSWORD}" "${rm_name}" <<'REMOTE_DEL_SLOT' || true
+    remote_exec_env_stdin "${cur_primary_ip}" "PATRONI_API_PASSWORD" "${PATRONI_API_PORT:-8008}" "${rm_name}" "${REMOTE_BASE_DIR}" <<'REMOTE_DEL_SLOT' || true
 set -euo pipefail
 python3 - "$1" "$2" "$3" <<'PYEOF'
-import base64, json, sys, urllib.request
-port, pw, rname = sys.argv[1:]
+import base64, json, os, ssl, sys, urllib.request
+port, rname, bdir = sys.argv[1:]
+pw = os.environ["PATRONI_API_PASSWORD"]
+ctx = ssl.create_default_context(cafile=f"{bdir}/certs/ca.crt")
+ctx.load_cert_chain(certfile=f"{bdir}/certs/{rname}/pg-client.crt", keyfile=f"{bdir}/certs/{rname}/pg-client.key") if os.path.exists(f"{bdir}/certs/{rname}/pg-client.crt") else None
 b64 = base64.b64encode(f"patroni:{pw}".encode()).decode()
 req = urllib.request.Request(
-    f"http://127.0.0.1:{port}/config",
+    f"https://127.0.0.1:{port}/config",
     data=json.dumps({"slots": {rname: None}}).encode(),
     headers={"Authorization": f"Basic {b64}", "Content-Type": "application/json"},
     method="PATCH",
 )
-urllib.request.urlopen(req, timeout=10).read()
+urllib.request.urlopen(req, context=ctx, timeout=10).read()
 PYEOF
 REMOTE_DEL_SLOT
     remote_exec "${cur_primary_ip}" "CID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q patroni | head -n1); docker exec -u postgres \"\${CID}\" psql -U postgres -c \"SELECT pg_drop_replication_slot('${rm_name}') FROM pg_replication_slots WHERE slot_name = '${rm_name}';\" >/dev/null" || true

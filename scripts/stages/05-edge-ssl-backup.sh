@@ -70,7 +70,7 @@ remote_exec "${NODE1_IP}" "cd '${REMOTE_BASE_DIR}' && docker compose run --rm --
 log_info "  ✅ Схема SFTPGo в PostgreSQL инициализирована"
 
 _ensure_sftpgo_unprivileged_ports_cb() {
-    local ip="$2" name="$3"
+    local ip="$1" name="$3"
     local cur_start
     cur_start=$(remote_exec "${ip}" "sysctl -n net.ipv4.ip_unprivileged_port_start 2>/dev/null || echo 0")
     if [[ "${cur_start}" =~ ^[0-9]+$ ]] && (( cur_start > 21 )); then
@@ -168,6 +168,7 @@ REMOTE_ARB_KEY
         remote_copy "${arb_out}/alertmanager.yml" "${ARBITER_IP}:${ARBITER_BASE_DIR}/prometheus/alertmanager.yml"
         remote_copy "${SCRIPT_DIR}/configs/prometheus/blackbox.yml" "${ARBITER_IP}:${ARBITER_BASE_DIR}/prometheus/blackbox.yml"
         remote_copy "${SCRIPT_DIR}/configs/prometheus/alerts.yml" "${ARBITER_IP}:${ARBITER_BASE_DIR}/prometheus/alerts.yml"
+        remote_copy "$(state_root)/.pki/ca/ca.crt" "${ARBITER_IP}:${ARBITER_BASE_DIR}/prometheus/ca.crt"
         remote_copy "$(state_root)/cluster.env" "${ARBITER_IP}:${ARBITER_BASE_DIR}/cluster.env"
         remote_copy "${arb_out}/arbiter-secrets.env" "${ARBITER_IP}:${ARBITER_BASE_DIR}/secrets.env"
         rm -f "${arb_out}/arbiter-secrets.env"

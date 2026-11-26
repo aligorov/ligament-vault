@@ -96,7 +96,7 @@ build_haproxy_pg_servers() {
         local name ip
         name=$(get_node_name "$i")
         ip=$(get_node_ip "$i")
-        result+="    server ${name} ${ip}:${PG_PORT:-15432} check port ${PATRONI_API_PORT:-8008}"
+        result+="    server ${name} ${ip}:${PG_PORT:-15432} check port ${PATRONI_API_PORT:-8008} check-ssl verify required ca-file /certs/ca.crt"
         if (( i < count )); then
             result+=$'\n'
         fi
@@ -287,10 +287,13 @@ render_node_configs() {
     local ip="$1" dc="$2" name="$3" idx="$4" etcd_state="${5:-new}"
     export_node_render_vars "${ip}" "${dc}" "${name}" "${idx}" "${etcd_state}"
 
-    local sroot out
+    local sroot out umask_saved
     sroot=$(state_root)
     out="${sroot}/.rendered/${name}"
-    mkdir -p "${out}/seaweedfs" "${out}/hooks"
+    umask_saved=$(umask)
+    umask 077
+    mkdir -p "${sroot}/.rendered" "${out}/seaweedfs" "${out}/hooks"
+    chmod 700 "${sroot}/.rendered" "${out}" "${out}/seaweedfs" "${out}/hooks"
 
     render_template "${SCRIPT_DIR}/docker-compose.yml.tpl" "${out}/docker-compose.yml"
     cat > "${out}/.env" <<EOF
@@ -319,8 +322,6 @@ EOF
         cp "${SCRIPT_DIR}/scripts/hooks/ligament-2fa-hook.sh" "${out}/hooks/ligament-2fa-hook.sh"
         chmod 755 "${out}/hooks/ligament-2fa-hook.sh"
     fi
-    umask_saved=$(umask)
-    umask 077
     cat > "${out}/hooks/ligament-2fa.env" <<EOF
 LIGAMENT_2FA_ENABLED="${LIGAMENT_2FA_ENABLED:-false}"
 LIGAMENT_2FA_API_URL="${LIGAMENT_2FA_API_URL:-}"
@@ -388,12 +389,19 @@ REMOTE_DIRS
         remote_copy "${out}/hooks/ligament-2fa-hook.sh" "${ip}:${REMOTE_BASE_DIR}/hooks/ligament-2fa-hook.sh"
     fi
     remote_copy "${out}/hooks/ligament-2fa.env" "${ip}:${REMOTE_BASE_DIR}/hooks/ligament-2fa.env"
+    if [[ -f "$(state_root)/.pki/ca/ca.crt" ]]; then
+        remote_copy "$(state_root)/.pki/ca/ca.crt" "${ip}:${REMOTE_BASE_DIR}/certs/ca.crt"
+    fi
+    if [[ -f "$(state_root)/.pki/ca/crl.pem" ]]; then
+        remote_copy "$(state_root)/.pki/ca/crl.pem" "${ip}:${REMOTE_BASE_DIR}/certs/${name}/crl.pem"
+    fi
 
     remote_exec "${ip}" "
         chmod 755 '${REMOTE_BASE_DIR}' '${REMOTE_BASE_DIR}/configs' '${REMOTE_BASE_DIR}/configs/seaweedfs' \
                   '${REMOTE_BASE_DIR}/certs' '${REMOTE_BASE_DIR}/certs/ssl' '${REMOTE_BASE_DIR}/ssh-host-keys' '${REMOTE_BASE_DIR}/hooks' && \
-        chmod 644 '${REMOTE_BASE_DIR}/docker-compose.yml' '${REMOTE_BASE_DIR}/configs/haproxy-pg.cfg' && \
-        chmod 600 '${REMOTE_BASE_DIR}/configs/patroni.yml' '${REMOTE_BASE_DIR}/configs/pgbackrest.conf' && \
+        chmod 600 '${REMOTE_BASE_DIR}/docker-compose.yml' '${REMOTE_BASE_DIR}/configs/patroni.yml' '${REMOTE_BASE_DIR}/configs/pgbackrest.conf' && \
+        chmod 644 '${REMOTE_BASE_DIR}/configs/haproxy-pg.cfg' && \
+        chmod 644 '${REMOTE_BASE_DIR}/certs/ca.crt' '${REMOTE_BASE_DIR}/certs/${name}/crl.pem' 2>/dev/null || true && \
         chown 1000:1000 '${REMOTE_BASE_DIR}/configs/seaweedfs/'*.toml '${REMOTE_BASE_DIR}/configs/seaweedfs/s3.json' && \
         chmod 600 '${REMOTE_BASE_DIR}/configs/seaweedfs/'*.toml '${REMOTE_BASE_DIR}/configs/seaweedfs/s3.json' && \
         chown 1000:1000 '${REMOTE_BASE_DIR}/configs/sftpgo.json' '${REMOTE_BASE_DIR}/configs/revoked_user_certs.json' \
@@ -414,9 +422,14 @@ REMOTE_DIRS
         fi
         PCID=\$(cd '${REMOTE_BASE_DIR}' 2>/dev/null && docker compose ps -q patroni 2>/dev/null | head -n1 || true)
         if [[ -n \"\${PCID}\" ]]; then
-            docker exec \"\${PCID}\" bash -c 'if [[ -f /etc/patroni/patroni.yml ]]; then cp -L /etc/patroni/patroni.yml /run/pg-certs/patroni.yml && chown postgres:postgres /run/pg-certs/patroni.yml && chmod 600 /run/pg-certs/patroni.yml && kill -HUP 1; fi' 2>/dev/null || true
+            docker exec \"\${PCID}\" bash -c 'if [[ -f /etc/patroni/patroni.yml ]]; then cp -L /certs/crl.pem /run/pg-certs/crl.pem 2>/dev/null || true; cp -L /etc/patroni/patroni.yml /run/pg-certs/patroni.yml && chown postgres:postgres /run/pg-certs/patroni.yml /run/pg-certs/crl.pem 2>/dev/null || true && chmod 600 /run/pg-certs/patroni.yml && kill -HUP 1; fi' 2>/dev/null || true
         fi
     "
+    if [[ "${DRY_RUN:-false}" != "true" ]]; then
+        for _sf in "${out}/docker-compose.yml" "${out}/patroni.yml" "${out}/pgbackrest.conf" "${out}/sftpgo.json" "${out}/hooks/ligament-2fa.env" "${out}/seaweedfs/"*.toml "${out}/seaweedfs/s3.json"; do
+            secure_wipe_file "${_sf}" 2>/dev/null || true
+        done
+    fi
 }
 
 # --- Бесшовное обновление UFW без отключения файрвола на живом кластере + 120s Dead-Man's Switch ---
@@ -806,7 +819,7 @@ crlnumber         = ${ca_dir}/crlnumber
 certificate       = ${ca_dir}/ca.crt
 private_key       = ${priv_key}
 default_md        = sha256
-default_days      = 825
+default_days      = 180
 default_crl_days  = 30
 preserve          = no
 unique_subject    = no
@@ -829,6 +842,13 @@ keyUsage = critical, digitalSignature, cRLSign, keyCertSign
 EOF
 }
 
+_init_crl_with_active_ca() {
+    local ca_dir="$1"
+    _write_ca_config "${ca_dir}" "${ACTIVE_CA_KEY}"
+    openssl ca -config "${ca_dir}/openssl-ca.cnf" -gencrl -out "${ca_dir}/crl.pem" 2>/dev/null || true
+    _write_ca_config "${ca_dir}"
+}
+
 ensure_ca_exists() {
     local ca_dir
     ca_dir="$(state_root)/.pki/ca"
@@ -840,6 +860,9 @@ ensure_ca_exists() {
     _write_ca_config "${ca_dir}"
 
     if [[ -f "${ca_dir}/ca.crt" ]] && [[ -f "${ca_dir}/ca.key" || -f "${ca_dir}/ca.key.age" ]]; then
+        if [[ ! -f "${ca_dir}/crl.pem" && "${DRY_RUN:-false}" != "true" ]]; then
+            with_ca_key "${ca_dir}" _init_crl_with_active_ca "${ca_dir}"
+        fi
         return 0
     fi
 
@@ -849,8 +872,11 @@ ensure_ca_exists() {
         -config "${ca_dir}/openssl-ca.cnf" -extensions v3_ca \
         -out "${ca_dir}/ca.crt" -days 3650 \
         -subj "/CN=${PROJECT_NAME} Root CA/O=Ligament"
-    [[ "${DRY_RUN:-false}" != "true" ]] && chmod 600 "${ca_dir}/ca.key"
-    log_warn "  ⚠️  Зашифруйте Root CA ключ командой './${CLI_NAME:-ligactl} secrets encrypt' или храните offline!"
+    if [[ "${DRY_RUN:-false}" != "true" ]]; then
+        chmod 600 "${ca_dir}/ca.key"
+        with_ca_key "${ca_dir}" _init_crl_with_active_ca "${ca_dir}"
+    fi
+    log_warn "  ⚠️  Root CA ключ будет автоматически зашифрован в ca.key.age после развертывания (или храните offline)!"
 }
 
 _sign_csr_with_active_ca() {
@@ -877,8 +903,14 @@ generate_node_certs() {
 
     log_info "Zero-Knowledge Remote-CSR генерация сертификатов для ${name} (${ip})..."
     remote_exec "${ip}" "mkdir -p '${REMOTE_BASE_DIR}/certs/${name}' && chmod 755 '${REMOTE_BASE_DIR}/certs' '${REMOTE_BASE_DIR}/certs/${name}'"
+    remote_copy "${ca_dir}/ca.crt" "${ip}:${REMOTE_BASE_DIR}/certs/ca.crt"
     remote_copy "${ca_dir}/ca.crt" "${ip}:${REMOTE_BASE_DIR}/certs/${name}/ca.crt"
-    remote_exec "${ip}" "chmod 644 '${REMOTE_BASE_DIR}/certs/${name}/ca.crt'"
+    if [[ -f "${ca_dir}/crl.pem" ]]; then
+        remote_copy "${ca_dir}/crl.pem" "${ip}:${REMOTE_BASE_DIR}/certs/${name}/crl.pem"
+        remote_exec "${ip}" "chmod 644 '${REMOTE_BASE_DIR}/certs/ca.crt' '${REMOTE_BASE_DIR}/certs/${name}/ca.crt' '${REMOTE_BASE_DIR}/certs/${name}/crl.pem'"
+    else
+        remote_exec "${ip}" "chmod 644 '${REMOTE_BASE_DIR}/certs/ca.crt' '${REMOTE_BASE_DIR}/certs/${name}/ca.crt'"
+    fi
 
     local san="IP:${ip},IP:127.0.0.1,DNS:${name},DNS:${name}.${CLUSTER_SLUG}.internal,DNS:localhost"
 
@@ -943,7 +975,25 @@ revoke_node_certs() {
         return 0
     fi
     with_ca_key "${ca_dir}" _revoke_certs_with_active_ca "${ca_dir}" "${node_cert_dir}"
-    log_info "  ✅ Сертификаты ${old_name} отозваны в ${ca_dir}/crl.pem"
+    if [[ -f "${ca_dir}/crl.pem" ]]; then
+        local count
+        count=$(get_node_count)
+        for i in $(seq 1 "${count}"); do
+            local cip cname
+            cip=$(get_node_ip "$i"); cname=$(get_node_name "$i")
+            [[ "${cname}" == "${old_name}" ]] && continue
+            remote_copy "${ca_dir}/crl.pem" "${cip}:${REMOTE_BASE_DIR}/certs/${cname}/crl.pem" 2>/dev/null || continue
+            remote_exec "${cip}" "
+                chmod 644 '${REMOTE_BASE_DIR}/certs/${cname}/crl.pem'
+                PCID=\$(cd '${REMOTE_BASE_DIR}' 2>/dev/null && docker compose ps -q patroni 2>/dev/null | head -n1 || true)
+                if [[ -n \"\${PCID}\" ]]; then
+                    docker exec \"\${PCID}\" bash -c 'cp -L /certs/crl.pem /run/pg-certs/crl.pem && chown postgres:postgres /run/pg-certs/crl.pem && chmod 644 /run/pg-certs/crl.pem' 2>/dev/null || true
+                    docker exec -u postgres \"\${PCID}\" psql -U postgres -c 'SELECT pg_reload_conf();' >/dev/null 2>&1 || true
+                fi
+            " 2>/dev/null || true
+        done
+    fi
+    log_info "  ✅ Сертификаты ${old_name} отозваны и CRL обновлен на живых узлах (${ca_dir}/crl.pem)"
 }
 
 distribute_ssh_keys_to_node() {
@@ -1046,10 +1096,11 @@ cloudflare_dns_update() {
         return 0
     fi
 
-    python3 - "${DOMAIN}" "${target_ip}" "${DNS_TTL:-60}" "${CF_DNS_API_TOKEN}" "${CLOUDFLARE_ZONE_ID:-}" <<'PYEOF'
-import json, sys, urllib.request
+    python3 - "${DOMAIN}" "${target_ip}" "${DNS_TTL:-60}" "${CLOUDFLARE_ZONE_ID:-}" <<'PYEOF'
+import json, os, sys, urllib.request
 
-domain, ip, ttl, token, zone_id = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5]
+domain, ip, ttl, zone_id = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+token = os.environ["CF_DNS_API_TOKEN"]
 headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
 def api(method, path, data=None):
@@ -1104,9 +1155,10 @@ assign_floating_ip() {
     case "${provider}" in
         hetzner)
             [[ -n "${HETZNER_CLOUD_TOKEN:-}" && -n "${fip_id}" ]] || { log_warn "Не заданы HETZNER_CLOUD_TOKEN или FLOATING_IP_ID"; return 1; }
-            python3 - "${HETZNER_CLOUD_TOKEN}" "${fip_id}" "${target_ip}" <<'PYEOF'
-import json, sys, urllib.request
-tok, fip_id, ip = sys.argv[1:]
+            python3 - "${fip_id}" "${target_ip}" <<'PYEOF'
+import json, os, sys, urllib.request
+fip_id, ip = sys.argv[1:]
+tok = os.environ["HETZNER_CLOUD_TOKEN"]
 hdr = {"Authorization": f"Bearer {tok}", "Content-Type": "application/json"}
 req = urllib.request.Request("https://api.hetzner.cloud/v1/servers", headers=hdr)
 servers = json.loads(urllib.request.urlopen(req, timeout=10).read().decode()).get("servers", [])
@@ -1125,9 +1177,10 @@ PYEOF
             ;;
         digitalocean)
             [[ -n "${DO_API_TOKEN:-}" && -n "${fip_id}" ]] || { log_warn "Не заданы DO_API_TOKEN или FLOATING_IP_ID"; return 1; }
-            python3 - "${DO_API_TOKEN}" "${fip_id}" "${target_ip}" <<'PYEOF'
-import json, sys, urllib.request
-tok, fip, ip = sys.argv[1:]
+            python3 - "${fip_id}" "${target_ip}" <<'PYEOF'
+import json, os, sys, urllib.request
+fip, ip = sys.argv[1:]
+tok = os.environ["DO_API_TOKEN"]
 hdr = {"Authorization": f"Bearer {tok}", "Content-Type": "application/json"}
 req = urllib.request.Request("https://api.digitalocean.com/v2/droplets?per_page=200", headers=hdr)
 droplets = json.loads(urllib.request.urlopen(req, timeout=10).read().decode()).get("droplets", [])
@@ -1231,16 +1284,17 @@ sftpgo_provision_s3_folders() {
     fi
 
     log_info "Настройка S3 Virtual Folders (sftp-work, sftp-worm) в SFTPGo через REST API..."
-    remote_exec_stdin "${node_ip}" \
-        "${SFTPGO_ADMIN_USERNAME:-admin}" "${SFTPGO_ADMIN_PASSWORD}" \
-        "${SWFS_S3_PORT:-8333}" "sftpgo-s3-access" "${SWFS_S3_SECRET_KEY_SFTPGO}" <<'REMOTE_PROV'
+    remote_exec_env_stdin "${node_ip}" "SFTPGO_ADMIN_PASSWORD,SWFS_S3_SECRET_KEY_SFTPGO" \
+        "${SFTPGO_ADMIN_USERNAME:-admin}" "${SWFS_S3_PORT:-8333}" "sftpgo-s3-access" <<'REMOTE_PROV'
 set -euo pipefail
-ADMIN_USER="$1"; ADMIN_PASS="$2"; S3_PORT="$3"; S3_AK="$4"; S3_SK="$5"
+ADMIN_USER="$1"; S3_PORT="$2"; S3_AK="$3"
 
-python3 - "${ADMIN_USER}" "${ADMIN_PASS}" "${S3_PORT}" "${S3_AK}" "${S3_SK}" <<'PYEOF'
-import base64, json, sys, urllib.error, urllib.request
+python3 - "${ADMIN_USER}" "${S3_PORT}" "${S3_AK}" <<'PYEOF'
+import base64, json, os, sys, urllib.error, urllib.request
 
-user, pw, s3_port, ak, sk = sys.argv[1:]
+user, s3_port, ak = sys.argv[1:]
+pw = os.environ["SFTPGO_ADMIN_PASSWORD"]
+sk = os.environ["SWFS_S3_SECRET_KEY_SFTPGO"]
 base = "http://127.0.0.1:8081/api/v2"
 
 def req(method, path, body=None, headers=None):

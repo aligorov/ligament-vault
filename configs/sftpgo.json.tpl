@@ -61,6 +61,7 @@
         "address": "",
         "apply_proxy_config": false,
         "tls_mode": 1,
+        "min_tls_version": 12,
         "force_passive_ip": "${NODE_IP}",
         "passive_ip_overrides": [],
         "client_auth_type": 0,
@@ -151,7 +152,24 @@
         "parallelism": 2
       }
     },
-    "password_validation": {},
+    "password_validation": {
+      "admins": {
+        "min_entropy": 0,
+        "length": 12,
+        "uppers": 1,
+        "lowers": 1,
+        "digits": 1,
+        "specials": 1
+      },
+      "users": {
+        "min_entropy": 0,
+        "length": 12,
+        "uppers": 1,
+        "lowers": 1,
+        "digits": 1,
+        "specials": 1
+      }
+    },
     "is_shared": 1,
     "node": {
       "host": "",

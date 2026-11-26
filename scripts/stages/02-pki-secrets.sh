@@ -55,4 +55,16 @@ setup_ssh_host_keys() {
 setup_ssh_host_keys
 for_each_node distribute_ssh_keys_to_node
 
+ca_key_plain="$(state_root)/.pki/ca/ca.key"
+if [[ "${DRY_RUN:-false}" != "true" && -f "$(state_root)/secrets.env.age" && -f "${ca_key_plain}" ]] && command -v age &>/dev/null && command -v age-keygen &>/dev/null; then
+    age_key=$(resolve_age_key_file)
+    if [[ -f "${age_key}" ]]; then
+        recipient=$(age-keygen -y "${age_key}")
+        age -r "${recipient}" -o "$(state_root)/.pki/ca/ca.key.age" "${ca_key_plain}"
+        chmod 600 "$(state_root)/.pki/ca/ca.key.age"
+        secure_wipe_file "${ca_key_plain}"
+        log_info "🔒 Приватный ключ Root CA зашифрован в ca.key.age (открытый ca.key удален с диска)"
+    fi
+fi
+
 log_info "✅ Стадия 2 завершена: PKI, CRL-база и общие SSH host-keys развернуты"

@@ -52,7 +52,12 @@ probe_edge_node() {
     if [[ "${DRY_RUN:-false}" == "true" ]]; then
         return 0
     fi
-    curl -sf --max-time 5 --insecure "https://${ip}:${HTTPS_PORT:-443}/web/client/login" >/dev/null 2>&1 || return 1
+    local hport="${HTTPS_PORT:-443}"
+    if [[ -n "${DOMAIN:-}" && "${DOMAIN}" != "files.company.com" ]]; then
+        curl -sf --max-time 5 --resolve "${DOMAIN}:${hport}:${ip}" "https://${DOMAIN}:${hport}/web/client/login" >/dev/null 2>&1 || return 1
+    else
+        curl -sf --max-time 5 --insecure "https://${ip}:${hport}/web/client/login" >/dev/null 2>&1 || return 1
+    fi
     nc -z -w 4 "${ip}" "${SFTP_PORT:-2022}" >/dev/null 2>&1 || return 1
     return 0
 }
@@ -96,7 +101,9 @@ check_failback_gates() {
     if [[ "${DRY_RUN:-false}" == "true" ]]; then
         pg_ok="OK"
     else
-        pg_ok=$(curl -sf --max-time 5 "http://${preferred_ip}:${PATRONI_API_PORT:-8008}/patroni" | python3 -c '
+        local ca_opt=()
+        [[ -f "${SCRIPT_DIR}/prometheus/ca.crt" ]] && ca_opt=(--cacert "${SCRIPT_DIR}/prometheus/ca.crt")
+        pg_ok=$(curl -sf --max-time 5 "${ca_opt[@]}" "https://${preferred_ip}:${PATRONI_API_PORT:-8008}/patroni" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
 if d.get("state") != "running":

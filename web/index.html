@@ -158,7 +158,7 @@
     </div>
     <div style="display:flex;gap:8px;align-items:center;">
       <button class="btn btn-sec btn-sm" onclick="runTask('self-update')" title="Подтянуть свежую версию с GitHub">⬇️ Обновить панель</button>
-      <a id="webClientLink" href="#" target="_blank" class="btn btn-sec btn-sm">Файловый клиент (:443) ↗</a>
+      <a id="webClientLink" href="#" target="_blank" rel="noopener noreferrer" class="btn btn-sec btn-sm">Файловый клиент (:443) ↗</a>
       <button class="btn btn-sec btn-sm" onclick="logout()">Выйти</button>
     </div>
   </header>
@@ -229,7 +229,7 @@
             <label>Квота (ГБ, 0 = без лимита)</label>
             <input id="uQuota" type="number" value="50" min="0" />
             <label>Пароль (оставьте пустым для автогенерации)</label>
-            <input id="uPass" placeholder="Сгенерируется автоматически" />
+            <input id="uPass" type="password" placeholder="Сгенерируется автоматически" />
             <label>Публичный SSH-ключ (опционально)</label>
             <textarea id="uKey" rows="2" placeholder="ssh-ed25519 AAAA..."></textarea>
             <label style="display:flex;align-items:center;gap:8px;margin-top:12px;color:var(--text);">
@@ -435,6 +435,24 @@
   </div>
 </div>
 
+<!-- МОДАЛЬНОЕ ОКНО ЗАМЕНЫ СЕРВЕРА (masked password input) -->
+<div id="replaceModal" class="hidden" style="position:fixed;inset:0;background:rgba(5,8,15,.78);z-index:100;display:flex;align-items:center;justify-content:center;padding:16px;">
+  <div class="card" style="max-width:440px;width:100%;margin:0;border-color:#3556a8;">
+    <h3 id="repTitle">Замена узла</h3>
+    <form id="replaceForm">
+      <input id="repNode" type="hidden" />
+      <label>Новый IPv4 адрес VPS</label>
+      <input id="repNewIp" placeholder="198.51.100.25" required />
+      <label>Пароль root (опционально, если SSH-ключ уже прописан)</label>
+      <input id="repPass" type="password" placeholder="Пароль root от хостера" />
+      <div class="btn-row" style="justify-content:flex-end;">
+        <button type="button" class="btn btn-sec" onclick="closeReplaceModal()">Отмена</button>
+        <button type="submit" class="btn btn-ok">Заменить узел</button>
+      </div>
+    </form>
+  </div>
+</div>
+
 <script>
   let CSRF = "";
   let CUR_CONFIG = {};
@@ -593,12 +611,26 @@
     } catch (e) { alert("Ошибка: " + e.message); }
   }
 
-  async function replaceNodePrompt(node, oldIp) {
-    const newIp = prompt(`Введите новый IP адрес для замены ${node} (вместо ${oldIp}):`);
-    if (!newIp) return;
-    const pw = prompt(`Пароль root от нового VPS ${newIp} (или оставьте пустым, если SSH-ключ уже прописан):`) || "";
+  function replaceNodePrompt(node, oldIp) {
+    document.getElementById("repNode").value = node;
+    document.getElementById("repTitle").textContent = `Замена узла ${node} (вместо ${oldIp})`;
+    document.getElementById("repNewIp").value = "";
+    document.getElementById("repPass").value = "";
+    document.getElementById("replaceModal").classList.remove("hidden");
+  }
+
+  function closeReplaceModal() {
+    document.getElementById("replaceModal").classList.add("hidden");
+  }
+
+  document.getElementById("replaceForm").onsubmit = async (e) => {
+    e.preventDefault();
+    const node = document.getElementById("repNode").value;
+    const newIp = document.getElementById("repNewIp").value.trim();
+    const pw = document.getElementById("repPass").value;
+    closeReplaceModal();
     try {
-      const res = await api("/api/v1/nodes/replace", { method: "POST", body: JSON.stringify({ node, new_ip: newIp.trim(), password: pw }) });
+      const res = await api("/api/v1/nodes/replace", { method: "POST", body: JSON.stringify({ node, new_ip: newIp, password: pw }) });
       if (res.task_id) {
         activeTaskId = res.task_id; pollOffset = 0;
         document.getElementById("consoleOut").textContent = "";
@@ -607,8 +639,8 @@
       } else {
         await loadOverview(false);
       }
-    } catch (e) { alert("Ошибка: " + e.message); }
-  }
+    } catch (e2) { alert("Ошибка: " + e2.message); }
+  };
 
   async function loadUsers() {
     const tbody = document.getElementById("usersBody");
