@@ -905,14 +905,14 @@ ensure_ssh_peer_bridge() {
         dnat_pairs+="${dport}:${lport} "
     done
 
-    local client_ip server_ip client_name server_name pubkey unit_name
+    local client_ip server_ip client_name pubkey unit_name
     if [[ "${mode}" == "L" ]]; then
         client_ip="${src_ip}"; client_name="${src_name}"
-        server_ip="${dst_ip}"; server_name="${dst_name}"
+        server_ip="${dst_ip}"
         unit_name="${CLUSTER_SLUG}-bridge-to-${dst_name}"
     else
         client_ip="${dst_ip}"; client_name="${dst_name}"
-        server_ip="${src_ip}"; server_name="${src_name}"
+        server_ip="${src_ip}"
         unit_name="${CLUSTER_SLUG}-bridge-push-${src_name}"
     fi
 
