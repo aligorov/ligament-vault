@@ -799,6 +799,9 @@ class PanelHandler(BaseHTTPRequestHandler):
                 name = f"node{next_idx}"
                 existing.append(f"{ip}:{dc}:{name}")
                 update_env_file(cenv_path, {"CLUSTER_NODES": " ".join(existing), "ADMIN_SSH_PORT": str(ssh_port)})
+                ck = os.path.join(CONFIG_ROOT, ".state", "checkpoints.install")
+                if os.path.exists(ck):
+                    os.remove(ck)
 
             self.send_json(200, {"ok": True, "message": msg, "cluster_nodes": " ".join(existing), "joined_live": False})
             return
@@ -862,6 +865,9 @@ class PanelHandler(BaseHTTPRequestHandler):
                     else:
                         updated.append(e)
                 update_env_file(cenv_path, {"CLUSTER_NODES": " ".join(updated)})
+                ck = os.path.join(CONFIG_ROOT, ".state", "checkpoints.install")
+                if os.path.exists(ck):
+                    os.remove(ck)
                 self.send_json(200, {"ok": True, "replaced_preinstall": True, "cluster_nodes": " ".join(updated)})
                 return
             ligactl = os.path.join(REPO_DIR, "ligactl")

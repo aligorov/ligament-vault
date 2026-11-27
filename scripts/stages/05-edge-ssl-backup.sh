@@ -46,7 +46,7 @@ else
             --dns "${DNS_PROVIDER:-cloudflare}" \
             --domains "${DOMAIN}" \
             --path /lego \
-            run
+            run || log_warn "⚠️  lego DNS-01 не смог выпустить публичный сертификат — будет временно использован self-signed SSL"
     fi
     rm -f "${LEGO_ENV}"
 fi

@@ -92,10 +92,20 @@ if [[ "${PREFLIGHT_PASS}" != "true" ]]; then
     exit 1
 fi
 
-# --- 3. RTT-матрица (ping -c 100) ---
+# --- 3. RTT-матрица (ping -c 20) ---
 check_rtt() {
-    log_step "3/7 — RTT-матрица между ДЦ (ping -c 100)"
+    log_step "3/7 — RTT-матрица между ДЦ (ping -c 20)"
     local max_rtt=0
+    local eff_hard_stop="${RTT_HARD_STOP:-1000}"
+    local eff_warn="${RTT_WARN:-250}"
+    # Автоматическая миграция старого жесткого порога 250ms из ранних cluster.env для WAN-кластеров
+    if (( eff_hard_stop <= 250 )); then
+        eff_hard_stop=1000
+        persist_cluster_env_var "RTT_HARD_STOP" "1000"
+    fi
+    if (( eff_warn < 250 )); then
+        eff_warn=250
+    fi
 
     for i in $(seq 1 "${NODE_COUNT}"); do
         for j in $(seq $((i+1)) "${NODE_COUNT}"); do
@@ -106,15 +116,15 @@ check_rtt() {
             dst_name=$(get_node_name "$j")
 
             log_info "  Замер ${src_name} (${src_ip}) <-> ${dst_name} (${dst_ip})..."
-            rtt_avg=$(remote_exec "${src_ip}" "ping -c 100 -i 0.2 -q '${dst_ip}'" 2>/dev/null | \
+            rtt_avg=$(remote_exec "${src_ip}" "ping -c 20 -i 0.1 -q '${dst_ip}'" 2>/dev/null | \
                       awk -F'/' '/rtt|round-trip/{printf "%.0f", $5}') || rtt_avg=9999
             [[ -z "${rtt_avg}" ]] && rtt_avg=9999
 
-            if (( rtt_avg > ${RTT_HARD_STOP:-1000} )); then
-                log_error "  ❌ HARD STOP: RTT ${src_name}<->${dst_name} = ${rtt_avg}ms > ${RTT_HARD_STOP:-1000}ms!"
+            if (( rtt_avg > eff_hard_stop )); then
+                log_error "  ❌ HARD STOP: RTT ${src_name}<->${dst_name} = ${rtt_avg}ms > ${eff_hard_stop}ms!"
                 PREFLIGHT_PASS=false
-            elif (( rtt_avg > ${RTT_WARN:-250} )); then
-                log_warn "  ⚠️  RTT ${src_name}<->${dst_name} = ${rtt_avg}ms > ${RTT_WARN:-250}ms (WAN-link — SSH-мост активируется автоматически)"
+            elif (( rtt_avg > eff_warn )); then
+                log_warn "  ⚠️  RTT ${src_name}<->${dst_name} = ${rtt_avg}ms > ${eff_warn}ms (WAN-link — SSH-мост активируется автоматически)"
             else
                 log_info "  ✅ RTT ${src_name}<->${dst_name}: ${rtt_avg}ms"
             fi

@@ -11,7 +11,7 @@ LABEL maintainer="ligament-infra"
 LABEL description="PG16 + Patroni + etcd3 client + pgbackrest для Ligament Vault"
 
 # --- Системные зависимости и gosu для безопасного сброса привилегий ---
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get -o Acquire::Retries=5 update && apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
     python3 \
     python3-pip \
     python3-psycopg2 \
@@ -30,7 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Patroni ---
-RUN python3 -m pip install --no-cache-dir --break-system-packages \
+RUN python3 -m pip install --no-cache-dir --break-system-packages --retries 5 --timeout 30 \
     patroni[etcd3]==3.3.* \
     python-etcd \
     && patroni --version

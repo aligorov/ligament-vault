@@ -21,6 +21,8 @@ log_step "Стадия 4: Bootstrap SeaweedFS"
 NODE1_IP=$(get_node_ip 1)
 MASTER_PEERS=$(build_swfs_master_peers)
 
+for_each_node ensure_node_base_prereqs
+
 # 0. Убеждаемся, что свежие отрендеренные конфиги лежат на всех нодах
 ensure_swfs_configs_cb() {
     render_node_configs "$1" "$2" "$3" "$4" "existing"
@@ -43,9 +45,9 @@ start_master_cb() {
         log_info "  Пропуск Master на ${name} (edge-нода)"
         return 0
     fi
-    remote_compose_up "${ip}" "" swfs-master
+    remote_compose_up "${ip}" "--force-recreate" swfs-master
     if [[ "${DRY_RUN:-false}" != "true" ]]; then
-        remote_exec "${ip}" "for _i in 1 2 3 4 5 6 7 8 9 10; do nc -z 127.0.0.1 ${SWFS_MASTER_PORT:-9333} 2>/dev/null && exit 0; sleep 1; done; exit 0" >/dev/null 2>&1 || true
+        remote_exec "${ip}" "for _i in 1 2 3 4 5 6 7 8 9 10; do python3 -c 'import socket; s=socket.create_connection((\"127.0.0.1\", ${SWFS_MASTER_PORT:-9333}), 1); s.close()' 2>/dev/null && exit 0; sleep 1; done; exit 0" >/dev/null 2>&1 || true
     fi
 }
 for_each_node start_master_cb
@@ -63,7 +65,7 @@ ensure_swfs_mesh_cb() {
         is_quorum_node "${j}" "${dst_name}" || continue
         if ! remote_tcp_probe "${src_ip}" "${dst_ip}" "${SWFS_MASTER_PORT:-9333}" 5 \
             || ! remote_tcp_probe "${src_ip}" "${dst_ip}" "$(( ${SWFS_MASTER_PORT:-9333} + 10000 ))" 5; then
-            if remote_exec "${dst_ip}" "nc -z 127.0.0.1 ${SWFS_MASTER_PORT:-9333}" >/dev/null 2>&1; then
+            if remote_tcp_probe "${dst_ip}" "127.0.0.1" "${SWFS_MASTER_PORT:-9333}" 2; then
                 log_warn "  ⚠️  Порты SeaweedFS Master (${SWFS_MASTER_PORT:-9333}/gRPC) на ${dst_name} недоступны с ${src_name} — поднимаем прозрачный SSH-мост..."
                 ensure_ssh_peer_bridge "${src_ip}" "${src_name}" "${dst_ip}" "${dst_name}"
             fi
@@ -81,7 +83,7 @@ log_step "Запуск SeaweedFS Volume Servers"
 start_volume_cb() {
     local ip="$1" dc="$2" name="$3"
     log_info "  Старт swfs-volume на ${name} (-dataCenter=${dc})..."
-    remote_compose_up "${ip}" "" swfs-volume
+    remote_compose_up "${ip}" "--force-recreate" swfs-volume
     wait_for_remote_health "${ip}" "SWFS Volume ${name}" "curl -sf http://127.0.0.1:${SWFS_VOLUME_PORT:-8082}/healthz || curl -sf http://127.0.0.1:${SWFS_VOLUME_PORT:-8082}/status" 20 2 \
         "cd '${REMOTE_BASE_DIR}' && docker compose logs --tail 40 swfs-volume || true"
 }
@@ -99,7 +101,7 @@ ensure_volume_mesh_cb() {
         [[ "${dst_ip}" == "${src_ip}" ]] && continue
         if ! remote_tcp_probe "${src_ip}" "${dst_ip}" "${SWFS_VOLUME_PORT:-8082}" 5 \
             || ! remote_tcp_probe "${src_ip}" "${dst_ip}" "$(( ${SWFS_VOLUME_PORT:-8082} + 10000 ))" 5; then
-            if remote_exec "${dst_ip}" "nc -z 127.0.0.1 ${SWFS_VOLUME_PORT:-8082}" >/dev/null 2>&1; then
+            if remote_tcp_probe "${dst_ip}" "127.0.0.1" "${SWFS_VOLUME_PORT:-8082}" 2; then
                 log_warn "  ⚠️  Порты SeaweedFS Volume (${SWFS_VOLUME_PORT:-8082}/gRPC) на ${dst_name} недоступны с ${src_name} — поднимаем SSH-мост..."
                 ensure_ssh_peer_bridge "${src_ip}" "${src_name}" "${dst_ip}" "${dst_name}"
             fi
@@ -118,19 +120,19 @@ start_filer_s3_cb() {
     wait_for_remote_health "${ip}" "SWFS Filer ${name}" \
         "curl -sf http://127.0.0.1:${SWFS_FILER_PORT:-8888}/healthz || curl -sf http://127.0.0.1:${SWFS_FILER_METRICS_PORT:-9326}/metrics >/dev/null" 25 2 \
         "cd '${REMOTE_BASE_DIR}' && docker compose logs --tail 40 swfs-filer || true"
-    wait_for_remote_health "${ip}" "SWFS S3 ${name}" "nc -z 127.0.0.1 ${SWFS_S3_PORT:-8333}" 20 2 \
+    wait_for_remote_health "${ip}" "SWFS S3 ${name}" "python3 -c 'import socket; s=socket.create_connection((\"127.0.0.1\", ${SWFS_S3_PORT:-8333}), 2); s.close()'" 20 2 \
         "cd '${REMOTE_BASE_DIR}' && docker compose logs --tail 40 swfs-s3 || true"
 }
 for_each_node start_filer_s3_cb
 
-# 4. fs.configure (с полным списком мастеров)
+# 4. fs.configure (с полным списком мастеров и локальным filer)
 log_step "Применение fs.configure (volumeGrowthCount=${SWFS_VOLUME_GROWTH_COUNT:-2}, replication=${SWFS_DEFAULT_REPLICATION:-100})"
-remote_exec_stdin "${NODE1_IP}" "${REMOTE_BASE_DIR}" "${SWFS_VOLUME_GROWTH_COUNT:-2}" "${SWFS_DEFAULT_REPLICATION:-100}" "${MASTER_PEERS}" <<'REMOTE_FS_CONF'
+remote_exec_stdin "${NODE1_IP}" "${REMOTE_BASE_DIR}" "${SWFS_VOLUME_GROWTH_COUNT:-2}" "${SWFS_DEFAULT_REPLICATION:-100}" "${MASTER_PEERS}" "${SWFS_FILER_PORT:-8888}" <<'REMOTE_FS_CONF'
 set -euo pipefail
-BASE_DIR="$1"; VGC="$2"; REPL="$3"; MASTERS="$4"
+BASE_DIR="$1"; VGC="$2"; REPL="$3"; MASTERS="$4"; FPORT="$5"
 FILER_CID=$(cd "${BASE_DIR}" && docker compose ps -q swfs-filer | head -n1)
 [[ -n "${FILER_CID}" ]] || { echo "swfs-filer container not found" >&2; exit 1; }
-docker exec -i "${FILER_CID}" weed shell -master="${MASTERS}" <<WEED
+docker exec -i "${FILER_CID}" weed shell -master="${MASTERS}" -filer="127.0.0.1:${FPORT}" <<WEED
 fs.configure -locationPrefix=/ -volumeGrowthCount=${VGC} -replication=${REPL} -apply
 WEED
 REMOTE_FS_CONF
@@ -235,7 +237,8 @@ remote_compose_up "${admin_ip}" "" swfs-admin
 if [[ -n "${BACKUP_S3_ACCESS_KEY:-}" && "${BACKUP_S3_ACCESS_KEY}" != *FIXME* ]]; then
     remote_compose_up "${admin_ip}" "" swfs-backup
 fi
-wait_for_remote_health "${admin_ip}" "SWFS Admin" "nc -z 127.0.0.1 ${SWFS_ADMIN_PORT:-12535}" 20 2 \
+wait_for_remote_health "${admin_ip}" "SWFS Admin" \
+    "python3 -c 'import socket; s=socket.create_connection((\"127.0.0.1\", ${SWFS_ADMIN_PORT:-12535}), 2); s.close()'" 20 2 \
     "cd '${REMOTE_BASE_DIR}' && docker compose logs --tail 40 swfs-admin || true"
 
 admin_name=$(get_node_name "${admin_idx}")
@@ -244,7 +247,7 @@ start_worker_cb() {
     if [[ "${DRY_RUN:-false}" != "true" && "${ip}" != "${admin_ip}" ]]; then
         if ! remote_tcp_probe "${ip}" "${admin_ip}" "${SWFS_ADMIN_PORT:-12535}" 5 \
             || ! remote_tcp_probe "${ip}" "${admin_ip}" "${SWFS_ADMIN_GRPC_PORT:-22535}" 5; then
-            if remote_exec "${admin_ip}" "nc -z 127.0.0.1 ${SWFS_ADMIN_PORT:-12535}" >/dev/null 2>&1; then
+            if remote_tcp_probe "${admin_ip}" "127.0.0.1" "${SWFS_ADMIN_PORT:-12535}" 2; then
                 log_warn "  ⚠️  Порты SWFS Admin (${SWFS_ADMIN_PORT:-12535}/gRPC) на ${admin_name} недоступны с ${name} — поднимаем SSH-мост..."
                 ensure_ssh_peer_bridge "${ip}" "${name}" "${admin_ip}" "${admin_name}"
             fi

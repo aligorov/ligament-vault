@@ -158,6 +158,7 @@ services:
       -metricsPort=${SWFS_MASTER_METRICS_PORT}
       -peers=${SWFS_MASTER_PEERS}
       -defaultReplication=${SWFS_DEFAULT_REPLICATION}
+      -volumeSizeLimitMB=${SWFS_VOLUME_SIZE_LIMIT_MB}
       -mdir=/master-data
       -electionTimeout=10s
       -telemetry=false

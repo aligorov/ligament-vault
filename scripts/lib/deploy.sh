@@ -507,6 +507,7 @@ export_node_render_vars() {
     done
     export SWFS_VOLUME_MOUNTS="${vol_mounts}"
     export SWFS_VOLUME_MAX="${SWFS_VOLUME_MAX_OVERRIDE:-${vol_max}}"
+    export SWFS_VOLUME_SIZE_LIMIT_MB="${SWFS_VOLUME_SIZE_LIMIT_MB:-256}"
 
     if (( $(get_node_count) >= 3 && ${ETCD_ELECTION_TIMEOUT:-2500} <= 2500 )); then
         export ETCD_HEARTBEAT_INTERVAL=350
@@ -800,6 +801,13 @@ print(" ".join(sorted(seen)))
 PYPORTS
     )
     ufw --force reset >/dev/null 2>&1
+fi
+
+# Если на сервере отключен IPv6 в ядре / недоступен ip6tables — отключаем IPV6 в UFW во избежание ошибки ufw-init!
+if [[ -f /etc/default/ufw ]]; then
+    if [[ ! -d /proc/sys/net/ipv6 ]] || ! ip6tables -L -n >/dev/null 2>&1; then
+        sed -i 's/^IPV6=.*/IPV6=no/' /etc/default/ufw || true
+    fi
 fi
 
 # Если на сервере включен IP forwarding (например, AmneziaWG / WireGuard / Docker routing) — не блокируем транзитный трафик!
@@ -1290,11 +1298,14 @@ fi
 
 # Белый список узлов кластера в fail2ban
 if [[ -d /etc/fail2ban/jail.d ]]; then
+    F2B_BACKEND=""
+    [[ ! -f /var/log/auth.log ]] && F2B_BACKEND="backend = systemd"
     cat > /etc/fail2ban/jail.d/sshd.conf <<F2B
 [sshd]
 enabled = true
 port = ${SSH_PORT}
 filter = sshd
+${F2B_BACKEND}
 ignoreip = 127.0.0.1/8 ::1 ${PEER_IPS}
 maxretry = 6
 bantime = 3600
@@ -1336,13 +1347,13 @@ BASE_DIR="$1"; SSH_PORT="$2"; SFTP_TMP="$3"; SFTP_DATA="$4"; SWFS_DIR="$5"; PG_D
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq chrony fail2ban ufw jq curl python3 python3-yaml netcat-openbsd conntrack iproute2
+apt-get install -y -qq chrony fail2ban python3-systemd ufw jq curl python3 python3-yaml netcat-openbsd conntrack iproute2
 if ! command -v docker >/dev/null 2>&1; then
     curl -fsSL https://get.docker.com | sh
     systemctl enable --now docker
 fi
 
-systemctl enable --now chrony
+systemctl enable --now chrony 2>/dev/null || echo "WARN: chrony skipped (system clock managed by host)" >&2
 
 if [[ -s /root/.ssh/authorized_keys ]]; then
     mkdir -p /etc/ssh/sshd_config.d
@@ -1367,7 +1378,8 @@ net.ipv4.ip_unprivileged_port_start = 21
 net.ipv4.tcp_tw_reuse = 1
 vm.swappiness = 1
 SYSCTL
-sysctl --system >/dev/null 2>&1
+sysctl -w net.ipv4.ip_unprivileged_port_start=21 >/dev/null 2>&1 || true
+sysctl --system >/dev/null 2>&1 || true
 
 mkdir -p /etc/docker
 NEW_DAEMON='{
@@ -1377,34 +1389,49 @@ NEW_DAEMON='{
     "max-file": "3"
   }
 }'
-OLD_DAEMON=$(cat /etc/docker/daemon.json 2>/dev/null || echo "")
-if [[ "${OLD_DAEMON}" != "${NEW_DAEMON}" ]]; then
+if [[ ! -f /etc/docker/daemon.json ]]; then
     printf "%s\n" "${NEW_DAEMON}" > /etc/docker/daemon.json
-    systemctl restart docker 2>/dev/null || true
+    if [[ -z "$(docker ps -q 2>/dev/null || true)" ]]; then
+        systemctl restart docker 2>/dev/null || true
+    fi
 fi
 
+F2B_BACKEND=""
+[[ ! -f /var/log/auth.log ]] && F2B_BACKEND="backend = systemd"
+mkdir -p /etc/fail2ban/jail.d
 cat > /etc/fail2ban/jail.d/sshd.conf <<F2B
 [sshd]
 enabled = true
 port = ${SSH_PORT}
 filter = sshd
+${F2B_BACKEND}
 ignoreip = 127.0.0.1/8 ::1 ${PEER_IPS}
 maxretry = 6
 bantime = 3600
 findtime = 600
 F2B
-systemctl enable --now fail2ban
-systemctl restart fail2ban
+systemctl enable --now fail2ban 2>/dev/null || true
+systemctl restart fail2ban 2>/dev/null || true
 
 mkdir -p "${BASE_DIR}/configs/seaweedfs" "${BASE_DIR}/certs/ssl" "${BASE_DIR}/ssh-host-keys" "${BASE_DIR}/hooks" \
          /var/lib/node_exporter/textfile_collector \
          "${SFTP_TMP}" "${SFTP_DATA}/data" "${SFTP_DATA}/backups" "${SWFS_DIR}" "${PG_DIR}" "${ETCD_DIR}" "${SWFS_MDIR}"
-chown -R 1000:1000 "${SFTP_TMP}" "${SFTP_DATA}" "${BASE_DIR}/hooks"
+chown -R 1000:1000 "${SFTP_TMP}" "${SFTP_DATA}" "${SWFS_DIR}" "${SWFS_MDIR}" "${BASE_DIR}/hooks"
 REMOTE_HARDEN
 
     tune_node_wan_and_swap "${ip}" "${dc}" "${name}"
     harden_node_ufw "${ip}" "${dc}" "${name}" "${idx}"
     log_info "  ✅ Хост ${name} готов"
+}
+
+# Гарантирует базовые пакеты и sysctl на узлах, добавленных/замененных после прохождения Стадии 1 (--resume)
+ensure_node_base_prereqs() {
+    local ip="$1" dc="$2" name="$3" idx="$4"
+    [[ "${DRY_RUN:-false}" == "true" ]] && return 0
+    if ! remote_exec "${ip}" "command -v jq >/dev/null && command -v ufw >/dev/null && command -v nc >/dev/null && command -v conntrack >/dev/null && python3 -c 'import yaml' 2>/dev/null" >/dev/null 2>&1; then
+        log_info "  ⚙️  Доустановка базовых системных пакетов на ${name} (${ip})..."
+        harden_node_full "${ip}" "${dc}" "${name}" "${idx}"
+    fi
 }
 
 # --- Установка ограниченного forced-command SSH-хелпера для Арбитра (вкл. TCP RST fencing) ---
@@ -1421,9 +1448,10 @@ install_arbiter_helper_on_node() {
         "${SFTP_PORT:-2022}" \
         "${FTPS_PORT:-21}" \
         "${HTTPS_PORT:-443}" \
-        "${master_peers}" <<'REMOTE_ARB_HELPER'
+        "${master_peers}" \
+        "${SWFS_FILER_PORT:-8888}" <<'REMOTE_ARB_HELPER'
 set -euo pipefail
-PUBKEY="$1"; BASE_DIR="$2"; SLUG="$3"; EC_PORT="$4"; SFTP_P="$5"; FTPS_P="$6"; HTTPS_P="$7"; MASTER_PEERS="$8"
+PUBKEY="$1"; BASE_DIR="$2"; SLUG="$3"; EC_PORT="$4"; SFTP_P="$5"; FTPS_P="$6"; HTTPS_P="$7"; MASTER_PEERS="$8"; FILER_P="$9"
 
 cat > /usr/local/bin/arbiter-helper.sh <<EOF
 #!/usr/bin/env bash
@@ -1451,7 +1479,7 @@ case "\${CMD}" in
         fi
         FILER_CID=\$(cd "${BASE_DIR}" && docker compose ps -q swfs-filer | head -n1 || true)
         [[ -n "\${FILER_CID}" ]] || { echo "FILER_DOWN"; exit 1; }
-        FIX_OUT=\$(docker exec -i "\${FILER_CID}" weed shell -master="${MASTER_PEERS}" <<< "volume.fix.replication" 2>/dev/null || echo "ERR")
+        FIX_OUT=\$(docker exec -i "\${FILER_CID}" weed shell -master="${MASTER_PEERS}" -filer="127.0.0.1:${FILER_P}" <<< "volume.fix.replication" 2>/dev/null || echo "ERR")
         if echo "\${FIX_OUT}" | grep -qiE "replicating|copying|deleting|under-replicated|over-replicated|flag provided|\bERR\b|error:"; then
             echo "SWFS_DIRTY"
             exit 1
@@ -1747,17 +1775,44 @@ REMOTE_CACHE_CHK
         return 0
     fi
 
+    # Если на другой ноде кластера актуальный образ Patroni уже собран — копируем его по P2P SSH за ~15с без повторной сборки!
+    if [[ "${DRY_RUN:-false}" != "true" ]]; then
+        local peer_ip ssh_opts peer_hit
+        ssh_opts=$(_ssh_base_opts)
+        if [[ -n "${ADMIN_SSH_PORT:-}" && "${ADMIN_SSH_PORT}" != "22" ]]; then
+            ssh_opts+=" -p ${ADMIN_SSH_PORT}"
+        fi
+        while IFS= read -r peer_ip; do
+            [[ -z "${peer_ip}" || "${peer_ip}" == "${ip}" ]] && continue
+            peer_hit=$(remote_exec_stdin "${peer_ip}" "${PATRONI_PG_IMAGE}" "${REMOTE_BASE_DIR}/build-patroni" "${df_hash}" <<'REMOTE_PEER_CHK' 2>/dev/null || echo "MISS"
+IMG="$1"; BUILD_DIR="$2"; DF_HASH="$3"
+HASH_FILE="${BUILD_DIR}/.built.sha256"
+if docker image inspect "${IMG}" >/dev/null 2>&1 && [[ -f "${HASH_FILE}" ]] && [[ "$(cat "${HASH_FILE}" 2>/dev/null || true)" == "${DF_HASH}" ]]; then
+    echo "HIT"
+else
+    echo "MISS"
+fi
+REMOTE_PEER_CHK
+            )
+            if [[ "${peer_hit}" == *"HIT"* ]]; then
+                log_info "  🔄 Копируем готовый образ ${PATRONI_PG_IMAGE} на ${name} (${ip}) с узла ${peer_ip} по SSH..."
+                # shellcheck disable=SC2086
+                if ssh ${ssh_opts} "root@${peer_ip}" "docker save '${PATRONI_PG_IMAGE}' | gzip -1" \
+                    | ssh ${ssh_opts} "root@${ip}" "gunzip | docker load" >/dev/null 2>&1; then
+                    remote_exec "${ip}" "mkdir -p '${REMOTE_BASE_DIR}/build-patroni' && printf '%s\n' '${df_hash}' > '${REMOTE_BASE_DIR}/build-patroni/.built.sha256'"
+                    log_info "  ✅ Образ ${PATRONI_PG_IMAGE} доставлен на ${name} без локальной пересборки"
+                    return 0
+                fi
+            fi
+        done < <(get_node_ips)
+    fi
+
     remote_exec "${ip}" "mkdir -p '${REMOTE_BASE_DIR}/build-patroni'"
     remote_copy "${SCRIPT_DIR}/Dockerfile.patroni" "${ip}:${REMOTE_BASE_DIR}/build-patroni/Dockerfile.patroni"
-    local cand_refs=()
-    if [[ "${PATRONI_PG_IMAGE}" != local/* ]]; then
-        while IFS= read -r _c; do
-            [[ -n "${_c}" ]] && cand_refs+=("${_c}")
-        done < <(_image_mirror_candidates "${target_ref}")
-    fi
-    remote_exec_stdin "${ip}" "${PATRONI_PG_IMAGE}" "${REMOTE_BASE_DIR}/build-patroni" "${df_hash}" "${cand_refs[@]+"${cand_refs[@]}"}" <<'REMOTE_BUILD'
+    ensure_remote_image "${ip}" "postgres:16-bookworm" || true
+    remote_exec_stdin "${ip}" "${PATRONI_PG_IMAGE}" "${target_ref}" "${REMOTE_BASE_DIR}/build-patroni" "${df_hash}" <<'REMOTE_BUILD'
 set -euo pipefail
-IMG="$1"; BUILD_DIR="$2"; DF_HASH="$3"; shift 3
+IMG="$1"; TARGET_REF="$2"; BUILD_DIR="$3"; DF_HASH="$4"
 HASH_FILE="${BUILD_DIR}/.built.sha256"
 
 if docker image inspect "${IMG}" >/dev/null 2>&1; then
@@ -1765,18 +1820,15 @@ if docker image inspect "${IMG}" >/dev/null 2>&1; then
 fi
 
 PULLED_REF=""
-for cand in "$@" "ghcr.io/aligorov/ligament_vault_patroni:16"; do
-    [[ -n "${cand}" ]] || continue
-    for attempt in 1 2 3; do
-        if docker pull -q "${cand}" >/dev/null 2>&1; then
-            if [[ "${cand}" != "${IMG}" ]]; then
-                docker tag "${cand}" "${IMG}"
-            fi
-            PULLED_REF="${cand}"
-            break 2
+for cand in "${TARGET_REF}" "ghcr.io/aligorov/ligament_vault_patroni:16"; do
+    [[ -n "${cand}" && "${cand}" != local/* ]] || continue
+    if docker pull -q "${cand}" >/dev/null 2>&1; then
+        if [[ "${cand}" != "${IMG}" ]]; then
+            docker tag "${cand}" "${IMG}"
         fi
-        (( attempt < 3 )) && sleep $(( attempt * 2 ))
-    done
+        PULLED_REF="${cand}"
+        break
+    fi
 done
 
 if [[ -n "${PULLED_REF}" ]]; then
@@ -1785,8 +1837,15 @@ if [[ -n "${PULLED_REF}" ]]; then
 else
     echo "Registry pull unavailable — building ${IMG} locally from Dockerfile.patroni (1-2 min)..."
     cd "${BUILD_DIR}"
-    docker build --no-cache --progress=plain -t "${IMG}" -f Dockerfile.patroni . 2>&1 | \
-        awk '/^#[0-9]+ \[[0-9]+\/[0-9]+\]|^Step [0-9]+\/|Successfully|DONE|ERROR|failed to solve/ {print; fflush()}'
+    BUILD_LOG=$(mktemp)
+    if ! docker build --progress=plain -t "${IMG}" -f Dockerfile.patroni . >"${BUILD_LOG}" 2>&1; then
+        echo "ERROR: docker build failed for ${IMG}:" >&2
+        tail -n 45 "${BUILD_LOG}" >&2
+        rm -f "${BUILD_LOG}"
+        exit 1
+    fi
+    grep -E '^#[0-9]+ \[[0-9]+/[0-9]+\]|^Step [0-9]+/|Successfully|DONE' "${BUILD_LOG}" || true
+    rm -f "${BUILD_LOG}"
     printf "%s\n" "${DF_HASH}" > "${HASH_FILE}"
     docker builder prune -af >/dev/null 2>&1 || true
     docker image prune -f >/dev/null 2>&1 || true

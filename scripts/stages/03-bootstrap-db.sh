@@ -37,7 +37,7 @@ cleanup_broken_bridges_cb() {
     remote_exec "${ip}" 'for uf in /etc/systemd/system/*-bridge-*.service; do [[ -f "${uf}" ]] || continue; if grep -q "id_ed25519-" "${uf}"; then bn=$(basename "${uf}"); systemctl stop "${bn}" 2>/dev/null || true; systemctl disable "${bn}" 2>/dev/null || true; rm -f "${uf}"; systemctl daemon-reload; fi; done' >/dev/null 2>&1 || true
 }
 for_each_node cleanup_broken_bridges_cb
-
+for_each_node ensure_node_base_prereqs
 for_each_node tune_node_wan_and_swap
 for_each_node harden_node_ufw
 
@@ -363,14 +363,16 @@ start_haproxy_cb() {
     if [[ "${DRY_RUN:-false}" != "true" && "${ip}" != "${ACTIVE_PRIMARY_IP}" ]]; then
         if ! remote_tcp_probe "${ip}" "${ACTIVE_PRIMARY_IP}" "${PATRONI_API_PORT:-8008}" 5 \
             || ! remote_tcp_probe "${ip}" "${ACTIVE_PRIMARY_IP}" "${PG_PORT:-15432}" 5; then
-            if remote_exec "${ACTIVE_PRIMARY_IP}" "nc -z 127.0.0.1 ${PATRONI_API_PORT:-8008} && nc -z 127.0.0.1 ${PG_PORT:-15432}" >/dev/null 2>&1; then
+            if remote_tcp_probe "${ACTIVE_PRIMARY_IP}" "127.0.0.1" "${PATRONI_API_PORT:-8008}" 2 \
+                && remote_tcp_probe "${ACTIVE_PRIMARY_IP}" "127.0.0.1" "${PG_PORT:-15432}" 2; then
                 log_warn "  ⚠️  Порт Patroni API (${PATRONI_API_PORT:-8008}) или PG (${PG_PORT:-15432}) на ${ACTIVE_PRIMARY_NAME} недоступен с ${name} для HAProxy — включаем SSH-мост..."
                 ensure_ssh_peer_bridge "${ip}" "${name}" "${ACTIVE_PRIMARY_IP}" "${ACTIVE_PRIMARY_NAME}"
             fi
         fi
     fi
     remote_compose_up "${ip}" "--force-recreate" haproxy
-    wait_for_remote_health "${ip}" "HAProxy ${name}" "nc -z 127.0.0.1 ${HAPROXY_PG_PORT:-5433}" 15 2 \
+    wait_for_remote_health "${ip}" "HAProxy ${name}" \
+        "python3 -c 'import socket; s=socket.create_connection((\"127.0.0.1\", ${HAPROXY_PG_PORT:-5433}), 2); s.close()'" 15 2 \
         "cd '${REMOTE_BASE_DIR}' && docker compose logs --tail 40 haproxy || true"
 }
 for_each_node start_haproxy_cb
@@ -418,7 +420,7 @@ if [[ "${BACKUP_S3_ACCESS_KEY:-FIXME}" != *FIXME* && "${BACKUP_S3_ACCESS_KEY:-}"
         PATRONI_CID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q patroni | head -n1) && \
         docker exec -u postgres \"\${PATRONI_CID}\" pgbackrest --stanza='${CLUSTER_SLUG}' stanza-create && \
         docker exec -u postgres \"\${PATRONI_CID}\" pgbackrest --stanza='${CLUSTER_SLUG}' check
-    "
+    " || log_warn "⚠️  pgBackRest stanza-create/check вернул ошибку — проверьте реквизиты внешнего S3 (BACKUP_S3_*)"
 else
     log_warn "BACKUP_S3_ACCESS_KEY не задан — пропуск pgbackrest stanza-create"
 fi

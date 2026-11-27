@@ -898,3 +898,184 @@ jobs:
           PYEOF
 
           echo "LIVE_STACK_SMOKE_OK"
+
+  multi-node-e2e-install:
+    name: Live 3-Node Cluster E2E Install (Stages 0-5 + 3GB Disk + Cloud FW Bridge + Cross-Node SFTP/WORM)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Prepare Patroni & stack images + systemd VPS node image
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq age jq sshpass
+
+          docker build -t aligorov/ligament_vault_patroni:16 -f Dockerfile.patroni .
+          for img in quay.io/coreos/etcd:v3.5.17 haproxy:3.0-alpine chrislusf/seaweedfs:4.55 drakkan/sftpgo:v2.7-alpine prom/node-exporter:v1.8.2; do
+            docker pull -q "${img}"
+          done
+
+          mkdir -p /tmp/lv-e2e/node-img
+          cat > /tmp/lv-e2e/node-img/Dockerfile <<'NODEDF'
+          FROM ubuntu:24.04
+          ENV DEBIAN_FRONTEND=noninteractive container=docker
+          RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+              systemd systemd-sysv dbus openssh-server sudo ca-certificates curl jq \
+              iproute2 iputils-ping iptables ufw fail2ban python3-systemd chrony \
+              python3 python3-yaml netcat-openbsd conntrack openssl docker.io docker-compose-v2 \
+              && rm -rf /var/lib/apt/lists/* \
+              && mkdir -p /run/sshd /root/.ssh && chmod 700 /root/.ssh \
+              && rm -f /lib/systemd/system/multi-user.target.wants/*getty* \
+              && systemctl mask systemd-resolved.service systemd-networkd.service systemd-timesyncd.service \
+              && systemctl enable ssh.service containerd.service docker.service
+          STOPSIGNAL SIGRTMIN+3
+          CMD ["/sbin/init"]
+          NODEDF
+          sed -i 's/^          //' /tmp/lv-e2e/node-img/Dockerfile
+          docker build -t ci-vps-node:24.04 /tmp/lv-e2e/node-img
+
+          docker save -o /tmp/lv-e2e/base-images.tar \
+            quay.io/coreos/etcd:v3.5.17 \
+            haproxy:3.0-alpine \
+            chrislusf/seaweedfs:4.55 \
+            drakkan/sftpgo:v2.7-alpine \
+            prom/node-exporter:v1.8.2
+          docker save -o /tmp/lv-e2e/patroni-image.tar aligorov/ligament_vault_patroni:16
+
+      - name: Boot 3 Ubuntu 24.04 systemd+DinD nodes & run full './ligactl install --yes' + Cross-Node SFTP/WORM
+        run: |
+          set -euo pipefail
+          WORKDIR="/tmp/lv-e2e"
+          mkdir -p "${WORKDIR}/dind-1" "${WORKDIR}/dind-2" "${WORKDIR}/dind-3" \
+                   "${WORKDIR}/data-1" "${WORKDIR}/data-2" "${WORKDIR}/data-3"
+
+          # Emulate compact 3GB disk on node2 (just like real 2.9GB VPS)
+          truncate -s 3G "${WORKDIR}/node2-data.img"
+          mkfs.ext4 -q "${WORKDIR}/node2-data.img"
+          sudo mount -o loop "${WORKDIR}/node2-data.img" "${WORKDIR}/data-2"
+
+          cleanup_e2e() {
+            local rc=$?
+            if (( rc != 0 )); then
+              echo "=== E2E FAILURE DIAGNOSTICS ==="
+              for n in lv-node1 lv-node2 lv-node3; do
+                echo "--- ${n} containers & logs ---"
+                docker exec "${n}" bash -c 'docker ps -a; cd /opt/ligament-vault 2>/dev/null && docker compose logs --tail 35 || true' || true
+              done
+            fi
+            docker rm -f lv-node1 lv-node2 lv-node3 >/dev/null 2>&1 || true
+            docker network rm lv-wan-net >/dev/null 2>&1 || true
+            sudo umount -l "${WORKDIR}/data-2" >/dev/null 2>&1 || true
+          }
+          trap cleanup_e2e EXIT
+
+          docker network create --subnet=172.28.0.0/24 lv-wan-net
+
+          for idx in 1 2 3; do
+            ip="172.28.0.1${idx}"
+            docker run -d --name "lv-node${idx}" --hostname "node${idx}" \
+              --network lv-wan-net --ip "${ip}" \
+              --privileged --cgroupns=private \
+              --tmpfs /tmp --tmpfs /run --tmpfs /run/lock \
+              -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
+              -v "${WORKDIR}/dind-${idx}:/var/lib/docker" \
+              -v "${WORKDIR}/data-${idx}:/data" \
+              -v "${WORKDIR}/base-images.tar:/base-images.tar:ro" \
+              -v "${WORKDIR}/patroni-image.tar:/patroni-image.tar:ro" \
+              ci-vps-node:24.04
+          done
+
+          ssh-keygen -t ed25519 -f "${WORKDIR}/orch_id_ed25519" -N "" >/dev/null
+          PUBKEY=$(cat "${WORKDIR}/orch_id_ed25519.pub")
+
+          for idx in 1 2 3; do
+            n="lv-node${idx}"
+            for _ in $(seq 1 40); do
+              if docker exec "${n}" bash -c 'docker info >/dev/null 2>&1 && systemctl is-active --quiet ssh'; then
+                break
+              fi
+              sleep 1
+            done
+            docker exec "${n}" docker info >/dev/null
+            docker exec "${n}" bash -c "mkdir -p /root/.ssh && chmod 700 /root/.ssh && echo '${PUBKEY}' > /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys"
+            docker exec "${n}" docker load -i /base-images.tar >/dev/null
+          done
+
+          # Seed Patroni image ONLY on node1 so Stage 3 exercises SSH P2P transfer to node2 and node3!
+          DF_HASH=$(sha256sum Dockerfile.patroni | awk '{print $1}')
+          docker exec lv-node1 docker load -i /patroni-image.tar >/dev/null
+          docker exec lv-node1 bash -c "mkdir -p /opt/ligament-vault/build-patroni && echo '${DF_HASH}' > /opt/ligament-vault/build-patroni/.built.sha256"
+
+          # Emulate hostile Cloud Firewall: block ALL direct TCP SYN from node3 (172.28.0.13) to node1 (172.28.0.11) EXCEPT SSH :22!
+          docker exec lv-node1 iptables -t raw -A PREROUTING -s 172.28.0.13/32 -p tcp --syn ! --dport 22 -j DROP
+
+          cp -R . "${WORKDIR}/ctl"
+          cd "${WORKDIR}/ctl"
+          cp cluster.env.example cluster.env
+          sed -i 's|FIXME_IP1:dc1:node1 FIXME_IP2:dc2:node2 FIXME_IP3:dc3:node3|172.28.0.11:dc1:node1 172.28.0.12:dc2:node2 172.28.0.13:dc3:node3|' cluster.env
+          sed -i 's|^HTTPS_PORT=.*|HTTPS_PORT=8444|' cluster.env
+          echo "SSH_IDENTITY_FILE=\"${WORKDIR}/orch_id_ed25519\"" >> cluster.env
+          chmod 600 cluster.env
+
+          export AGE_KEY_FILE="${WORKDIR}/age.key"
+          export SSH_IDENTITY_FILE="${WORKDIR}/orch_id_ed25519"
+          ./ligactl secrets init
+
+          # 1. Run REAL full 3-node cluster installation (Stages 0..5)
+          ./ligactl install --yes
+          test -f "${WORKDIR}/ctl/.cluster_installed"
+
+          # Confirm transparent SSH+DNAT bridge automatically activated on node3 -> node1
+          docker exec lv-node3 systemctl is-active --quiet ligament-vault-bridge-to-node1.service
+
+          # 2. Verify idempotent sync-config (UFW + haproxy -c + hot reload) on live 3-node cluster
+          ./ligactl sync-config
+
+          # 3. Run Day-1 Sprint 1 S3 + WORM + SFTP acceptance suite
+          ./ligactl verify --sprint 1
+
+          # 4. Provision real SFTP client & verify cross-node SFTP upload on node1 -> download on node2 & node3 + WORM lock on node3
+          ssh-keygen -t ed25519 -f "${WORKDIR}/sftp_client_key" -N "" >/dev/null
+          CLIENT_PUB=$(cat "${WORKDIR}/sftp_client_key.pub")
+          ./ligactl user add --username e2euser --profile dual --quota-gb 2 --ssh-key "${CLIENT_PUB}" --generate-password
+
+          echo "cross-node-work-payload-2026" > "${WORKDIR}/work_in.txt"
+          echo "cross-node-worm-payload-2026" > "${WORKDIR}/worm_in.txt"
+
+          sftp -b - -P 2022 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -i "${WORKDIR}/sftp_client_key" e2euser@172.28.0.11 <<SFTP_UP
+          put ${WORKDIR}/work_in.txt /work/cross.txt
+          put ${WORKDIR}/worm_in.txt /worm/immutable.txt
+          bye
+          SFTP_UP
+
+          sftp -b - -P 2022 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -i "${WORKDIR}/sftp_client_key" e2euser@172.28.0.12 <<SFTP_N2
+          get /work/cross.txt ${WORKDIR}/work_n2.txt
+          get /worm/immutable.txt ${WORKDIR}/worm_n2.txt
+          bye
+          SFTP_N2
+          cmp -s "${WORKDIR}/work_in.txt" "${WORKDIR}/work_n2.txt"
+          cmp -s "${WORKDIR}/worm_in.txt" "${WORKDIR}/worm_n2.txt"
+
+          sftp -b - -P 2022 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -i "${WORKDIR}/sftp_client_key" e2euser@172.28.0.13 <<SFTP_N3
+          get /work/cross.txt ${WORKDIR}/work_n3.txt
+          get /worm/immutable.txt ${WORKDIR}/worm_n3.txt
+          bye
+          SFTP_N3
+          cmp -s "${WORKDIR}/work_in.txt" "${WORKDIR}/work_n3.txt"
+          cmp -s "${WORKDIR}/worm_in.txt" "${WORKDIR}/worm_n3.txt"
+
+          if sftp -b - -P 2022 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -i "${WORKDIR}/sftp_client_key" e2euser@172.28.0.13 <<< 'rm /worm/immutable.txt'; then
+            echo "ERROR: node3 permitted deleting WORM-protected file!" >&2
+            exit 1
+          fi
+
+          # 5. Verify full cluster health JSON across all 3 nodes
+          STATUS_OUT=$(./ligactl status --json)
+          STATUS_JSON=$(echo "${STATUS_OUT}" | grep '^\{' | tail -n1)
+          echo "Cluster status JSON: ${STATUS_JSON}"
+          echo "${STATUS_JSON}" | jq -e '(.nodes | length) == 3 and .errors == 0 and (.nodes | all(.haproxy == "OK" and .swfs_volume == "OK" and .swfs_filer == "OK" and .sftpgo == "OK"))'
+
+          echo "MULTI_NODE_3VPS_E2E_OK"
