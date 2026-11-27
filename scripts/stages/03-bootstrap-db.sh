@@ -231,11 +231,24 @@ else
     if [[ -n "${REUSE_EXISTING_PRIMARY}" ]]; then
         ACTIVE_PRIMARY_IP="${REUSE_EXISTING_PRIMARY}"
         ACTIVE_PRIMARY_NAME=$(get_node_name_by_ip "${ACTIVE_PRIMARY_IP}")
-        log_info "Обнаружен действующий лидер Patroni на ${ACTIVE_PRIMARY_NAME} (${ACTIVE_PRIMARY_IP}:${PG_PORT}) — обновляем его конфиг и поднимаем реплики..."
-        remote_compose_up "${ACTIVE_PRIMARY_IP}" "--force-recreate" patroni
-        wait_for_remote_health "${ACTIVE_PRIMARY_IP}" "Patroni Primary (${ACTIVE_PRIMARY_IP})" \
-            "curl -sf --cacert '${REMOTE_BASE_DIR}/certs/ca.crt' https://127.0.0.1:${PATRONI_API_PORT:-8008}/primary" 60 3 \
-            "cd '${REMOTE_BASE_DIR}' && docker compose logs --tail 60 patroni || true"
+        log_info "Обнаружен действующий лидер Patroni на ${ACTIVE_PRIMARY_NAME} (${ACTIVE_PRIMARY_IP}:${PG_PORT}) — обновляем конфиг без сброса лидерства..."
+        remote_compose_up "${ACTIVE_PRIMARY_IP}" "" patroni
+        NEW_LEADER_IP=""
+        for _wi in $(seq 1 30); do
+            NEW_LEADER_IP=$(find_patroni_primary_ip || true)
+            if [[ -n "${NEW_LEADER_IP}" ]]; then
+                break
+            fi
+            sleep 2
+        done
+        if [[ -n "${NEW_LEADER_IP}" ]]; then
+            ACTIVE_PRIMARY_IP="${NEW_LEADER_IP}"
+            ACTIVE_PRIMARY_NAME=$(get_node_name_by_ip "${ACTIVE_PRIMARY_IP}")
+        else
+            wait_for_remote_health "${ACTIVE_PRIMARY_IP}" "Patroni Primary (${ACTIVE_PRIMARY_IP})" \
+                "curl -sf --cacert '${REMOTE_BASE_DIR}/certs/ca.crt' https://127.0.0.1:${PATRONI_API_PORT:-8008}/primary" 20 3 \
+                "cd '${REMOTE_BASE_DIR}' && docker compose logs --tail 60 patroni || true"
+        fi
     else
         if [[ ! -f "$(state_root)/.cluster_installed" ]]; then
             log_info "Очистка незавершенного состояния Patroni и автоподбор доступного маршрута/порта PostgreSQL..."
@@ -337,15 +350,20 @@ else
             log_error "❌ Сетевой порт PostgreSQL ${ACTIVE_PRIMARY_IP}:${PG_PORT:-15432} недоступен с узла ${name} (${ip}) даже после включения моста!"
             exit 1
         fi
-        remote_exec_stdin "${ip}" "${PG_DATA_DIR}" <<'REMOTE_PREP_REPLICA'
+        if remote_exec "${ip}" "curl -sf --cacert '${REMOTE_BASE_DIR}/certs/ca.crt' https://127.0.0.1:${PATRONI_API_PORT:-8008}/replica >/dev/null" >/dev/null 2>&1; then
+            log_info "Реплика Patroni на ${name} (${ip}) уже синхронизирована — обновляем без перезапуска..."
+            remote_compose_up "${ip}" "" patroni
+        else
+            remote_exec_stdin "${ip}" "${PG_DATA_DIR}" <<'REMOTE_PREP_REPLICA'
 set -euo pipefail
 PG_DIR="$1"
 if [[ ! -f "${PG_DIR}/data/PG_VERSION" && -d "${PG_DIR}/data" ]]; then
     find "${PG_DIR}/data" -mindepth 1 -delete 2>/dev/null || true
 fi
 REMOTE_PREP_REPLICA
-        log_info "Старт Patroni Replica на ${name} (${ip})..."
-        remote_compose_up "${ip}" "--force-recreate" patroni
+            log_info "Старт Patroni Replica на ${name} (${ip})..."
+            remote_compose_up "${ip}" "--force-recreate" patroni
+        fi
         wait_for_remote_health "${ip}" "Patroni Replica ${name} /replica" \
             "curl -sf --cacert '${REMOTE_BASE_DIR}/certs/ca.crt' https://127.0.0.1:${PATRONI_API_PORT:-8008}/replica" 80 3 \
             "cd '${REMOTE_BASE_DIR}' && docker compose logs --tail 60 patroni || true; curl -sk https://127.0.0.1:${PATRONI_API_PORT:-8008}/patroni || true"

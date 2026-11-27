@@ -51,7 +51,7 @@ DISK=$(df -h / | awk 'NR==2{print $5}' || echo "N/A")
 PROLE=$(curl -sf --cacert "${BDIR}/certs/ca.crt" --max-time 3 "https://127.0.0.1:${PPORT}/patroni" 2>/dev/null | jq -r '.role // "ERR"' || echo "DOWN")
 VSTAT=$(curl -sf --max-time 3 "http://127.0.0.1:${VPORT}/healthz" >/dev/null 2>&1 || curl -sf --max-time 3 "http://127.0.0.1:${VPORT}/status" >/dev/null 2>&1 && echo "OK" || echo "DOWN")
 FSTAT=$(curl -sf --max-time 3 "http://127.0.0.1:${FPORT}/healthz" >/dev/null 2>&1 && echo "OK" || echo "DOWN")
-HSTAT=$(nc -z 127.0.0.1 "${HPORT}" 2>/dev/null && echo "OK" || echo "DOWN")
+HSTAT=$(python3 -c "import socket; s=socket.create_connection(('127.0.0.1', ${HPORT}), 2); s.close()" 2>/dev/null && echo "OK" || echo "DOWN")
 SCID=$(cd "${BDIR}" 2>/dev/null && docker compose ps -q sftpgo | head -n1 || true)
 SSTAT="DOWN"
 if [[ -n "${SCID}" ]] && docker exec "${SCID}" sftpgo ping --config-file /etc/sftpgo/sftpgo.json >/dev/null 2>&1; then

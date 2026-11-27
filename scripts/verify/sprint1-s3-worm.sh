@@ -159,8 +159,8 @@ cat > "${TMPDIR}/user.json" <<JSON
   "status": 1,
   "username": "_sprint1_verify",
   "public_keys": ["${PUBKEY}"],
-  "home_dir": "/srv/sftpgo/data/_sprint1_verify",
-  "permissions": {"/": ["*"]},
+  "home_dir": "/srv/sftpgo/empty-root",
+  "permissions": {"/": ["list", "download"], "/work": ["*"], "/worm": ["list", "upload", "download", "create_dirs"]},
   "virtual_folders": [
     {"name": "sftp-work", "virtual_path": "/work"},
     {"name": "sftp-worm", "virtual_path": "/worm"}

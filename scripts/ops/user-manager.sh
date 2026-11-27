@@ -216,7 +216,7 @@ try:
     payload = {
         "status": 1,
         "username": uname,
-        "home_dir": f"/srv/sftpgo/data/{uname}",
+        "home_dir": "/srv/sftpgo/empty-root",
         "quota_size": int(float(quota_gb) * (1024 ** 3)) if float(quota_gb) > 0 else 0,
         "permissions": perms,
         "virtual_folders": vfolders,

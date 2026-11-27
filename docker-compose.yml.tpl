@@ -57,6 +57,7 @@ services:
       ETCD_PEER_CRL_FILE: "/certs/crl.pem"
       ETCD_CLIENT_CERT_AUTH: "true"
       ETCD_PEER_CLIENT_CERT_AUTH: "true"
+      ETCD_EXPERIMENTAL_PEER_SKIP_CLIENT_SAN_VERIFICATION: "true"
       # --- WAN Тайминги ---
       ETCD_HEARTBEAT_INTERVAL: "${ETCD_HEARTBEAT_INTERVAL}"
       ETCD_ELECTION_TIMEOUT: "${ETCD_ELECTION_TIMEOUT}"
@@ -200,6 +201,7 @@ services:
       -dataCenter=${DC_NAME}
       -dir=${SWFS_VOLUME_DIR}
       -max=${SWFS_VOLUME_MAX}
+      -minFreeSpace=${SWFS_MIN_FREE_SPACE}
       -compactionMBps=50
     volumes:
 ${SWFS_VOLUME_MOUNTS}
@@ -305,6 +307,7 @@ ${SWFS_VOLUME_MOUNTS}
     logging: *default-logging
     command: >-
       admin
+      -ip=0.0.0.0
       -port=${SWFS_ADMIN_PORT}
       -port.grpc=${SWFS_ADMIN_GRPC_PORT}
       -port.legacy=0
@@ -436,7 +439,7 @@ ${SWFS_VOLUME_MOUNTS}
       - "--path.rootfs=/host"
       - "--collector.textfile.directory=/textfile_collector"
     volumes:
-      - /:/host:ro,rslave
+      - /:/host:ro
       - /var/lib/node_exporter/textfile_collector:/textfile_collector:ro
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://${NODE_IP}:9100/metrics"]

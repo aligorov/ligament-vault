@@ -503,11 +503,12 @@ export_node_render_vars() {
         [[ -n "${vol_mounts}" ]] && vol_mounts+=$'\n'
         vol_mounts+="      - ${_vd}:${_vd}"
         [[ -n "${vol_max}" ]] && vol_max+=","
-        vol_max+="0"
+        vol_max+="${SWFS_VOLUME_MAX_PER_DIR:-64}"
     done
     export SWFS_VOLUME_MOUNTS="${vol_mounts}"
     export SWFS_VOLUME_MAX="${SWFS_VOLUME_MAX_OVERRIDE:-${vol_max}}"
-    export SWFS_VOLUME_SIZE_LIMIT_MB="${SWFS_VOLUME_SIZE_LIMIT_MB:-256}"
+    export SWFS_VOLUME_SIZE_LIMIT_MB="${SWFS_VOLUME_SIZE_LIMIT_MB:-128}"
+    export SWFS_MIN_FREE_SPACE="${SWFS_MIN_FREE_SPACE:-128MiB}"
 
     if (( $(get_node_count) >= 3 && ${ETCD_ELECTION_TIMEOUT:-2500} <= 2500 )); then
         export ETCD_HEARTBEAT_INTERVAL=350
@@ -653,7 +654,7 @@ set -euo pipefail
 BASE_DIR="$1"; SFTP_TMP="$2"; SFTP_DATA="$3"; PG_DIR="$4"; ETCD_DIR="$5"; SWFS_MDIR="$6"; VOL_DIRS="$7"
 mkdir -p "${BASE_DIR}/configs/seaweedfs" "${BASE_DIR}/certs/ssl" "${BASE_DIR}/ssh-host-keys" "${BASE_DIR}/hooks" \
          /var/lib/node_exporter/textfile_collector \
-         "${SFTP_TMP}" "${SFTP_DATA}/data" "${SFTP_DATA}/backups" "${PG_DIR}" "${ETCD_DIR}" "${SWFS_MDIR}"
+         "${SFTP_TMP}" "${SFTP_DATA}/data" "${SFTP_DATA}/empty-root" "${SFTP_DATA}/backups" "${PG_DIR}" "${ETCD_DIR}" "${SWFS_MDIR}"
 for vd in ${VOL_DIRS}; do
     mkdir -p "${vd}"
     chown -R 1000:1000 "${vd}"
@@ -661,6 +662,7 @@ done
 chmod 755 "${BASE_DIR}" "${BASE_DIR}/configs" "${BASE_DIR}/configs/seaweedfs" \
           "${BASE_DIR}/certs" "${BASE_DIR}/certs/ssl" "${BASE_DIR}/ssh-host-keys" "${BASE_DIR}/hooks"
 chown -R 1000:1000 "${SFTP_TMP}" "${SFTP_DATA}" "${SWFS_MDIR}" "${BASE_DIR}/hooks"
+chmod 555 "${SFTP_DATA}/empty-root"
 chmod 700 "${ETCD_DIR}"
 chmod 750 "${SWFS_MDIR}"
 REMOTE_DIRS
@@ -696,6 +698,7 @@ REMOTE_DIRS
         chmod 755 '${REMOTE_BASE_DIR}' '${REMOTE_BASE_DIR}/configs' '${REMOTE_BASE_DIR}/configs/seaweedfs' \
                   '${REMOTE_BASE_DIR}/certs' '${REMOTE_BASE_DIR}/certs/ssl' '${REMOTE_BASE_DIR}/ssh-host-keys' '${REMOTE_BASE_DIR}/hooks' && \
         chmod 600 '${REMOTE_BASE_DIR}/docker-compose.yml' '${REMOTE_BASE_DIR}/configs/patroni.yml' '${REMOTE_BASE_DIR}/configs/pgbackrest.conf' && \
+        chown 999:999 '${REMOTE_BASE_DIR}/configs/pgbackrest.conf' && \
         chmod 644 '${REMOTE_BASE_DIR}/configs/haproxy-pg.cfg' && \
         chmod 644 '${REMOTE_BASE_DIR}/certs/ca.crt' '${REMOTE_BASE_DIR}/certs/${name}/crl.pem' '${REMOTE_BASE_DIR}/certs/${name}/ca-crl.crt' 2>/dev/null || true && \
         chown 1000:1000 '${REMOTE_BASE_DIR}/configs/seaweedfs/'*.toml '${REMOTE_BASE_DIR}/configs/seaweedfs/s3.json' && \
@@ -1415,8 +1418,9 @@ systemctl restart fail2ban 2>/dev/null || true
 
 mkdir -p "${BASE_DIR}/configs/seaweedfs" "${BASE_DIR}/certs/ssl" "${BASE_DIR}/ssh-host-keys" "${BASE_DIR}/hooks" \
          /var/lib/node_exporter/textfile_collector \
-         "${SFTP_TMP}" "${SFTP_DATA}/data" "${SFTP_DATA}/backups" "${SWFS_DIR}" "${PG_DIR}" "${ETCD_DIR}" "${SWFS_MDIR}"
+         "${SFTP_TMP}" "${SFTP_DATA}/data" "${SFTP_DATA}/empty-root" "${SFTP_DATA}/backups" "${SWFS_DIR}" "${PG_DIR}" "${ETCD_DIR}" "${SWFS_MDIR}"
 chown -R 1000:1000 "${SFTP_TMP}" "${SFTP_DATA}" "${SWFS_DIR}" "${SWFS_MDIR}" "${BASE_DIR}/hooks"
+chmod 555 "${SFTP_DATA}/empty-root"
 REMOTE_HARDEN
 
     tune_node_wan_and_swap "${ip}" "${dc}" "${name}"

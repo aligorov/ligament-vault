@@ -559,7 +559,7 @@ cmd_expand_disk() {
     local cur_max_parts=()
     IFS=',' read -ra _dirs_arr <<< "${updated_dirs}"
     for _ in $(seq 1 $(( ${#_dirs_arr[@]} - 1 ))); do
-        cur_max_parts+=("0")
+        cur_max_parts+=("${SWFS_VOLUME_MAX_PER_DIR:-64}")
     done
     cur_max_parts+=("${max_volumes}")
     export SWFS_VOLUME_MAX_OVERRIDE

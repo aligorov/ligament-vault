@@ -66,6 +66,30 @@ ensure_fallback_or_distribute_ssl() {
 ensure_fallback_or_distribute_ssl
 
 # --- 2. Однократный sftpgo initprovider ДО старта SFTPGo ---
+if [[ "${DRY_RUN:-false}" != "true" && "${HTTPS_PORT:-443}" == "443" ]]; then
+    HTTPS_443_BUSY=false
+    _chk_443_cb() {
+        local ip="$1"
+        local proc
+        proc=$(remote_exec "${ip}" "ss -H -tlnp 'sport = :443' 2>/dev/null | head -n1 || true" 2>/dev/null || true)
+        if [[ -n "${proc}" ]] && ! echo "${proc}" | grep -q "sftpgo"; then
+            HTTPS_443_BUSY=true
+        fi
+    }
+    for_each_node _chk_443_cb
+    if [[ "${HTTPS_443_BUSY}" == "true" ]]; then
+        log_warn "  ⚠️  Порт 443 занят соседним сервисом — автоматически переключаем SFTPGo HTTPS WebClient на :8444..."
+        export HTTPS_PORT=8444
+        persist_cluster_env_var "HTTPS_PORT" "8444"
+        for_each_node harden_node_ufw
+        _rerender_edge_cb() {
+            render_node_configs "$1" "$2" "$3" "$4" "existing"
+            push_node_configs "$1" "$2" "$3" "$4"
+        }
+        for_each_node _rerender_edge_cb
+    fi
+fi
+
 PRIMARY_PG_IP=$(find_patroni_primary_ip || echo "${NODE1_IP}")
 log_step "2/7 — SFTPGo initprovider (update_mode=1, однократно на Primary ${PRIMARY_PG_IP})"
 ensure_remote_image "${PRIMARY_PG_IP}" "$(resolve_service_image_ref sftpgo)"
@@ -88,7 +112,8 @@ log_step "3/7 — Запуск SFTPGo и node-exporter на всех нодах"
 start_edge_cb() {
     local ip="$1" name="$3"
     log_info "  Старт SFTPGo и node-exporter на ${name} (${ip})..."
-    remote_compose_up "${ip}" "--force-recreate" sftpgo node-exporter
+    remote_compose_up "${ip}" "--force-recreate" sftpgo
+    remote_compose_up "${ip}" "--force-recreate" node-exporter || log_warn "  ⚠️  node-exporter на ${name} пропущен (ограничение mount-propagation хоста)"
     wait_for_remote_health "${ip}" "SFTPGo ${name}" \
         "CID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q sftpgo | head -n1) && [[ -n \"\${CID}\" ]] && docker exec \"\${CID}\" sftpgo ping --config-file /etc/sftpgo/sftpgo.json" 35 2 \
         "cd '${REMOTE_BASE_DIR}' && docker compose logs --tail 50 sftpgo || true"

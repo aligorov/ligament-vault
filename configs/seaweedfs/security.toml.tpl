@@ -42,11 +42,14 @@ cert = "/certs/swfs-admin.crt"
 key  = "/certs/swfs-admin.key"
 allowed_commonNames = "swfs-master,swfs-volume,swfs-filer,swfs-worker,swfs-client"
 
-# --- HTTPS для weed admin UI ---
+[grpc.worker]
+cert = "/certs/swfs-worker.crt"
+key  = "/certs/swfs-worker.key"
+
+# --- HTTPS для weed admin UI (аутентификация по -adminPassword, Worker gRPC защищен mTLS в [grpc.admin]) ---
 [https.admin]
 cert = "/certs/swfs-admin.crt"
 key  = "/certs/swfs-admin.key"
-ca   = "/certs/ca.crt"
 
 [https.client]
 enabled = false

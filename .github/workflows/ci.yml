@@ -949,8 +949,7 @@ jobs:
         run: |
           set -euo pipefail
           WORKDIR="/tmp/lv-e2e"
-          mkdir -p "${WORKDIR}/dind-1" "${WORKDIR}/dind-2" "${WORKDIR}/dind-3" \
-                   "${WORKDIR}/data-1" "${WORKDIR}/data-2" "${WORKDIR}/data-3"
+          mkdir -p "${WORKDIR}/data-1" "${WORKDIR}/data-2" "${WORKDIR}/data-3"
 
           # Emulate compact 3GB disk on node2 (just like real 2.9GB VPS)
           truncate -s 3G "${WORKDIR}/node2-data.img"
@@ -961,12 +960,15 @@ jobs:
             local rc=$?
             if (( rc != 0 )); then
               echo "=== E2E FAILURE DIAGNOSTICS ==="
+              docker ps -a || true
               for n in lv-node1 lv-node2 lv-node3; do
-                echo "--- ${n} containers & logs ---"
+                echo "--- ${n} boot logs & containers ---"
+                docker logs "${n}" --tail 35 2>&1 || true
                 docker exec "${n}" bash -c 'docker ps -a; cd /opt/ligament-vault 2>/dev/null && docker compose logs --tail 35 || true' || true
               done
             fi
             docker rm -f lv-node1 lv-node2 lv-node3 >/dev/null 2>&1 || true
+            docker volume rm -f lv-docker-1 lv-docker-2 lv-docker-3 lv-ctrd-1 lv-ctrd-2 lv-ctrd-3 >/dev/null 2>&1 || true
             docker network rm lv-wan-net >/dev/null 2>&1 || true
             sudo umount -l "${WORKDIR}/data-2" >/dev/null 2>&1 || true
           }
@@ -980,8 +982,8 @@ jobs:
               --network lv-wan-net --ip "${ip}" \
               --privileged --cgroupns=private \
               --tmpfs /tmp --tmpfs /run --tmpfs /run/lock \
-              -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
-              -v "${WORKDIR}/dind-${idx}:/var/lib/docker" \
+              -v "lv-docker-${idx}:/var/lib/docker" \
+              -v "lv-ctrd-${idx}:/var/lib/containerd" \
               -v "${WORKDIR}/data-${idx}:/data" \
               -v "${WORKDIR}/base-images.tar:/base-images.tar:ro" \
               -v "${WORKDIR}/patroni-image.tar:/patroni-image.tar:ro" \
@@ -1009,6 +1011,9 @@ jobs:
           docker exec lv-node1 docker load -i /patroni-image.tar >/dev/null
           docker exec lv-node1 bash -c "mkdir -p /opt/ligament-vault/build-patroni && echo '${DF_HASH}' > /opt/ligament-vault/build-patroni/.built.sha256"
 
+          # Emulate neighboring service on node1:443 (like 2FA/Nginx) so Stage 0 auto-switches HTTPS_PORT -> 8444 & UFW preserves :443!
+          docker exec -d lv-node1 python3 -c "import socket, time; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(('0.0.0.0', 443)); s.listen(8); time.sleep(3600)"
+
           # Emulate hostile Cloud Firewall: block ALL direct TCP SYN from node3 (172.28.0.13) to node1 (172.28.0.11) EXCEPT SSH :22!
           docker exec lv-node1 iptables -t raw -A PREROUTING -s 172.28.0.13/32 -p tcp --syn ! --dport 22 -j DROP
 
@@ -1016,7 +1021,6 @@ jobs:
           cd "${WORKDIR}/ctl"
           cp cluster.env.example cluster.env
           sed -i 's|FIXME_IP1:dc1:node1 FIXME_IP2:dc2:node2 FIXME_IP3:dc3:node3|172.28.0.11:dc1:node1 172.28.0.12:dc2:node2 172.28.0.13:dc3:node3|' cluster.env
-          sed -i 's|^HTTPS_PORT=.*|HTTPS_PORT=8444|' cluster.env
           echo "SSH_IDENTITY_FILE=\"${WORKDIR}/orch_id_ed25519\"" >> cluster.env
           chmod 600 cluster.env
 
@@ -1027,9 +1031,19 @@ jobs:
           # 1. Run REAL full 3-node cluster installation (Stages 0..5)
           ./ligactl install --yes
           test -f "${WORKDIR}/ctl/.cluster_installed"
+          grep -q '^HTTPS_PORT=8444' "${WORKDIR}/ctl/cluster.env"
+          python3 -c "import socket; s=socket.create_connection(('172.28.0.11', 443), 3); s.close()"
 
           # Confirm transparent SSH+DNAT bridge automatically activated on node3 -> node1
           docker exec lv-node3 systemctl is-active --quiet ligament-vault-bridge-to-node1.service
+
+          # 1b. Test mid-Stage-3 '--resume' path with live etcd + Patroni Primary/Replicas already running!
+          rm -f "${WORKDIR}/ctl/.cluster_installed"
+          mkdir -p "${WORKDIR}/ctl/.state"
+          printf '%s\n' "stage-0-00-preflight" "stage-1-01-host-hardening" "stage-2-02-pki-secrets" > "${WORKDIR}/ctl/.state/checkpoints.install"
+          docker exec lv-node3 bash -c 'cd /opt/ligament-vault && docker compose stop haproxy swfs-filer swfs-s3 swfs-volume swfs-master sftpgo 2>/dev/null || true'
+          ./ligactl install --yes --resume
+          test -f "${WORKDIR}/ctl/.cluster_installed"
 
           # 2. Verify idempotent sync-config (UFW + haproxy -c + hot reload) on live 3-node cluster
           ./ligactl sync-config

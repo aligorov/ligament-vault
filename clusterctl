@@ -225,9 +225,11 @@ cmd_sync_config() {
 
     log_step "2/4 — Доставка конфигов и проверка HAProxy на нодах"
     push_and_validate_cb() {
-        local ip="$1" dc="$2" name="$3" idx="$4"
+        local ip="$1" dc="$2" name="$3" idx="$4" hap_ref
+        hap_ref=$(resolve_service_image_ref haproxy)
         push_node_configs "${ip}" "${dc}" "${name}" "${idx}"
-        remote_exec "${ip}" "docker run --rm -v '${REMOTE_BASE_DIR}/configs/haproxy-pg.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro' '${HAPROXY_IMAGE}' haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg >/dev/null"
+        ensure_remote_image "${ip}" "${hap_ref}"
+        remote_exec "${ip}" "docker run --rm -v '${REMOTE_BASE_DIR}/configs/haproxy-pg.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro' -v '${REMOTE_BASE_DIR}/certs/ca.crt:/certs/ca.crt:ro' '${hap_ref}' haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg >/dev/null"
     }
     for_each_node push_and_validate_cb
 

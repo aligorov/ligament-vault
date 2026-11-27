@@ -96,7 +96,7 @@ load_cluster_env() {
     set -a
     # shellcheck disable=SC1090
     [[ -f "${versions_file}" ]] && source "${versions_file}"
-    if [[ -z "${CLUSTER_NODES:-}" && -f "${env_file}" ]]; then
+    if [[ -f "${env_file}" ]]; then
         # shellcheck disable=SC1090
         source "${env_file}"
     fi
@@ -291,14 +291,14 @@ remote_exec() {
     fi
     if [[ "${DRY_RUN:-false}" == "true" ]]; then
         # shellcheck disable=SC2086
-        run_or_dry ssh ${ssh_opts} "root@${ip}" "$@"
+        run_or_dry ssh -n ${ssh_opts} "root@${ip}" "$@"
         return 0
     fi
     local attempt rc=0
     for attempt in 1 2 3; do
         rc=0
         # shellcheck disable=SC2086
-        ssh ${ssh_opts} "root@${ip}" "$@" || rc=$?
+        ssh -n ${ssh_opts} "root@${ip}" "$@" || rc=$?
         if (( rc != 255 )) || (( attempt == 3 )); then
             return "${rc}"
         fi
@@ -363,9 +363,8 @@ remote_exec_env_stdin() {
     : > "${tmp_script}"
     chmod 600 "${tmp_script}"
 
-    local IFS=','
     local _vars=()
-    read -ra _vars <<< "${env_csv}"
+    IFS=',' read -ra _vars <<< "${env_csv}"
     for _vn in "${_vars[@]}"; do
         [[ "${_vn}" =~ ^[A-Z][A-Z0-9_]*$ ]] || continue
         printf 'export %s=%q\n' "${_vn}" "${!_vn:-}" >> "${tmp_script}"
