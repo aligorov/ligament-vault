@@ -210,7 +210,7 @@ else
     REUSE_EXISTING_PRIMARY=""
     CANDIDATE_PRIMARY=""
     if [[ "${PG_PORT_MIGRATED}" != "true" ]]; then
-        CANDIDATE_PRIMARY=$(find_patroni_primary_ip || true)
+        CANDIDATE_PRIMARY=$(find_writable_pg_primary_ip || find_patroni_primary_ip || true)
     fi
     if [[ -n "${CANDIDATE_PRIMARY}" ]]; then
         PEER_REACH_OK=true
@@ -235,7 +235,7 @@ else
         remote_compose_up "${ACTIVE_PRIMARY_IP}" "" patroni
         NEW_LEADER_IP=""
         for _wi in $(seq 1 30); do
-            NEW_LEADER_IP=$(find_patroni_primary_ip || true)
+            NEW_LEADER_IP=$(find_writable_pg_primary_ip || true)
             if [[ -n "${NEW_LEADER_IP}" ]]; then
                 break
             fi
@@ -371,7 +371,7 @@ REMOTE_PREP_REPLICA
     for_each_node start_replica_cb
 
     # Обновляем ACTIVE_PRIMARY_IP на случай перевыборов во время старта
-    ACTIVE_PRIMARY_IP=$(find_patroni_primary_ip || echo "${ACTIVE_PRIMARY_IP}")
+    ACTIVE_PRIMARY_IP=$(find_writable_pg_primary_ip || find_patroni_primary_ip || echo "${ACTIVE_PRIMARY_IP}")
     ACTIVE_PRIMARY_NAME=$(get_node_name_by_ip "${ACTIVE_PRIMARY_IP}")
 fi
 
@@ -395,42 +395,72 @@ start_haproxy_cb() {
 }
 for_each_node start_haproxy_cb
 
-log_step "Создание пользователей и БД (sftpgo, seaweedfs_filer) на Primary (${ACTIVE_PRIMARY_IP})"
-remote_exec_env_stdin "${ACTIVE_PRIMARY_IP}" "SFTPGO_DB_PASSWORD,SWFS_FILER_DB_PASSWORD" "${REMOTE_BASE_DIR}" <<'REMOTE_DB_INIT'
+log_step "Создание пользователей и БД (sftpgo, seaweedfs_filer) на Primary PostgreSQL"
+DB_INIT_DONE=false
+for _db_try in $(seq 1 10); do
+    ACTIVE_PRIMARY_IP=$(find_writable_pg_primary_ip || find_patroni_primary_ip || echo "${ACTIVE_PRIMARY_IP}")
+    ACTIVE_PRIMARY_NAME=$(get_node_name_by_ip "${ACTIVE_PRIMARY_IP}")
+    log_info "  Инициализация ролей/БД на ${ACTIVE_PRIMARY_NAME} (${ACTIVE_PRIMARY_IP}, попытка ${_db_try}/10)..."
+    _db_rc=0
+    remote_exec_env_stdin "${ACTIVE_PRIMARY_IP}" "SFTPGO_DB_PASSWORD,SWFS_FILER_DB_PASSWORD" "${REMOTE_BASE_DIR}" <<'REMOTE_DB_INIT' || _db_rc=$?
 set -euo pipefail
 BASE_DIR="$1"
 
 PATRONI_CID=$(cd "${BASE_DIR}" && docker compose ps -q patroni | head -n1)
-[[ -n "${PATRONI_CID}" ]] || { echo "Patroni container not found" >&2; exit 1; }
+[[ -n "${PATRONI_CID}" ]] || { echo "Patroni container not found" >&2; exit 2; }
 TMP_DB_ENV=$(mktemp)
 chmod 600 "${TMP_DB_ENV}"
 trap 'rm -f "${TMP_DB_ENV}"' EXIT
 printf 'SFTPGO_PW=%s\nSWFS_PW=%s\n' "${SFTPGO_DB_PASSWORD}" "${SWFS_FILER_DB_PASSWORD}" > "${TMP_DB_ENV}"
 docker exec -i --env-file "${TMP_DB_ENV}" "${PATRONI_CID}" python3 - <<'PYEOF'
-import os, psycopg2
+import os, sys, psycopg2
 from psycopg2 import sql
 
-conn = psycopg2.connect(dbname="postgres", user="postgres", host="/var/run/postgresql")
-conn.autocommit = True
-cur = conn.cursor()
+try:
+    conn = psycopg2.connect(dbname="postgres", user="postgres", host="/var/run/postgresql")
+    conn.autocommit = True
+    cur = conn.cursor()
+    cur.execute("SELECT pg_is_in_recovery()")
+    row = cur.fetchone()
+    if row and row[0]:
+        sys.stderr.write("PostgreSQL is in recovery (standby) — switching/waiting for writable Primary...\n")
+        sys.exit(2)
 
-def ensure_role_and_db(role, pw, db):
-    cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,))
-    if not cur.fetchone():
-        cur.execute(sql.SQL("CREATE USER {} WITH PASSWORD %s").format(sql.Identifier(role)), (pw,))
-    else:
-        cur.execute(sql.SQL("ALTER USER {} WITH PASSWORD %s").format(sql.Identifier(role)), (pw,))
-    cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (db,))
-    if not cur.fetchone():
-        cur.execute(sql.SQL("CREATE DATABASE {} OWNER {}").format(sql.Identifier(db), sql.Identifier(role)))
+    def ensure_role_and_db(role, pw, db):
+        cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,))
+        if not cur.fetchone():
+            cur.execute(sql.SQL("CREATE USER {} WITH PASSWORD %s").format(sql.Identifier(role)), (pw,))
+        else:
+            cur.execute(sql.SQL("ALTER USER {} WITH PASSWORD %s").format(sql.Identifier(role)), (pw,))
+        cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (db,))
+        if not cur.fetchone():
+            cur.execute(sql.SQL("CREATE DATABASE {} OWNER {}").format(sql.Identifier(db), sql.Identifier(role)))
 
-ensure_role_and_db("sftpgo", os.environ["SFTPGO_PW"], "sftpgo")
-ensure_role_and_db("seaweedfs", os.environ["SWFS_PW"], "seaweedfs_filer")
-cur.close()
-conn.close()
-print("PostgreSQL roles and databases ensured cleanly.")
+    ensure_role_and_db("sftpgo", os.environ["SFTPGO_PW"], "sftpgo")
+    ensure_role_and_db("seaweedfs", os.environ["SWFS_PW"], "seaweedfs_filer")
+    cur.close()
+    conn.close()
+    print("PostgreSQL roles and databases ensured cleanly.")
+except (psycopg2.errors.ReadOnlySqlTransaction, psycopg2.OperationalError) as exc:
+    sys.stderr.write(f"PostgreSQL not writable yet ({exc}) — retrying against current Primary...\n")
+    sys.exit(2)
 PYEOF
 REMOTE_DB_INIT
+    if (( _db_rc == 0 )); then
+        DB_INIT_DONE=true
+        break
+    fi
+    if (( _db_rc == 2 && _db_try < 10 )); then
+        log_warn "  ⏳ Primary PostgreSQL (${ACTIVE_PRIMARY_NAME}/${ACTIVE_PRIMARY_IP}) переключился в read-only — ждём 4с и повторяем на актуальном Primary..."
+        sleep 4
+    else
+        exit "${_db_rc}"
+    fi
+done
+if [[ "${DB_INIT_DONE}" != "true" ]]; then
+    log_error "❌ Не удалось инициализировать роли/БД (sftpgo, seaweedfs_filer) на read-write Primary PostgreSQL!"
+    exit 1
+fi
 
 log_step "Инициализация pgBackRest stanza '${CLUSTER_SLUG}'"
 if [[ "${BACKUP_S3_ACCESS_KEY:-FIXME}" != *FIXME* && "${BACKUP_S3_ACCESS_KEY:-}" != "" ]]; then

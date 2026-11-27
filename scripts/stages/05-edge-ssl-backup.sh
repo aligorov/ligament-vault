@@ -90,10 +90,19 @@ if [[ "${DRY_RUN:-false}" != "true" && "${HTTPS_PORT:-443}" == "443" ]]; then
     fi
 fi
 
-PRIMARY_PG_IP=$(find_patroni_primary_ip || echo "${NODE1_IP}")
+PRIMARY_PG_IP=$(find_writable_pg_primary_ip || find_patroni_primary_ip || echo "${NODE1_IP}")
 log_step "2/7 — SFTPGo initprovider (update_mode=1, однократно на Primary ${PRIMARY_PG_IP})"
 ensure_remote_image "${PRIMARY_PG_IP}" "$(resolve_service_image_ref sftpgo)"
-remote_exec "${PRIMARY_PG_IP}" "cd '${REMOTE_BASE_DIR}' && docker compose run --rm --no-deps sftpgo sftpgo initprovider --config-file /etc/sftpgo/sftpgo.json"
+for _init_try in 1 2 3; do
+    PRIMARY_PG_IP=$(find_writable_pg_primary_ip || find_patroni_primary_ip || echo "${NODE1_IP}")
+    ensure_remote_image "${PRIMARY_PG_IP}" "$(resolve_service_image_ref sftpgo)"
+    if remote_exec "${PRIMARY_PG_IP}" "cd '${REMOTE_BASE_DIR}' && docker compose run --rm --no-deps sftpgo sftpgo initprovider --config-file /etc/sftpgo/sftpgo.json"; then
+        break
+    fi
+    (( _init_try == 3 )) && exit 1
+    log_warn "  ⏳ Повтор sftpgo initprovider через 4с (попытка ${_init_try}/3)..."
+    sleep 4
+done
 log_info "  ✅ Схема SFTPGo в PostgreSQL инициализирована"
 
 _ensure_sftpgo_unprivileged_ports_cb() {

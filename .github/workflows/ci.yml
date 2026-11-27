@@ -1037,7 +1037,9 @@ jobs:
           # Confirm transparent SSH+DNAT bridge automatically activated on node3 -> node1
           docker exec lv-node3 systemctl is-active --quiet ligament-vault-bridge-to-node1.service
 
-          # 1b. Test mid-Stage-3 '--resume' path with live etcd + Patroni Primary/Replicas already running!
+          # 1b. Switchover Patroni Primary to node2 and test mid-Stage-3 '--resume' with live etcd + non-node1 Primary!
+          docker exec lv-node1 bash -c 'PCID=$(cd /opt/ligament-vault && docker compose ps -q patroni | head -n1); docker exec "${PCID}" patronictl switchover --candidate node2 --force'
+          sleep 3
           rm -f "${WORKDIR}/ctl/.cluster_installed"
           mkdir -p "${WORKDIR}/ctl/.state"
           printf '%s\n' "stage-0-00-preflight" "stage-1-01-host-hardening" "stage-2-02-pki-secrets" > "${WORKDIR}/ctl/.state/checkpoints.install"

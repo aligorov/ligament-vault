@@ -656,8 +656,27 @@ patroni_is_primary() {
         return $?
     fi
     local code
-    code=$(remote_exec "${ip}" "CA='${REMOTE_BASE_DIR}/certs/ca.crt'; if [[ -f \"\${CA}\" ]]; then curl -s --cacert \"\${CA}\" -o /dev/null -w '%{http_code}' 'https://127.0.0.1:${PATRONI_API_PORT:-8008}/primary' 2>/dev/null || curl -s -o /dev/null -w '%{http_code}' 'http://127.0.0.1:${PATRONI_API_PORT:-8008}/primary' 2>/dev/null; else curl -s -o /dev/null -w '%{http_code}' 'http://127.0.0.1:${PATRONI_API_PORT:-8008}/primary' 2>/dev/null; fi" 2>/dev/null || echo "000")
+    code=$(remote_exec "${ip}" "CA='${REMOTE_BASE_DIR}/certs/ca.crt'; if [[ -f \"\${CA}\" ]]; then curl -s --max-time 4 --cacert \"\${CA}\" -o /dev/null -w '%{http_code}' 'https://127.0.0.1:${PATRONI_API_PORT:-8008}/primary' 2>/dev/null || curl -s --max-time 4 -o /dev/null -w '%{http_code}' 'http://127.0.0.1:${PATRONI_API_PORT:-8008}/primary' 2>/dev/null; else curl -s --max-time 4 -o /dev/null -w '%{http_code}' 'http://127.0.0.1:${PATRONI_API_PORT:-8008}/primary' 2>/dev/null; fi" 2>/dev/null || echo "000")
     [[ "${code}" == "200" ]]
+}
+
+patroni_is_writable_primary() {
+    local ip="$1"
+    if [[ "${DRY_RUN:-false}" == "true" ]]; then
+        [[ "${ip}" == "$(get_node_ip 1)" ]]
+        return $?
+    fi
+    remote_exec_stdin "${ip}" "${REMOTE_BASE_DIR}" "${PATRONI_API_PORT:-8008}" <<'REMOTE_PG_RW_CHK' 2>/dev/null
+set -euo pipefail
+BDIR="$1"; PPORT="$2"
+CA="${BDIR}/certs/ca.crt"
+code=$(curl -s --max-time 4 --cacert "${CA}" -o /dev/null -w '%{http_code}' "https://127.0.0.1:${PPORT}/primary" 2>/dev/null || echo "000")
+[[ "${code}" == "200" ]] || exit 1
+PCID=$(cd "${BDIR}" 2>/dev/null && docker compose ps -q patroni 2>/dev/null | head -n1 || true)
+[[ -n "${PCID}" ]] || exit 1
+in_rec=$(docker exec -u postgres "${PCID}" psql -U postgres -d postgres -tAc "SELECT pg_is_in_recovery();" 2>/dev/null | tr -d '[:space:]' || true)
+[[ "${in_rec}" == "f" ]]
+REMOTE_PG_RW_CHK
 }
 
 find_patroni_primary_ip() {
@@ -667,6 +686,19 @@ find_patroni_primary_ip() {
         local ip
         ip=$(get_node_ip "$i")
         if patroni_is_primary "${ip}"; then
+            echo "${ip}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+find_writable_pg_primary_ip() {
+    local count i ip
+    count=$(get_node_count)
+    for i in $(seq 1 "${count}"); do
+        ip=$(get_node_ip "$i")
+        if patroni_is_writable_primary "${ip}"; then
             echo "${ip}"
             return 0
         fi
