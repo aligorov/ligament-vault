@@ -1335,6 +1335,7 @@ harden_node_full() {
     peer_ips=$(get_all_peer_ips | tr '\n' ' ')
     log_info "Укрепление ОС на ${name} (${ip})..."
 
+    local pasv_range="${FTPS_PASV_MIN:-50000}-${FTPS_PASV_MAX:-50199}"
     remote_exec_stdin "${ip}" \
         "${REMOTE_BASE_DIR}" \
         "${ADMIN_SSH_PORT:-22}" \
@@ -1344,9 +1345,10 @@ harden_node_full() {
         "${PG_DATA_DIR}" \
         "${ETCD_DATA_DIR:-/data/etcd}" \
         "${SWFS_MASTER_DIR:-/data/swfs-master}" \
-        "${peer_ips}" <<'REMOTE_HARDEN'
+        "${peer_ips}" \
+        "${pasv_range}" <<'REMOTE_HARDEN'
 set -euo pipefail
-BASE_DIR="$1"; SSH_PORT="$2"; SFTP_TMP="$3"; SFTP_DATA="$4"; SWFS_DIR="$5"; PG_DIR="$6"; ETCD_DIR="$7"; SWFS_MDIR="$8"; PEER_IPS="$9"
+BASE_DIR="$1"; SSH_PORT="$2"; SFTP_TMP="$3"; SFTP_DATA="$4"; SWFS_DIR="$5"; PG_DIR="$6"; ETCD_DIR="$7"; SWFS_MDIR="$8"; PEER_IPS="$9"; PASV_RANGE="${10}"
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
@@ -1373,14 +1375,17 @@ SSHD
     fi
 fi
 
-cat > /etc/sysctl.d/99-ligament-vault.conf <<'SYSCTL'
+cat > /etc/sysctl.d/99-ligament-vault.conf <<SYSCTL
 fs.file-max = 1048576
 net.core.somaxconn = 65535
-net.ipv4.ip_local_port_range = 1024 65535
+net.ipv4.ip_local_port_range = 32768 60999
+net.ipv4.ip_local_reserved_ports = ${PASV_RANGE}
 net.ipv4.ip_unprivileged_port_start = 21
 net.ipv4.tcp_tw_reuse = 1
 vm.swappiness = 1
 SYSCTL
+sysctl -w net.ipv4.ip_local_port_range="32768 60999" >/dev/null 2>&1 || true
+sysctl -w net.ipv4.ip_local_reserved_ports="${PASV_RANGE}" >/dev/null 2>&1 || true
 sysctl -w net.ipv4.ip_unprivileged_port_start=21 >/dev/null 2>&1 || true
 sysctl --system >/dev/null 2>&1 || true
 
@@ -1435,7 +1440,25 @@ ensure_node_base_prereqs() {
     if ! remote_exec "${ip}" "command -v jq >/dev/null && command -v ufw >/dev/null && command -v nc >/dev/null && command -v conntrack >/dev/null && python3 -c 'import yaml' 2>/dev/null" >/dev/null 2>&1; then
         log_info "  ⚙️  Доустановка базовых системных пакетов на ${name} (${ip})..."
         harden_node_full "${ip}" "${dc}" "${name}" "${idx}"
+        return 0
     fi
+    local pasv_range="${FTPS_PASV_MIN:-50000}-${FTPS_PASV_MAX:-50199}"
+    remote_exec "${ip}" "
+        changed=0
+        if [[ -f /etc/sysctl.d/99-ligament-vault.conf ]] && grep -q 'ip_local_port_range = 1024 65535' /etc/sysctl.d/99-ligament-vault.conf; then
+            sed -i 's/net.ipv4.ip_local_port_range = 1024 65535/net.ipv4.ip_local_port_range = 32768 60999/' /etc/sysctl.d/99-ligament-vault.conf
+            changed=1
+        fi
+        if [[ -f /etc/sysctl.d/99-ligament-vault.conf ]] && ! grep -q 'ip_local_reserved_ports' /etc/sysctl.d/99-ligament-vault.conf; then
+            echo 'net.ipv4.ip_local_reserved_ports = ${pasv_range}' >> /etc/sysctl.d/99-ligament-vault.conf
+            changed=1
+        fi
+        if (( changed == 1 )); then
+            sysctl -w net.ipv4.ip_local_port_range='32768 60999' >/dev/null 2>&1 || true
+            sysctl -w net.ipv4.ip_local_reserved_ports='${pasv_range}' >/dev/null 2>&1 || true
+            sysctl --system >/dev/null 2>&1 || true
+        fi
+    " >/dev/null 2>&1 || true
 }
 
 # --- Установка ограниченного forced-command SSH-хелпера для Арбитра (вкл. TCP RST fencing) ---
