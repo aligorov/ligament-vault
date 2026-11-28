@@ -16,11 +16,14 @@
 
 set -eu
 
-ENV_FILE="/etc/sftpgo/hooks/ligament-2fa.env"
-if [ -f "${ENV_FILE}" ]; then
-    # shellcheck disable=SC1090
-    . "${ENV_FILE}"
-fi
+config="$(dirname "$0")/ligament-2fa.json"
+[ -r "$config" ] || exit 1
+LIGAMENT_2FA_ENABLED=$(jq -er .LIGAMENT_2FA_ENABLED "$config") || exit 1
+LIGAMENT_2FA_API_URL=$(jq -er .LIGAMENT_2FA_API_URL "$config") || exit 1
+LIGAMENT_2FA_API_TOKEN=$(jq -er .LIGAMENT_2FA_API_TOKEN "$config") || exit 1
+LIGAMENT_2FA_TIMEOUT_SEC=$(jq -er .LIGAMENT_2FA_TIMEOUT_SEC "$config") || exit 1
+LIGAMENT_2FA_FAIL_OPEN=$(jq -er .LIGAMENT_2FA_FAIL_OPEN "$config") || exit 1
+CLUSTER_SLUG=$(jq -er .CLUSTER_SLUG "$config") || exit 1
 
 if [ "${LIGAMENT_2FA_ENABLED:-false}" != "true" ]; then
     exit 0

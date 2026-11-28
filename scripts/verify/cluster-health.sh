@@ -22,6 +22,11 @@ STRICT_MODE=false
 WARNINGS=0
 ERRORS=0
 NODES_JSON=()
+FIRST_VOTER=""
+REACHABLE_VOTERS=0
+PG_PRIMARIES=0
+PG_SYNC_STANDBYS=null
+EXPECTED_VOTERS=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -32,7 +37,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 check_node_health() {
-    local ip="$1" dc="$2" name="$3"
+    local ip="$1" dc="$2" name="$3" idx="$4"
+    local is_voter=false
+    if is_quorum_node "$idx" "$name"; then is_voter=true; EXPECTED_VOTERS=$((EXPECTED_VOTERS+1)); fi
 
     if [[ "${DRY_RUN:-false}" == "true" ]]; then
         if [[ "${JSON_OUT}" == "true" ]]; then
@@ -44,7 +51,8 @@ check_node_health() {
     fi
 
     local raw ntp_offset="N/A" disk_pct="N/A" patroni_role="DOWN" swfs_vol="DOWN" swfs_filer="DOWN" sftpgo_up="DOWN" haproxy_up="DOWN"
-    raw=$(remote_exec_stdin "${ip}" "${REMOTE_BASE_DIR}" "${PATRONI_API_PORT:-8008}" "${SWFS_VOLUME_PORT:-8082}" "${SWFS_FILER_PORT:-8888}" "${HAPROXY_PG_PORT:-5433}" <<'REMOTE_HEALTH' || true
+    if ! raw=$(remote_exec_stdin "${ip}" "${REMOTE_BASE_DIR}" "${PATRONI_API_PORT:-8008}" "${SWFS_VOLUME_PORT:-8082}" "${SWFS_FILER_PORT:-8888}" "${HAPROXY_PG_PORT:-5433}" "$is_voter" "${ETCD_CLIENT_PORT:-2379}" <<'REMOTE_HEALTH'
+set -o pipefail
 BDIR="$1"; PPORT="$2"; VPORT="$3"; FPORT="$4"; HPORT="$5"
 NTP=$(chronyc tracking 2>/dev/null | awk '/System time/{printf "%.1fms", $4*1000}' || echo "N/A")
 DISK=$(df -h / | awk 'NR==2{print $5}' || echo "N/A")
@@ -57,17 +65,44 @@ SSTAT="DOWN"
 if [[ -n "${SCID}" ]] && docker exec "${SCID}" sftpgo ping --config-file /etc/sftpgo/sftpgo.json >/dev/null 2>&1; then
     SSTAT="OK"
 fi
-echo "${NTP}|${DISK}|${PROLE}|${VSTAT}|${FSTAT}|${HSTAT}|${SSTAT}"
+ESTAT=SKIP
+if [[ "$6" == true ]]; then
+    ESTAT=DOWN
+    if (cd "$BDIR" && docker compose exec -T etcd etcdctl --endpoints="https://127.0.0.1:$7" --dial-timeout=2s --command-timeout=4s --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key endpoint health >/dev/null 2>&1); then ESTAT=OK; fi
+fi
+echo "${NTP}|${DISK}|${PROLE}|${VSTAT}|${FSTAT}|${HSTAT}|${SSTAT}|${ESTAT}"
 REMOTE_HEALTH
-    )
-    IFS='|' read -r ntp_offset disk_pct patroni_role swfs_vol swfs_filer haproxy_up sftpgo_up <<< "${raw}"
+    ); then raw=""; fi
+    local etcd_state ssh_state=OK
+    if [[ "${raw##*$'\n'}" == *'|'*'|'*'|'*'|'*'|'*'|'*'|'* ]]; then
+        IFS='|' read -r ntp_offset disk_pct patroni_role swfs_vol swfs_filer haproxy_up sftpgo_up etcd_state <<< "${raw##*$'\n'}"
+    else
+        ssh_state=DOWN; etcd_state=DOWN
+    fi
+    if [[ "$is_voter" == true && "$etcd_state" == OK ]]; then
+        REACHABLE_VOTERS=$((REACHABLE_VOTERS+1))
+        [[ -n "$FIRST_VOTER" ]] || FIRST_VOTER="$ip"
+    fi
 
+    case "$patroni_role" in
+        master|primary)
+            PG_PRIMARIES=$((PG_PRIMARIES+1))
+            local synced
+            synced=$(remote_exec_stdin "$ip" "$REMOTE_BASE_DIR" "${PG_PORT:-15432}" <<'CHECK_SYNC' || true
+set -euo pipefail
+cd "$1"
+docker compose exec -T -u postgres patroni psql -p "$2" -d postgres -XAt -c "SELECT count(*) FROM pg_stat_replication WHERE state='streaming' AND sync_state IN ('sync','quorum')"
+CHECK_SYNC
+            )
+            if [[ "$synced" =~ ^[0-9]+$ ]]; then PG_SYNC_STANDBYS=$synced; fi
+            ;;
+    esac
     [[ "${patroni_role}" == "DOWN" || "${patroni_role}" == "ERR" ]] && ERRORS=$((ERRORS + 1))
     [[ "${swfs_vol}" == "DOWN" || "${swfs_filer}" == "DOWN" ]]     && ERRORS=$((ERRORS + 1))
     [[ "${haproxy_up}" == "DOWN" || "${sftpgo_up}" == "DOWN" ]]    && WARNINGS=$((WARNINGS + 1))
 
     if [[ "${JSON_OUT}" == "true" ]]; then
-        NODES_JSON+=("{\"node\":\"${name}\",\"ip\":\"${ip}\",\"dc\":\"${dc}\",\"ntp_offset\":\"${ntp_offset}\",\"disk_root\":\"${disk_pct}\",\"patroni_role\":\"${patroni_role}\",\"swfs_volume\":\"${swfs_vol}\",\"swfs_filer\":\"${swfs_filer}\",\"haproxy\":\"${haproxy_up}\",\"sftpgo\":\"${sftpgo_up}\"}")
+        NODES_JSON+=("{\"node\":\"${name}\",\"ip\":\"${ip}\",\"dc\":\"${dc}\",\"ssh\":\"$ssh_state\",\"etcd\":\"$etcd_state\",\"ntp_offset\":\"${ntp_offset}\",\"disk_root\":\"${disk_pct}\",\"patroni_role\":\"${patroni_role}\",\"swfs_volume\":\"${swfs_vol}\",\"swfs_filer\":\"${swfs_filer}\",\"haproxy\":\"${haproxy_up}\",\"sftpgo\":\"${sftpgo_up}\"}")
     else
         printf "  %-8s %-15s %-5s NTP:%-9s Disk:%-5s PG:%-8s HAProxy:%-4s Vol:%-4s Filer:%-4s SFTPGo:%s\n" \
             "${name}" "${ip}" "${dc}" "${ntp_offset}" "${disk_pct}" "${patroni_role}" "${haproxy_up}" "${swfs_vol}" "${swfs_filer}" "${sftpgo_up}"
@@ -84,42 +119,36 @@ ssl_days="N/A"
 last_backup="N/A"
 
 if [[ "${DRY_RUN:-false}" != "true" ]]; then
-    local_ip=""
-    for i in $(seq 1 "$(get_node_count)"); do
-        cand_ip=$(get_node_ip "$i")
-        if remote_exec "${cand_ip}" "echo ok" >/dev/null 2>&1; then
-            local_ip="${cand_ip}"
-            break
-        fi
-    done
-    local_ip="${local_ip:-$(get_node_ip 1)}"
-
-    if [[ "${JSON_OUT}" != "true" ]]; then
-        log_step "Кворум etcd и Patroni"
-        remote_exec "${local_ip}" "
-            ECID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q etcd | head -n1 || true)
-            [[ -n \"\${ECID}\" ]] && docker exec \"\${ECID}\" etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} \
-                --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key \
-                endpoint status -w table 2>/dev/null || true
-            PCID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q patroni | head -n1 || true)
-            [[ -n \"\${PCID}\" ]] && docker exec \"\${PCID}\" patronictl list 2>/dev/null || true
-        " || WARNINGS=$((WARNINGS + 1))
+    if (( PG_PRIMARIES != 1 )); then
+        ERRORS=$((ERRORS+1))
+    elif (( ${PG_SYNC_STANDBY_COUNT:-0} > 0 )) && { [[ "$PG_SYNC_STANDBYS" == null ]] || (( PG_SYNC_STANDBYS < PG_SYNC_STANDBY_COUNT )); }; then
+        ERRORS=$((ERRORS+1))
+        if [[ "$JSON_OUT" != true ]]; then log_error "Синхронные реплики: $PG_SYNC_STANDBYS, цель $PG_SYNC_STANDBY_COUNT"; fi
     fi
-
-    master_peers=$(build_swfs_master_peers)
-    dry_fix=$(remote_exec "${local_ip}" "FCID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q swfs-filer | head -n1); [[ -n \"\${FCID}\" ]] && docker exec -i \"\${FCID}\" weed shell -master='${master_peers}' -filer='127.0.0.1:${SWFS_FILER_PORT:-8888}' <<< 'volume.fix.replication' || echo 'ERR'" 2>/dev/null || echo "ERR")
-    if echo "${dry_fix}" | grep -qiE "replicating|copying|deleting|under-replicated|over-replicated|flag provided|\bERR\b|error:"; then
+    if (( EXPECTED_VOTERS == 0 || REACHABLE_VOTERS < EXPECTED_VOTERS / 2 + 1 )); then
+        ERRORS=$((ERRORS+1))
+    elif (( REACHABLE_VOTERS != EXPECTED_VOTERS )); then
+        WARNINGS=$((WARNINGS+1))
+    fi
+    local_ip="$FIRST_VOTER"
+    if [[ -z "$local_ip" ]]; then
         swfs_repl_ok=false
-        WARNINGS=$((WARNINGS + 1))
-        if [[ "${JSON_OUT}" != "true" ]]; then
-            log_warn "SeaweedFS: обнаружены недореплицированные тома (volume.fix.replication dry-run)"
-        fi
     else
-        if [[ "${JSON_OUT}" != "true" ]]; then
-            log_info "  ✅ Репликация томов SeaweedFS в норме"
+        master_peers=$(build_swfs_master_peers)
+        dry_fix=$(remote_exec "${local_ip}" "FCID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q swfs-filer | head -n1); [[ -n \"\${FCID}\" ]] && docker exec -i \"\${FCID}\" weed shell -master='${master_peers}' -filer='127.0.0.1:${SWFS_FILER_PORT:-8888}' <<< $'lock\nvolume.fix.replication\nunlock' || echo 'ERR'" 2>/dev/null || echo "ERR")
+        if echo "${dry_fix}" | grep -qiE "replicating|copying|deleting|under[ -]replicated|over[ -]replicated|flag provided|\bERR\b|error:" ||
+            ! verify_volume_placement "$local_ip" >/dev/null; then
+            swfs_repl_ok=false
+            WARNINGS=$((WARNINGS + 1))
+            if [[ "${JSON_OUT}" != "true" ]]; then
+                log_warn "SeaweedFS: не подтверждены метки и размещение томов для политики ${SWFS_DEFAULT_REPLICATION:-100}"
+            fi
+        else
+            if [[ "${JSON_OUT}" != "true" ]]; then
+                log_info "  ✅ Репликация томов SeaweedFS в норме"
+            fi
         fi
     fi
-
     cert_path="${CONFIG_ROOT:-${SCRIPT_DIR}}/.ssl/certificates/${DOMAIN}.crt"
     if [[ -f "${cert_path}" ]]; then
         ssl_days=$(python3 - "${cert_path}" <<'PYEOF'
@@ -137,7 +166,9 @@ PYEOF
         WARNINGS=$((WARNINGS + 1))
     fi
 
-    last_backup=$(remote_exec "${local_ip}" "PCID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q patroni | head -n1); [[ -n \"\${PCID}\" ]] && docker exec -u postgres \"\${PCID}\" pgbackrest --stanza='${CLUSTER_SLUG}' info --output=json 2>/dev/null | jq -r '.[0].backup[-1].label // \"none\"' 2>/dev/null || echo 'none'" 2>/dev/null || echo "N/A")
+    if [[ -n "$local_ip" ]]; then
+        last_backup=$(remote_exec "${local_ip}" "PCID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q patroni | head -n1); [[ -n \"\${PCID}\" ]] && docker exec -u postgres \"\${PCID}\" pgbackrest --stanza='${CLUSTER_SLUG}' info --output=json 2>/dev/null | jq -r '.[0].backup[-1].label // \"none\"' 2>/dev/null || echo 'none'" 2>/dev/null || echo "N/A")
+    fi
     [[ -z "${last_backup}" || "${last_backup}" == "null" ]] && last_backup="none"
 
     if [[ "${JSON_OUT}" != "true" ]]; then
@@ -149,8 +180,8 @@ fi
 
 if [[ "${JSON_OUT}" == "true" ]]; then
     nodes_joined=$(IFS=,; echo "${NODES_JSON[*]}")
-    printf '{"nodes":[%s],"swfs_replication_healthy":%s,"ssl_days_remaining":"%s","last_backup":"%s","warnings":%d,"errors":%d}\n' \
-        "${nodes_joined}" "${swfs_repl_ok}" "${ssl_days}" "${last_backup}" "${WARNINGS}" "${ERRORS}"
+    printf '{"nodes":[%s],"pg_primaries":%d,"pg_sync_standbys":%s,"pg_sync_target":%d,"etcd_healthy_voters":%d,"etcd_expected_voters":%d,"swfs_replication_healthy":%s,"ssl_days_remaining":"%s","last_backup":"%s","warnings":%d,"errors":%d}\n' \
+        "${nodes_joined}" "$PG_PRIMARIES" "$PG_SYNC_STANDBYS" "${PG_SYNC_STANDBY_COUNT:-0}" "${REACHABLE_VOTERS}" "${EXPECTED_VOTERS}" "${swfs_repl_ok}" "${ssl_days}" "${last_backup}" "${WARNINGS}" "${ERRORS}"
 fi
 
 if (( ERRORS > 0 )); then

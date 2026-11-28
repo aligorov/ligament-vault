@@ -19,20 +19,12 @@ source "${SCRIPT_DIR}/scripts/lib/common.sh"
 # shellcheck source=../lib/deploy.sh
 source "${SCRIPT_DIR}/scripts/lib/deploy.sh"
 
-load_cluster_env "${CONFIG_ROOT:-${SCRIPT_DIR}}"
-
-STATE_DIR="/var/lib/${CLUSTER_SLUG}-arbiter"
-[[ -w /var/lib ]] || STATE_DIR="$(state_root)/.arbiter_state"
-FAIL_COUNT_FILE="${STATE_DIR}/fail_count"
-LAST_SWITCH_FILE="${STATE_DIR}/last_switch_epoch"
-ACTIVE_NODE_FILE="${STATE_DIR}/active_ip"
-ARB_KEY="${SCRIPT_DIR}/.ssh/id_ed25519"
-
 PROBE_INTERVAL=15
 FAIL_THRESHOLD=3
 COOLDOWN_SEC=3600
-
-mkdir -p "${STATE_DIR}"
+FAILBACK_SAMPLES=5
+SAMPLE_INTERVAL=30
+ARB_KEY="${SCRIPT_DIR}/.ssh/id_ed25519"
 
 arbiter_ssh() {
     local ip="$1" subcmd="$2"
@@ -48,152 +40,149 @@ arbiter_ssh() {
 }
 
 probe_edge_node() {
-    local ip="$1"
-    if [[ "${DRY_RUN:-false}" == "true" ]]; then
-        return 0
-    fi
-    local hport="${HTTPS_PORT:-443}"
-    if [[ -n "${DOMAIN:-}" && "${DOMAIN}" != "files.company.com" ]]; then
-        curl -sf --max-time 5 --resolve "${DOMAIN}:${hport}:${ip}" "https://${DOMAIN}:${hport}/web/client/login" >/dev/null 2>&1 || return 1
-    else
-        curl -sf --max-time 5 --insecure "https://${ip}:${hport}/web/client/login" >/dev/null 2>&1 || return 1
-    fi
-    nc -z -w 4 "${ip}" "${SFTP_PORT:-2022}" >/dev/null 2>&1 || return 1
-    return 0
+    local node="$1" ip
+    ip=$(resolve_node_ipv4 "${node}") || return 1
+    config_db_get EDGE_PROBE_PASSWORD | python3 "${SCRIPT_DIR}/scripts/ops/edge_probe.py" probe \
+        "${ip}" "${DOMAIN}" "${HTTPS_PORT:-443}" "${SFTP_PORT:-2022}" "${FTPS_PORT:-21}" \
+        "${ARB_KEY}" "${SCRIPT_DIR}/.ssh/edge_known_hosts"
 }
 
 publish_etcd_lease() {
-    local active_ip="$1"
-    [[ "${DRY_RUN:-false}" == "true" ]] && return 0
-    for i in 1 2 3; do
-        local q_ip
-        q_ip=$(get_node_ip "$i")
-        if arbiter_ssh "${q_ip}" "etcd-lease ${active_ip}" >/dev/null 2>&1; then
-            return 0
-        fi
-    done
-    return 0
+    local node
+    while IFS= read -r node; do
+        if arbiter_ssh "${node}" "etcd-lease $1" >/dev/null 2>&1; then return 0; fi
+    done < <(get_node_ips)
+    log_warn "Ни одна нода не подтвердила запись active_edge в etcd"
+    return 1
 }
 
-update_endpoint_record() {
-    local target_ip="$1"
-    update_dns_provider "${target_ip}"
-    if [[ "${DRY_RUN:-false}" != "true" ]]; then
-        echo "${target_ip}" > "${ACTIVE_NODE_FILE}"
-        date +%s > "${LAST_SWITCH_FILE}"
-    fi
-    publish_etcd_lease "${target_ip}"
+save_state() {
+    python3 "${SCRIPT_DIR}/scripts/ops/arbiter_state.py" "$(state_root)/control.sqlite3" "${1:-write}" \
+        "${active}" "${published}" "${failures}" "${switched}" "${samples}" "${last_probe}"
 }
 
-check_failback_gates() {
-    local preferred_ip="$1"
-    log_info "Проверка 5 ворот авто-failback на ${preferred_ip}..."
-
-    local now last_switch=0
-    now=$(date +%s)
-    [[ -f "${LAST_SWITCH_FILE}" ]] && last_switch=$(cat "${LAST_SWITCH_FILE}")
-    if (( now - last_switch < COOLDOWN_SEC )); then
-        log_info "Gate 5 BLOCK: не прошел cooldown (${COOLDOWN_SEC}s)"
+publish_edge() {
+    local target="$1" address previous="${active}"
+    address=$(resolve_node_ipv4 "${target}") || return 1
+    # A provider can accept a write even if this process dies before recording the response.
+    python3 "${SCRIPT_DIR}/scripts/ops/arbiter_state.py" "$(state_root)/control.sqlite3" pending || return 1
+    if ! update_dns_provider "${address}"; then
+        log_error "Провайдер не подтвердил переключение на ${target} (${address}). Повтор при следующем опросе."
         return 1
     fi
+    active="${target}"; published="${address}"; failures=0; samples=0; last_probe=0
+    switched=$(date +%s)
+    save_state commit || return 1
+    publish_etcd_lease "${address}" || true
+    if [[ "${previous}" != "${target}" ]]; then
+        arbiter_ssh "${previous}" fence-edge >/dev/null 2>&1 || log_warn "Старый edge ${previous} не подтвердил отключение"
+    fi
+    log_info "Провайдер подтвердил переключение на ${target} (${address})"
+}
 
-    local pg_ok="FAIL"
-    if [[ "${DRY_RUN:-false}" == "true" ]]; then
-        pg_ok="OK"
-    else
-        local ca_opt=()
-        [[ -f "${SCRIPT_DIR}/prometheus/ca.crt" ]] && ca_opt=(--cacert "${SCRIPT_DIR}/prometheus/ca.crt")
-        pg_ok=$(curl -sf --max-time 5 "${ca_opt[@]}" "https://${preferred_ip}:${PATRONI_API_PORT:-8008}/patroni" | python3 -c '
+replica_ready() {
+    local node="$1" peer primary_position="" base
+    local -a request=(curl -fsS --max-time 5 --cacert "${SCRIPT_DIR}/prometheus/ca.crt")
+    # Capture a write position from the elected primary before observing replay.
+    while IFS= read -r peer; do
+        base="https://${peer}:${PATRONI_API_PORT:-8008}"
+        "${request[@]}" "${base}/primary" >/dev/null 2>&1 || continue
+        primary_position=$("${request[@]}" "${base}/patroni" | python3 -c '
 import json, sys
-d = json.load(sys.stdin)
-if d.get("state") != "running":
+r = json.load(sys.stdin)
+if r.get("state") != "running" or r.get("role") not in ("master", "primary"): sys.exit(1)
+print(int(r["timeline"]), int(r["xlog"]["location"]))') || continue
+        break
+    done < <(get_node_ips)
+    [[ -n "${primary_position}" ]] || return 1
+    "${request[@]}" "https://${node}:${PATRONI_API_PORT:-8008}/patroni" | python3 -c '
+import json, sys
+timeline, minimum = map(int, sys.argv[1].split())
+r = json.load(sys.stdin)
+if r.get("state") != "running" or r.get("timeline") != timeline: sys.exit(1)
+role = r.get("role")
+xlog = r.get("xlog") or {}
+if role in ("master", "primary"):
+    position = xlog.get("location")
+elif role == "replica":
+    position = xlog.get("replayed_location")
+    if position != xlog.get("received_location"): sys.exit(1)
+else:
     sys.exit(1)
-xlog = d.get("xlog") or {}
-if d.get("role") == "replica" and xlog.get("received_location") != xlog.get("replayed_location"):
-    sys.exit(1)
-print("OK")
-' 2>/dev/null || echo "FAIL")
+sys.exit(0 if type(position) is int and position >= minimum else 1)' "${primary_position}"
+}
+
+check_failback() {
+    local preferred="$1" now="$2"
+    if (( now - switched < COOLDOWN_SEC || now - last_probe < SAMPLE_INTERVAL )); then return 0; fi
+    last_probe="${now}"
+    if replica_ready "${preferred}" && arbiter_ssh "${preferred}" check-gates | grep -Fxq GATES_OK \
+        && arbiter_ssh "${preferred}" ensure-sftpgo >/dev/null && probe_edge_node "${preferred}"; then
+        samples=$((samples + 1))
+    else
+        samples=0
     fi
-    if [[ "${pg_ok}" != "OK" ]]; then
-        log_info "Gate 1 BLOCK: Patroni/PG не синхронизирован на ${preferred_ip}"
-        return 1
+    if (( samples >= FAILBACK_SAMPLES )); then
+        publish_edge "${preferred}" || return 1
+    else
+        save_state
     fi
-
-    if ! arbiter_ssh "${preferred_ip}" "check-gates" | grep -q "GATES_OK"; then
-        log_info "Gates 2/3 BLOCK: etcd или репликация SeaweedFS не в норме на ${preferred_ip}"
-        return 1
-    fi
-
-    # Поднимаем sftpgo на кандидате перед сквозными пробами Gate 4 (если был в fence-edge)
-    arbiter_ssh "${preferred_ip}" "restart-sftpgo" >/dev/null 2>&1 || true
-
-    for attempt in 1 2 3 4 5; do
-        if ! probe_edge_node "${preferred_ip}"; then
-            log_info "Gate 4 BLOCK: проба ${attempt}/5 на ${preferred_ip} провалена"
-            return 1
-        fi
-        [[ ${attempt} -lt 5 ]] && run_or_dry sleep 30
-    done
-
-    log_info "✅ Все 5 ворот failback пройдены!"
-    return 0
 }
 
 run_once() {
-    local primary_edge_ip active_ip fails=0
-    primary_edge_ip=$(get_node_ip 1)
-    active_ip=$(cat "${ACTIVE_NODE_FILE}" 2>/dev/null || resolve_current_active_ip)
-    [[ -f "${FAIL_COUNT_FILE}" ]] && fails=$(cat "${FAIL_COUNT_FILE}")
-
-    if probe_edge_node "${active_ip}"; then
-        echo "0" > "${FAIL_COUNT_FILE}"
-        publish_etcd_lease "${active_ip}"
-        log_debug "Active Edge ${active_ip}: OK"
-
-        if [[ "${active_ip}" != "${primary_edge_ip}" ]]; then
-            if check_failback_gates "${primary_edge_ip}"; then
-                log_info "FAILBACK на ${primary_edge_ip}: рестарт sftpgo + переключение (${FAILOVER_MODE:-dns})..."
-                arbiter_ssh "${primary_edge_ip}" "restart-sftpgo"
-                update_endpoint_record "${primary_edge_ip}"
-            fi
-        fi
+    local primary active published failures switched samples last_probe state endpoint candidate pending=0
+    primary=$(get_node_ip 1) || return 1
+    state=$(python3 "${SCRIPT_DIR}/scripts/ops/arbiter_state.py" "$(state_root)/control.sqlite3" read) || return 1
+    if [[ -n "${state}" ]]; then
+        IFS='|' read -r active published failures switched samples last_probe pending <<< "${state}"
     else
-        fails=$((fails + 1))
-        echo "${fails}" > "${FAIL_COUNT_FILE}"
-        log_warn "Active Edge ${active_ip} не отвечает (${fails}/${FAIL_THRESHOLD})"
-
-        if (( fails >= FAIL_THRESHOLD )); then
-            local count candidate_ip=""
-            count=$(get_node_count)
-            for i in $(seq 1 "${count}"); do
-                local ip
-                ip=$(get_node_ip "$i")
-                if [[ "${ip}" != "${active_ip}" ]] && probe_edge_node "${ip}"; then
-                    candidate_ip="${ip}"
-                    break
-                fi
-            done
-
-            if [[ -n "${candidate_ip}" ]]; then
-                log_warn "FAILOVER: изоляция ${active_ip} (TCP RST fence-edge) -> переключение на ${candidate_ip}!"
-                arbiter_ssh "${active_ip}" "fence-edge" >/dev/null 2>&1 || true
-                arbiter_ssh "${candidate_ip}" "restart-sftpgo"
-                update_endpoint_record "${candidate_ip}"
-                echo "0" > "${FAIL_COUNT_FILE}"
-            else
-                log_error "КРИТИЧНО: ни один резервный Edge-узел не прошел пробу!"
-                exit 1
-            fi
+        active=$(resolve_current_active_ip) || return 1
+        # On a cold start reconcile with the provider even when the active node is healthy.
+        published=""; failures=0; switched=0; samples=0; last_probe=0
+    fi
+    if probe_edge_node "${active}"; then
+        endpoint=$(resolve_node_ipv4 "${active}") || return 1
+        if (( pending )) || [[ "${endpoint}" != "${published}" ]]; then
+            publish_edge "${active}" || return 1
+        else
+            publish_etcd_lease "${published}" || true
         fi
+        if (( failures )); then failures=0; save_state || return 1; fi
+        if [[ "${primary}" != "${active}" ]]; then check_failback "${primary}" "$(date +%s)"; fi
+        return $?
+    fi
+
+    if (( failures < FAIL_THRESHOLD )); then failures=$((failures + 1)); fi
+    samples=0; last_probe=0
+    save_state || return 1
+    log_warn "Клиентская проба ${active} не прошла (${failures}/${FAIL_THRESHOLD})"
+    if (( failures < FAIL_THRESHOLD )); then return 0; fi
+    while IFS= read -r candidate; do
+        [[ "${candidate}" != "${active}" ]] || continue
+        if ! probe_edge_node "${candidate}"; then
+            arbiter_ssh "${candidate}" ensure-sftpgo >/dev/null 2>&1 && probe_edge_node "${candidate}" || continue
+        fi
+        publish_edge "${candidate}"
+        return $?
+    done < <(get_node_ips)
+    log_error "Ни один запасной edge не подтвердил работоспособность клиентских протоколов"
+    return 1
+}
+
+main() {
+    load_cluster_env "${CONFIG_ROOT:-${SCRIPT_DIR}}"
+    [[ "${DRY_RUN:-false}" != "true" ]] || { log_info "[DRY-RUN] Опрос клиентских протоколов и DNS"; return 0; }
+    # One daemon/one-shot writer per local arbiter DB. The DB is never replaced during an update.
+    exec 9<"$(state_root)/control.sqlite3"
+    flock -n 9 || { log_error "Другой процесс арбитра уже работает"; return 1; }
+    if [[ "${1:-}" == "--daemon" ]]; then
+        while true; do
+            run_once || log_warn "Опрос арбитра завершился с ошибкой"
+            sleep "${PROBE_INTERVAL}"
+        done
+    else
+        run_once
     fi
 }
 
-if [[ "${1:-}" == "--daemon" ]]; then
-    log_info "Арбитр ${PROJECT_NAME} запущен в режиме демона (шаг ${PROBE_INTERVAL}s, режим ${FAILOVER_MODE:-dns})..."
-    while true; do
-        run_once || true
-        sleep "${PROBE_INTERVAL}"
-    done
-else
-    run_once
-fi
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi

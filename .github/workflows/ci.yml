@@ -5,6 +5,15 @@ on:
     branches: ["main", "master"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      scale_ha:
+        description: "Extend the live VPS test with quorum scaling 3→4→5 and a replacement on a clean disk"
+        type: boolean
+        default: false
+      vps_runner:
+        description: "Ubuntu 24.04 runner label for the live VPS job (select an ephemeral runner with enough free space)"
+        type: string
+        default: ubuntu-24.04
 
 jobs:
   validate-and-dry-run:
@@ -17,7 +26,7 @@ jobs:
       - name: Install dependencies (age, shellcheck, python3-yaml)
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq age shellcheck python3-yaml jq
+          sudo apt-get install -y -qq age apache2-utils shellcheck python3-yaml jq
 
       - name: Syntax check (bash -n, sh -n, python py_compile)
         run: |
@@ -26,7 +35,7 @@ jobs:
             bash -n "$f"
           done
           sh -n scripts/hooks/ligament-2fa-hook.sh
-          python3 -m py_compile web/panel.py
+          python3 -m compileall -q web scripts/lib scripts/ops tests
 
       - name: ShellCheck static analysis
         run: |
@@ -38,16 +47,15 @@ jobs:
           cp -R . "${WORKDIR}/repo"
           cd "${WORKDIR}/repo"
 
-          DRY_RUN=true ./install.sh
+          ./install.sh --dry-run
 
-          cp cluster.env.example cluster.env
-          sed -i 's/FIXME_IP1:dc1:node1 FIXME_IP2:dc2:node2 FIXME_IP3:dc3:node3/10.0.1.10:dc1:node1 10.0.2.10:dc2:node2 10.0.3.10:dc3:node3/' cluster.env
-          sed -i 's/ARBITER_IP=""/ARBITER_IP="198.51.100.50"/' cluster.env
-          chmod 600 cluster.env
-
-          export AGE_KEY_FILE="${WORKDIR}/age.key"
-          ./ligactl secrets init
+          ./ligactl config init
+          source scripts/lib/common.sh
+          config_db_set_many CLUSTER_NODES "10.0.1.10:dc1:node1 10.0.2.10:dc2:node2 10.0.3.10:dc3:node3" ARBITER_IP "198.51.100.50" \
+            PANEL_PORT 18443 PANEL_BIND 127.0.0.1
           ./ligactl secrets status
+          python3 -m unittest discover -s tests
+          python3 -m unittest discover -s scripts/verify -p 'test_*.py'
 
           # YAML and inline JS syntax checks
           python3 - <<'PYEOF'
@@ -76,14 +84,15 @@ jobs:
             load_cluster_env "${WORKDIR}/repo"
             echo "${PANEL_ADMIN_PASSWORD:-${SFTPGO_ADMIN_PASSWORD}}"
           )
-          PANEL_PORT=18443 PANEL_BIND=127.0.0.1 python3 web/panel.py &
+          python3 web/panel.py &
           PANEL_PID=$!
           trap 'kill "${PANEL_PID}" 2>/dev/null || true' EXIT
           sleep 2
           curl -ksf https://127.0.0.1:18443/api/v1/health | jq -e '.ok == true'
-          curl -ksfD - https://127.0.0.1:18443/ | grep -qi "X-Content-Type-Options: nosniff"
-          curl -ksfD - https://127.0.0.1:18443/ | grep -qi "Content-Security-Policy:"
-          curl -ksf https://127.0.0.1:18443/ | grep -q "Ligament Vault"
+          curl -ksfD "${WORKDIR}/headers" -o "${WORKDIR}/panel.html" https://127.0.0.1:18443/
+          grep -qi "X-Content-Type-Options: nosniff" "${WORKDIR}/headers"
+          grep -qi "Content-Security-Policy:" "${WORKDIR}/headers"
+          grep -q "Ligament Vault" "${WORKDIR}/panel.html"
           # Auth & injection failure checks
           BAD_CODE=$(curl -ks -o /dev/null -w '%{http_code}' -X POST https://127.0.0.1:18443/api/v1/auth/login -H "Content-Type: application/json" -d '{"username":"admin","password":"wrong"}')
           [[ "${BAD_CODE}" == "401" || "${BAD_CODE}" == "403" ]]
@@ -148,7 +157,7 @@ jobs:
 
           # Verify ligament-2fa-hook.sh is strictly fail-closed on unexpected HTTP 200 without allowed=true
           python3 - <<'PY2FA'
-          import http.server, subprocess, tempfile, threading
+          import http.server, json, pathlib, shutil, subprocess, tempfile, threading
           resp_body = b'{"status":"error_page"}'
           class H(http.server.BaseHTTPRequestHandler):
               def log_message(self, *a): pass
@@ -159,11 +168,18 @@ jobs:
           srv = http.server.HTTPServer(("127.0.0.1", 0), H)
           threading.Thread(target=srv.serve_forever, daemon=True).start()
           url = f"http://127.0.0.1:{srv.server_port}"
-          env = {"PATH": "/usr/bin:/bin", "LIGAMENT_2FA_ENABLED": "true", "LIGAMENT_2FA_API_URL": url, "SFTPGO_LOGIND_USER": '{"username":"alice"}', "SFTPGO_LOGIND_IP": "1.2.3.4", "SFTPGO_LOGIND_PROTOCOL": "SFTP", "SFTPGO_LOGIND_METHOD": "password"}
-          r_deny = subprocess.run(["sh", "scripts/hooks/ligament-2fa-hook.sh"], env=env)
+          hook_dir = pathlib.Path(tempfile.mkdtemp())
+          hook = pathlib.Path(shutil.copy("scripts/hooks/ligament-2fa-hook.sh", hook_dir))
+          (hook_dir / "ligament-2fa.json").write_text(json.dumps({
+              "LIGAMENT_2FA_ENABLED":"true", "LIGAMENT_2FA_API_URL":url,
+              "LIGAMENT_2FA_API_TOKEN":"ci-hook-token", "LIGAMENT_2FA_TIMEOUT_SEC":"5",
+              "LIGAMENT_2FA_FAIL_OPEN":"false", "CLUSTER_SLUG":"ci",
+          }))
+          env = {"PATH": "/usr/bin:/bin", "SFTPGO_LOGIND_USER": '{"username":"alice"}', "SFTPGO_LOGIND_IP": "1.2.3.4", "SFTPGO_LOGIND_PROTOCOL": "SFTP", "SFTPGO_LOGIND_METHOD": "password"}
+          r_deny = subprocess.run(["sh", str(hook)], env=env)
           assert r_deny.returncode != 0, "Expected fail-closed deny on missing allowed=true"
           resp_body = b'{"allowed":true}'
-          r_ok = subprocess.run(["sh", "scripts/hooks/ligament-2fa-hook.sh"], env=env)
+          r_ok = subprocess.run(["sh", str(hook)], env=env)
           assert r_ok.returncode == 0, "Expected allow when allowed=true"
           srv.shutdown()
           PY2FA
@@ -261,33 +277,22 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y -qq age jq
+          sudo apt-get install -y -qq age apache2-utils jq
           HOST_IP=$(ip -4 route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')
           WORKDIR="$(mktemp -d)"
           cp -R . "${WORKDIR}/repo"
           cd "${WORKDIR}/repo"
 
-          cp cluster.env.example cluster.env
-          sed -i "s|FIXME_IP1:dc1:node1 FIXME_IP2:dc2:node2 FIXME_IP3:dc3:node3|${HOST_IP}:dc1:node1|" cluster.env
-          sed -i 's|SWFS_DEFAULT_REPLICATION="100"|SWFS_DEFAULT_REPLICATION="000"|' cluster.env
-          chmod 600 cluster.env
-          export AGE_KEY_FILE="${WORKDIR}/age.key"
-          ./ligactl secrets init
-
-          export CONFIG_ROOT="${WORKDIR}/repo"
-          export SCRIPT_DIR="${WORKDIR}/repo"
+          ./ligactl config init
           source scripts/lib/common.sh
           source scripts/lib/deploy.sh
+          config_db_set_many CLUSTER_NODES "${HOST_IP}:dc1:node1" SWFS_DEFAULT_REPLICATION 000 \
+              SWFS_ADMIN_NODE_INDEX 1 QUORUM_NODES node1 HTTPS_PORT 8444 \
+              ETCD_DATA_DIR "${WORKDIR}/data/etcd" PG_DATA_DIR "${WORKDIR}/data/postgresql" \
+              SWFS_MASTER_DIR "${WORKDIR}/data/swfs-master" SWFS_VOLUME_DIR "${WORKDIR}/data/seaweedfs" \
+              SFTPGO_DATA_DIR "${WORKDIR}/data/sftpgo" SFTPGO_TEMP_PATH "${WORKDIR}/data/sftpgo-temp"
           load_cluster_env "${WORKDIR}/repo"
-
-          export ETCD_DATA_DIR="${WORKDIR}/data/etcd"
-          export PG_DATA_DIR="${WORKDIR}/data/postgresql"
-          export SWFS_MASTER_DIR="${WORKDIR}/data/swfs-master"
-          export SWFS_VOLUME_DIR="${WORKDIR}/data/seaweedfs"
-          export SFTPGO_DATA_DIR="${WORKDIR}/data/sftpgo"
-          export SFTPGO_TEMP_PATH="${WORKDIR}/data/sftpgo-temp"
-          export HTTPS_PORT=8444
-          mkdir -p "${ETCD_DATA_DIR}" "${PG_DATA_DIR}" "${SWFS_MASTER_DIR}" "${SWFS_VOLUME_DIR}" "${SFTPGO_DATA_DIR}/data" "${SFTPGO_DATA_DIR}/backups" "${SFTPGO_TEMP_PATH}"
+          mkdir -p "${ETCD_DATA_DIR}" "${PG_DATA_DIR}" "${SWFS_MASTER_DIR}" "${SWFS_VOLUME_DIR}" "${SFTPGO_DATA_DIR}"/{data,backups,client-logs,audit-spool} "${SFTPGO_TEMP_PATH}"
           sudo chown -R 1000:1000 "${SFTPGO_DATA_DIR}" "${SFTPGO_TEMP_PATH}" "${SWFS_MASTER_DIR}" "${SWFS_VOLUME_DIR}"
 
           ensure_ca_exists
@@ -328,7 +333,13 @@ jobs:
           render_node_configs "${HOST_IP}" "dc1" "node1" "1" "new"
           RDIR="${WORKDIR}/repo/.rendered/node1"
           cp "${RDIR}/docker-compose.yml" "${WORKDIR}/repo/docker-compose.yml"
-          cp "${RDIR}/.env" "${WORKDIR}/repo/.env"
+          test ! -e "${RDIR}/.env"
+          cp "${RDIR}/sftpgo-bootstrap.json" "${RDIR}/client-audit.json" configs/
+          cp scripts/ops/start-patroni.sh scripts/ops/client-audit.py configs/
+          cp "${RDIR}/hooks/ligament-2fa.json" scripts/hooks/ligament-2fa-hook.sh hooks/
+          jq -er '.admins[0].password | startswith("$2")' configs/sftpgo-bootstrap.json
+          sudo chown 1000:1000 configs/sftpgo-bootstrap.json configs/client-audit.json hooks/ligament-2fa.json
+          sudo chmod 600 configs/sftpgo-bootstrap.json configs/client-audit.json hooks/ligament-2fa.json
           mkdir -p "${WORKDIR}/repo/configs/seaweedfs"
           cp "${RDIR}/patroni.yml" "${WORKDIR}/repo/configs/patroni.yml"
           cp "${RDIR}/haproxy-pg.cfg" "${WORKDIR}/repo/configs/haproxy-pg.cfg"
@@ -378,7 +389,7 @@ jobs:
               curl -sk https://127.0.0.1:8008/patroni || true
               exit 1
           fi
-          docker exec "$(docker ps -qf name=patroni)" patronictl list
+          docker exec "$(docker ps -qf name=patroni)" patronictl -c /run/pg-certs/patroni.yml list
 
           # Verify Patroni REST API rejects plaintext HTTP and enforces client cert on unsafe PATCH
           if curl -sf http://127.0.0.1:8008/primary >/dev/null 2>&1; then
@@ -412,11 +423,12 @@ jobs:
           fi
           nc -z "${HOST_IP}" 15432
 
-          docker exec -i -u postgres -e "HOST_IP=${HOST_IP}" -e "SUPER_PW=${PG_SUPERUSER_PASSWORD}" "$(docker ps -qf name=patroni)" python3 - <<'PYSEC'
-          import os, psycopg2
+          docker exec -i -u postgres "$(docker ps -qf name=patroni)" python3 - "${HOST_IP}" <<'PYSEC'
+          import psycopg2, sys, yaml
 
-          host_ip = os.environ["HOST_IP"]
-          pw = os.environ["SUPER_PW"]
+          host_ip = sys.argv[1]
+          with open("/run/pg-certs/patroni.yml") as fp:
+              pw = yaml.safe_load(fp)["postgresql"]["authentication"]["superuser"]["password"]
 
           # 1. Plaintext TCP must be rejected (hostnossl reject)
           try:
@@ -475,14 +487,16 @@ jobs:
           sudo iptables -t nat -I OUTPUT 1 -p tcp -d 198.51.100.99/32 -j LIG_BR_CI
           sudo iptables -t nat -A POSTROUTING -o lo -p tcp -d 127.0.0.1/32 --dport 15432 -j SNAT --to-source 127.0.0.1
           sudo iptables -t nat -A LIG_BR_CI -p tcp -d 198.51.100.99/32 --dport 15432 -j DNAT --to-destination 127.0.0.1:15432
-          docker exec -i -u postgres -e "SUPER_PW=${PG_SUPERUSER_PASSWORD}" "$(docker ps -qf name=patroni)" python3 - <<'PYBR'
-          import os, psycopg2
+          docker exec -i -u postgres "$(docker ps -qf name=patroni)" python3 - <<'PYBR'
+          import psycopg2, yaml
+          with open("/run/pg-certs/patroni.yml") as fp:
+              pw = yaml.safe_load(fp)["postgresql"]["authentication"]["superuser"]["password"]
           conn = psycopg2.connect(
               host="198.51.100.99",
               port=15432,
               dbname="postgres",
               user="postgres",
-              password=os.environ["SUPER_PW"],
+              password=pw,
               sslmode="verify-ca",
               sslrootcert="/run/pg-certs/ca.crt",
               sslcert="/run/pg-certs/pg-client.crt",
@@ -500,22 +514,14 @@ jobs:
           sudo iptables -t nat -F LIG_BR_CI
           sudo iptables -t nat -X LIG_BR_CI
 
-          docker exec -i -e "SFTPGO_PW=${SFTPGO_DB_PASSWORD}" -e "SWFS_PW=${SWFS_FILER_DB_PASSWORD}" "$(docker ps -qf name=patroni)" python3 - <<'PYEOF'
-          import os, psycopg2
-          from psycopg2 import sql
-          conn = psycopg2.connect(dbname="postgres", user="postgres", host="/var/run/postgresql")
-          conn.autocommit = True
-          cur = conn.cursor()
-          for role, pw, db in [("sftpgo", os.environ["SFTPGO_PW"], "sftpgo"), ("seaweedfs", os.environ["SWFS_PW"], "seaweedfs_filer")]:
-              cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,))
-              if not cur.fetchone():
-                  cur.execute(sql.SQL("CREATE USER {} WITH PASSWORD %s").format(sql.Identifier(role)), (pw,))
-              cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (db,))
-              if not cur.fetchone():
-                  cur.execute(sql.SQL("CREATE DATABASE {} OWNER {}").format(sql.Identifier(db), sql.Identifier(role)))
-          cur.close()
-          conn.close()
-          PYEOF
+          docker cp scripts/ops/provision-db.py "$(docker compose ps -q patroni):/tmp/provision-db.py"
+          python3 - <<'PYCFG' | docker exec -i -u postgres "$(docker compose ps -q patroni)" python3 /tmp/provision-db.py "${PG_PORT}"
+          import json, sys
+          sys.path.insert(0, "scripts/lib")
+          from config_db import Store
+          cfg = Store(".").read(True)
+          print(json.dumps({role: cfg[key] for role, key in (("sftpgo", "SFTPGO_DB_PASSWORD"), ("seaweedfs", "SWFS_FILER_DB_PASSWORD"), ("client_logger", "AUDIT_DB_PASSWORD"))}))
+          PYCFG
 
           docker compose up -d swfs-master swfs-volume
           MASTER_OK=false
@@ -901,8 +907,8 @@ jobs:
 
   multi-node-e2e-install:
     name: Live 3-Node Cluster E2E Install (Stages 0-5 + 3GB Disk + Cloud FW Bridge + Cross-Node SFTP/WORM)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    runs-on: ${{ inputs.vps_runner || 'ubuntu-24.04' }}
+    timeout-minutes: ${{ inputs.scale_ha && 75 || 20 }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -911,7 +917,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y -qq age jq sshpass
+          sudo apt-get install -y -qq age apache2-utils jq sshpass
 
           docker build -t aligorov/ligament_vault_patroni:16 -f Dockerfile.patroni .
           for img in quay.io/coreos/etcd:v3.5.17 haproxy:3.0-alpine chrislusf/seaweedfs:4.55 drakkan/sftpgo:v2.7-alpine prom/node-exporter:v1.8.2; do
@@ -925,8 +931,9 @@ jobs:
           RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
               systemd systemd-sysv dbus openssh-server sudo ca-certificates curl jq \
               iproute2 iputils-ping iptables ufw fail2ban python3-systemd chrony \
-              python3 python3-yaml netcat-openbsd conntrack openssl docker.io docker-compose-v2 \
+              python3 python3-yaml netcat-openbsd conntrack openssl docker.io docker-compose-v2 dnsmasq-base \
               && rm -rf /var/lib/apt/lists/* \
+              && mkdir -p /etc/docker && echo '{"dns":["172.28.0.10"]}' > /etc/docker/daemon.json \
               && mkdir -p /run/sshd /root/.ssh && chmod 700 /root/.ssh \
               && rm -f /lib/systemd/system/multi-user.target.wants/*getty* \
               && systemctl mask systemd-resolved.service systemd-networkd.service systemd-timesyncd.service \
@@ -949,7 +956,17 @@ jobs:
         run: |
           set -euo pipefail
           WORKDIR="/tmp/lv-e2e"
-          mkdir -p "${WORKDIR}/data-1" "${WORKDIR}/data-2" "${WORKDIR}/data-3"
+          vps_nodes=(1 2 3)
+          if [[ '${{ inputs.scale_ha }}' == 'true' ]]; then
+            vps_nodes+=(4 5 6)
+            # Each nested dockerd stores its own images. Include room for PGDATA and the loopback disk.
+            image_bytes=$(docker image inspect --format '{{.Size}}' aligorov/ligament_vault_patroni:16 quay.io/coreos/etcd:v3.5.17 haproxy:3.0-alpine chrislusf/seaweedfs:4.55 drakkan/sftpgo:v2.7-alpine prom/node-exporter:v1.8.2 | awk '{s+=$1} END {printf "%.0f",s}')
+            docker_root=$(docker info --format '{{.DockerRootDir}}')
+            available=$(df -B1 --output=avail "$docker_root" | tail -1)
+            required=$((6 * image_bytes + 8 * 1024**3))
+            (( available >= required )) || { echo "Nested scale test requires $required free bytes, available $available"; exit 1; }
+          fi
+          for idx in "${vps_nodes[@]}"; do mkdir -p "${WORKDIR}/data-${idx}"; done
 
           # Emulate compact 3GB disk on node2 (just like real 2.9GB VPS)
           truncate -s 3G "${WORKDIR}/node2-data.img"
@@ -961,25 +978,38 @@ jobs:
             if (( rc != 0 )); then
               echo "=== E2E FAILURE DIAGNOSTICS ==="
               docker ps -a || true
-              for n in lv-node1 lv-node2 lv-node3; do
+              for idx in "${vps_nodes[@]}"; do
+                n=lv-node${idx}
                 echo "--- ${n} boot logs & containers ---"
                 docker logs "${n}" --tail 35 2>&1 || true
                 docker exec "${n}" bash -c 'docker ps -a; cd /opt/ligament-vault 2>/dev/null && docker compose logs --tail 35 || true' || true
               done
             fi
-            docker rm -f lv-node1 lv-node2 lv-node3 >/dev/null 2>&1 || true
-            docker volume rm -f lv-docker-1 lv-docker-2 lv-docker-3 lv-ctrd-1 lv-ctrd-2 lv-ctrd-3 >/dev/null 2>&1 || true
+            sudo resolvectl revert br-lv-ci >/dev/null 2>&1 || true
+            for idx in "${vps_nodes[@]}"; do
+              docker rm -f "lv-node${idx}" >/dev/null 2>&1 || true
+              docker volume rm -f "lv-docker-${idx}" "lv-ctrd-${idx}" >/dev/null 2>&1 || true
+            done
+            docker rm -f lv-dns >/dev/null 2>&1 || true
             docker network rm lv-wan-net >/dev/null 2>&1 || true
             sudo umount -l "${WORKDIR}/data-2" >/dev/null 2>&1 || true
           }
           trap cleanup_e2e EXIT
 
-          docker network create --subnet=172.28.0.0/24 lv-wan-net
+          docker network create -o com.docker.network.bridge.name=br-lv-ci --subnet=172.28.0.0/24 lv-wan-net
+          docker run -d --name lv-dns --network lv-wan-net --ip 172.28.0.10 \
+            --entrypoint /usr/sbin/dnsmasq ci-vps-node:24.04 -k --no-hosts --local=/ci.test/ \
+            --host-record=node1.ci.test,files.ci.test,172.28.0.11 \
+            --host-record=node2.ci.test,172.28.0.12 --host-record=node3.ci.test,172.28.0.13 \
+            --host-record=node4.ci.test,172.28.0.14 --host-record=node5.ci.test,172.28.0.15 --host-record=replacement.ci.test,172.28.0.16
+          sudo resolvectl dns br-lv-ci 172.28.0.10
+          sudo resolvectl domain br-lv-ci '~ci.test'
+          getent ahostsv4 files.ci.test | grep -F '172.28.0.11' >/dev/null
 
-          for idx in 1 2 3; do
+          for idx in "${vps_nodes[@]}"; do
             ip="172.28.0.1${idx}"
             docker run -d --name "lv-node${idx}" --hostname "node${idx}" \
-              --network lv-wan-net --ip "${ip}" \
+              --network lv-wan-net --ip "${ip}" --dns 172.28.0.10 \
               --privileged --cgroupns=private \
               --tmpfs /tmp --tmpfs /run --tmpfs /run/lock \
               -v "lv-docker-${idx}:/var/lib/docker" \
@@ -993,7 +1023,7 @@ jobs:
           ssh-keygen -t ed25519 -f "${WORKDIR}/orch_id_ed25519" -N "" >/dev/null
           PUBKEY=$(cat "${WORKDIR}/orch_id_ed25519.pub")
 
-          for idx in 1 2 3; do
+          for idx in "${vps_nodes[@]}"; do
             n="lv-node${idx}"
             for _ in $(seq 1 40); do
               if docker exec "${n}" bash -c 'docker info >/dev/null 2>&1 && systemctl is-active --quiet ssh'; then
@@ -1019,26 +1049,22 @@ jobs:
 
           cp -R . "${WORKDIR}/ctl"
           cd "${WORKDIR}/ctl"
-          cp cluster.env.example cluster.env
-          sed -i 's|FIXME_IP1:dc1:node1 FIXME_IP2:dc2:node2 FIXME_IP3:dc3:node3|172.28.0.11:dc1:node1 172.28.0.12:dc2:node2 172.28.0.13:dc3:node3|' cluster.env
-          echo "SSH_IDENTITY_FILE=\"${WORKDIR}/orch_id_ed25519\"" >> cluster.env
-          chmod 600 cluster.env
-
-          export AGE_KEY_FILE="${WORKDIR}/age.key"
-          export SSH_IDENTITY_FILE="${WORKDIR}/orch_id_ed25519"
-          ./ligactl secrets init
+          ./ligactl config init
+          source scripts/lib/common.sh
+          config_db_set_many CLUSTER_NODES "node1.ci.test:dc1:node1 node2.ci.test:dc2:node2 node3.ci.test:dc3:node3" \
+              SSH_IDENTITY_FILE "${WORKDIR}/orch_id_ed25519" DOMAIN files.ci.test
 
           # 1. Run REAL full 3-node cluster installation (Stages 0..5)
           ./ligactl install --yes
           test -f "${WORKDIR}/ctl/.cluster_installed"
-          grep -q '^HTTPS_PORT=8444' "${WORKDIR}/ctl/cluster.env"
-          python3 -c "import socket; s=socket.create_connection(('172.28.0.11', 443), 3); s.close()"
+          test "$(config_db_get HTTPS_PORT)" = 8444
+          python3 -c "import socket; s=socket.create_connection(('files.ci.test', 443), 3); s.close()"
 
           # Confirm transparent SSH+DNAT bridge automatically activated on node3 -> node1
           docker exec lv-node3 systemctl is-active --quiet ligament-vault-bridge-to-node1.service
 
           # 1b. Switchover Patroni Primary to node2 and test mid-Stage-3 '--resume' with live etcd + non-node1 Primary!
-          docker exec lv-node1 bash -c 'PCID=$(cd /opt/ligament-vault && docker compose ps -q patroni | head -n1); docker exec "${PCID}" patronictl switchover --candidate node2 --force'
+          docker exec lv-node1 bash -c 'PCID=$(cd /opt/ligament-vault && docker compose ps -q patroni | head -n1); docker exec "${PCID}" patronictl -c /run/pg-certs/patroni.yml switchover --candidate node2 --force'
           sleep 3
           rm -f "${WORKDIR}/ctl/.cluster_installed"
           mkdir -p "${WORKDIR}/ctl/.state"
@@ -1056,18 +1082,22 @@ jobs:
           # 4. Provision real SFTP client & verify cross-node SFTP upload on node1 -> download on node2 & node3 + WORM lock on node3
           ssh-keygen -t ed25519 -f "${WORKDIR}/sftp_client_key" -N "" >/dev/null
           CLIENT_PUB=$(cat "${WORKDIR}/sftp_client_key.pub")
-          ./ligactl user add --username e2euser --profile dual --quota-gb 2 --ssh-key "${CLIENT_PUB}" --generate-password
+          awk '{print "vault-ci " $1 " " $2}' ssh-host-keys/id_ed25519.pub > "${WORKDIR}/known_hosts"
+          sftp_args=(-b - -P 2022 -o StrictHostKeyChecking=yes -o GlobalKnownHostsFile=/dev/null
+                     -o "UserKnownHostsFile=${WORKDIR}/known_hosts" -o HostKeyAlias=vault-ci
+                     -o HostKeyAlgorithms=ssh-ed25519 -o BatchMode=yes -i "${WORKDIR}/sftp_client_key")
+          ./ligactl user add --username e2euser --profile dual --quota-gb 2 --ssh-key "${CLIENT_PUB}"
 
           echo "cross-node-work-payload-2026" > "${WORKDIR}/work_in.txt"
           echo "cross-node-worm-payload-2026" > "${WORKDIR}/worm_in.txt"
 
-          sftp -b - -P 2022 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -i "${WORKDIR}/sftp_client_key" e2euser@172.28.0.11 <<SFTP_UP
+          sftp "${sftp_args[@]}" e2euser@files.ci.test <<SFTP_UP
           put ${WORKDIR}/work_in.txt /work/cross.txt
           put ${WORKDIR}/worm_in.txt /worm/immutable.txt
           bye
           SFTP_UP
 
-          sftp -b - -P 2022 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -i "${WORKDIR}/sftp_client_key" e2euser@172.28.0.12 <<SFTP_N2
+          sftp "${sftp_args[@]}" e2euser@node2.ci.test <<SFTP_N2
           get /work/cross.txt ${WORKDIR}/work_n2.txt
           get /worm/immutable.txt ${WORKDIR}/worm_n2.txt
           bye
@@ -1075,7 +1105,7 @@ jobs:
           cmp -s "${WORKDIR}/work_in.txt" "${WORKDIR}/work_n2.txt"
           cmp -s "${WORKDIR}/worm_in.txt" "${WORKDIR}/worm_n2.txt"
 
-          sftp -b - -P 2022 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -i "${WORKDIR}/sftp_client_key" e2euser@172.28.0.13 <<SFTP_N3
+          sftp "${sftp_args[@]}" e2euser@node3.ci.test <<SFTP_N3
           get /work/cross.txt ${WORKDIR}/work_n3.txt
           get /worm/immutable.txt ${WORKDIR}/worm_n3.txt
           bye
@@ -1083,7 +1113,7 @@ jobs:
           cmp -s "${WORKDIR}/work_in.txt" "${WORKDIR}/work_n3.txt"
           cmp -s "${WORKDIR}/worm_in.txt" "${WORKDIR}/worm_n3.txt"
 
-          if sftp -b - -P 2022 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -i "${WORKDIR}/sftp_client_key" e2euser@172.28.0.13 <<< 'rm /worm/immutable.txt'; then
+          if sftp "${sftp_args[@]}" e2euser@node3.ci.test <<< 'rm /worm/immutable.txt'; then
             echo "ERROR: node3 permitted deleting WORM-protected file!" >&2
             exit 1
           fi
@@ -1095,3 +1125,33 @@ jobs:
           echo "${STATUS_JSON}" | jq -e '(.nodes | length) == 3 and .errors == 0 and (.nodes | all(.haproxy == "OK" and .swfs_volume == "OK" and .swfs_filer == "OK" and .sftpgo == "OK"))'
 
           echo "MULTI_NODE_3VPS_E2E_OK"
+
+          if [[ '${{ inputs.scale_ha }}' == 'true' ]]; then
+            for idx in 4 5 6; do
+              docker exec "lv-node$idx" docker load -i /patroni-image.tar >/dev/null
+              docker exec "lv-node$idx" sh -ec "mkdir -p /opt/ligament-vault/build-patroni && echo '$DF_HASH' > /opt/ligament-vault/build-patroni/.built.sha256"
+            done
+            check_scale() {
+              local size="$1" edge="$2" state
+              state=$(./ligactl status --json)
+              jq -e --argjson size "$size" '.etcd_expected_voters == $size and .etcd_healthy_voters == $size and .pg_primaries == 1 and .swfs_replication_healthy and .errors == 0 and (.nodes | length) == $size' <<< "$state"
+              sftp "${sftp_args[@]}" "e2euser@$edge" <<< "get /work/cross.txt ${WORKDIR}/scale-data.txt"
+              cmp "${WORKDIR}/work_in.txt" "${WORKDIR}/scale-data.txt"
+            }
+            for idx in 4 5; do
+              ./ligactl scale add --ip "node$idx.ci.test" --dc "dc$idx" --name "node$idx" --role quorum --yes
+              check_scale "$idx" "node$idx.ci.test"
+            done
+            docker stop lv-node4
+            ./ligactl scale replace --old node4 --new-ip replacement.ci.test --yes
+            check_scale 5 replacement.ci.test
+            check_scale 5 files.ci.test
+            # Changing the target in the control DB must expose existing two-copy volumes.
+            config_db_set SWFS_DEFAULT_REPLICATION 200
+            if ./ligactl status --strict --json > "${WORKDIR}/old-layout.json"; then
+              echo "Old two-copy volumes passed strict health for policy 200" >&2
+              exit 1
+            fi
+            jq -e '.swfs_replication_healthy == false' "${WORKDIR}/old-layout.json"
+            echo "QUORUM_SCALE_AND_REPLACE_OK"
+          fi

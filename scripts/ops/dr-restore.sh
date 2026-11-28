@@ -17,6 +17,7 @@ source "${SCRIPT_DIR}/scripts/lib/common.sh"
 # shellcheck source=../lib/deploy.sh
 source "${SCRIPT_DIR}/scripts/lib/deploy.sh"
 
+source "${SCRIPT_DIR}/scripts/ops/file-snapshot.sh"
 load_cluster_env "${CONFIG_ROOT:-${SCRIPT_DIR}}"
 
 usage() {
@@ -25,26 +26,54 @@ usage() {
 
 Подкоманды:
   restore [--latest | --target-time "YYYY-MM-DD HH:MM:SS+00"] [--resume] [--dry-run] [--yes]
-          Полное восстановление кластера с нуля на чистых VPS из внешнего S3 (pgBackRest PITR + SeaweedFS)
+          Полное восстановление на чистых VPS из S3. --target-time принимает точное время опубликованного совместного снимка БД и томов (UTC).
+  list    Доступные совместные точки восстановления (UTC, набор PostgreSQL, число нод, ID).
   verify-backup [--dry-run]
           Пробная расшифровка и проверка целостности бэкапов БД и SeaweedFS без остановки кластера
 EOF
 }
 
 dr_step_infra() {
-    bash "${SCRIPT_DIR}/scripts/stages/00-preflight.sh"
-    bash "${SCRIPT_DIR}/scripts/stages/01-host-hardening.sh"
-    bash "${SCRIPT_DIR}/scripts/stages/02-pki-secrets.sh"
-    for_each_node build_patroni_image_on_node
+    bash "${SCRIPT_DIR}/scripts/stages/00-preflight.sh" || return 1
+    bash "${SCRIPT_DIR}/scripts/stages/01-host-hardening.sh" || return 1
+    bash "${SCRIPT_DIR}/scripts/stages/02-pki-secrets.sh" || return 1
+    for_each_node build_patroni_image_on_node || return 1
     render_push_cb() {
-        render_node_configs "$1" "$2" "$3" "$4" "new"
+        render_node_configs "$1" "$2" "$3" "$4" "new" || return 1
         push_node_configs "$1" "$2" "$3" "$4"
     }
     for_each_node render_push_cb
 }
 
+dr_check_destination() {
+    local idx ip
+    for ((idx=1;idx<=$(get_node_count);idx++)); do
+        ip=$(get_node_ip "${idx}") || return 1
+        remote_exec_stdin "${ip}" "${REMOTE_BASE_DIR}" "${PG_DATA_DIR}" "${SNAPSHOT_ID}" <<'CHECK' || return 1
+set -euo pipefail
+cd "$1"
+marker=".dr-source-point"
+if [[ -f "${marker}" ]]; then
+    [[ "$(cat "${marker}")" == "$3" ]] || { echo "Destination belongs to another restore" >&2; exit 1; }
+else
+    [[ ! -s "$2/data/PG_VERSION" && -z "$(docker compose ps -q patroni)" && -z "$(docker compose ps -q swfs-volume)" ]] ||
+        { echo "DR destination contains an existing PostgreSQL or SeaweedFS installation" >&2; exit 1; }
+    umask 077
+    printf '%s\n' "$3" > "${marker}"
+fi
+CHECK
+        snapshot_on_node "${idx}" destination || return 1
+    done
+    ip=$(get_node_ip 1) || return 1
+    remote_exec_stdin "${ip}" "${REMOTE_BASE_DIR}" "${CLUSTER_SLUG}" "${BACKUP_LABEL}" <<'CHECK_PG_SET'
+set -euo pipefail
+cd "$1"
+docker compose run -T --rm --no-deps --entrypoint pgbackrest patroni --stanza="$2" info --output=json |
+    jq -e --arg label "$3" 'any(.[0].backup[]; .label == $label and .error != true)' >/dev/null
+CHECK_PG_SET
+}
+
 dr_step_etcd_and_pg_restore() {
-    local target_time="${1:-}"
     local node1_ip
     node1_ip=$(get_node_ip 1)
 
@@ -54,46 +83,53 @@ dr_step_etcd_and_pg_restore() {
         is_quorum_node "${idx}" "${name}" || return 0
         remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d etcd"
     }
-    for_each_node start_etcd_cb
+    for_each_node start_etcd_cb || return 1
 
     wait_for_remote_health "${node1_ip}" "etcd quorum" \
-        "ETCD_CID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q etcd | head -n1); [ -n \"\${ETCD_CID}\" ] && docker exec \"\${ETCD_CID}\" etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key endpoint health" 30 3
+        "ETCD_CID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q etcd | head -n1); [ -n \"\${ETCD_CID}\" ] && docker exec \"\${ETCD_CID}\" etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key endpoint health" 30 3 || return 1
 
-    # Очищаем ключи старой эпохи Patroni в DCS перед стартом восстановленного PGDATA
-    remote_exec "${node1_ip}" "
-        ECID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q etcd | head -n1 || true)
-        [[ -n \"\${ECID}\" ]] && docker exec \"\${ECID}\" etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} \
-            --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key \
-            del --prefix '/${CLUSTER_SLUG}/' >/dev/null 2>&1 || true
-    "
-
-    local pgbr_opts="--type=default"
-    if [[ -n "${target_time}" ]]; then
-        pgbr_opts="--type=time --target='${target_time}' --target-action=promote"
-    fi
-
-    log_info "Восстановление PGDATA на $(get_node_name 1) (${node1_ip}) через pgBackRest (${pgbr_opts})..."
-    remote_exec "${node1_ip}" "
-        cd '${REMOTE_BASE_DIR}' && \
-        docker compose stop patroni 2>/dev/null || true && \
-        rm -rf '${PG_DATA_DIR}/data' && mkdir -p '${PG_DATA_DIR}/data' && \
-        docker compose run --rm --no-deps --entrypoint '' -u root patroni bash -c \"
-            chown -R postgres:postgres '${PG_DATA_DIR}' /var/log/pgbackrest /var/lib/pgbackrest && \
-            chmod 700 '${PG_DATA_DIR}/data' && \
-            gosu postgres pgbackrest --stanza='${CLUSTER_SLUG}' --delta ${pgbr_opts} restore
-        \"
-    "
+    # A clean DCS has no Patroni leader. Never delete a live cluster's keys.
+    log_info "Восстановление PostgreSQL до именованной точки lv_${SNAPSHOT_ID} из ${BACKUP_LABEL}"
+    remote_exec_stdin "${node1_ip}" "${REMOTE_BASE_DIR}" "${PG_DATA_DIR}" "${CLUSTER_SLUG}" "${BACKUP_LABEL}" "${SNAPSHOT_ID}" <<'REMOTE_PG' || return 1
+set -euo pipefail
+cd "$1"
+[[ -n "$2" && "$2" != "/" && "$2" == /* ]]
+[[ -z "$(docker compose ps -q patroni)" ]] || { echo 'Destination Patroni must be offline' >&2; exit 1; }
+mkdir -p "$2/data"
+docker compose run -T --rm --no-deps --entrypoint bash -u root patroni -s -- "$2" "$3" "$4" "$5" <<'PG'
+set -euo pipefail
+chown -R postgres:postgres "$1" /var/log/pgbackrest /var/lib/pgbackrest
+chmod 700 "$1/data"
+gosu postgres pgbackrest --stanza="$2" --set="$3" --type=name --target="lv_$4" --target-action=promote --delta restore
+# Complete WAL replay before Patroni takes ownership of recovery configuration.
+d=$(mktemp -d)
+chown postgres:postgres "$d"
+stop_pg() {
+    gosu postgres pg_ctl -D "$1/data" -m immediate stop >/dev/null 2>&1 || true
+    rm -rf -- "$d"
+}
+trap 'stop_pg "$1"' EXIT
+gosu postgres pg_ctl -D "$1/data" -l "$d/recovery.log" -w -t 120 -o "-p 55432 -k $d -c data_directory=$1/data -c listen_addresses='' -c archive_mode=off -c ssl=off" start
+for ((i=0;i<120;i++)); do
+    ready=$(gosu postgres psql -XAt -v ON_ERROR_STOP=1 -h "$d" -p 55432 -d postgres -c 'SELECT NOT pg_is_in_recovery()')
+    [[ "${ready}" == t ]] && break
+    sleep 1
+done
+[[ "${ready}" == t ]]
+gosu postgres pg_ctl -D "$1/data" -m fast -w stop
+PG
+REMOTE_PG
 
     log_info "Запуск Patroni Primary на $(get_node_name 1) -> клонирование реплик..."
-    remote_exec "${node1_ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d patroni"
+    remote_exec "${node1_ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d patroni" || return 1
     wait_for_remote_health "${node1_ip}" "Restored Patroni Primary" \
-        "curl -sf --cacert '${REMOTE_BASE_DIR}/certs/ca.crt' https://127.0.0.1:${PATRONI_API_PORT:-8008}/primary" 45 3
+        "curl -sf --cacert '${REMOTE_BASE_DIR}/certs/ca.crt' https://127.0.0.1:${PATRONI_API_PORT:-8008}/primary" 45 3 || return 1
 
     start_rep_cb() {
         local ip="$1" name="$3" idx="$4"
         if (( idx != 1 )); then
-            remote_exec "${ip}" "rm -rf '${PG_DATA_DIR}/data' && mkdir -p '${PG_DATA_DIR}/data' && cd '${REMOTE_BASE_DIR}' && docker compose up -d patroni"
-            wait_for_remote_health "${ip}" "Patroni Replica ${name}" "curl -sf --cacert '${REMOTE_BASE_DIR}/certs/ca.crt' https://127.0.0.1:${PATRONI_API_PORT:-8008}/replica" 60 3
+            remote_exec "${ip}" "mkdir -p '${PG_DATA_DIR}/data' && cd '${REMOTE_BASE_DIR}' && docker compose up -d patroni" || return 1
+            wait_for_remote_health "${ip}" "Patroni Replica ${name}" "curl -sf --cacert '${REMOTE_BASE_DIR}/certs/ca.crt' https://127.0.0.1:${PATRONI_API_PORT:-8008}/replica" 60 3 || return 1
         fi
         remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d haproxy"
     }
@@ -101,85 +137,19 @@ dr_step_etcd_and_pg_restore() {
 }
 
 dr_step_swfs_restore() {
-    log_step "DR 3/4 — Подъем SeaweedFS и восстановление метаданных Filer из внешнего S3"
-    bash "${SCRIPT_DIR}/scripts/stages/04-bootstrap-swfs.sh"
-
-    local node1_ip mpeers
-    node1_ip=$(get_node_ip 1)
-    mpeers=$(build_swfs_master_peers)
-    if [[ "${BACKUP_S3_ACCESS_KEY:-FIXME}" != *FIXME* && -n "${BACKUP_S3_ACCESS_KEY:-}" ]]; then
-        remote_exec_env_stdin "${node1_ip}" \
-            "BACKUP_S3_ACCESS_KEY,BACKUP_S3_SECRET_KEY,BACKUP_ENCRYPTION_KEY" \
-            "${REMOTE_BASE_DIR}" \
-            "${mpeers}" \
-            "${SWFS_FILER_PORT:-8888}" \
-            "${BACKUP_S3_ENDPOINT}" \
-            "${BACKUP_S3_REGION:-us-east-1}" \
-            "${BACKUP_S3_BUCKET}" <<'REMOTE_SWFS_RESTORE' || log_warn "Дамп filer-meta/LATEST не найден — используются метаданные из восстановленной БД PostgreSQL"
-set -euo pipefail
-BDIR="$1"; MPEERS="$2"; FPORT="$3"; ENDPOINT="$4"; REGION="$5"; BUCKET="$6"
-ENC_KEY="${BACKUP_ENCRYPTION_KEY}"
-TMP_ENC=$(mktemp /tmp/dr-filer-XXXXXX.enc)
-TMP_CIPH=$(mktemp /tmp/dr-filer-XXXXXX.ciph)
-TMP_RAW=$(mktemp /tmp/dr-filer-XXXXXX.meta)
-chmod 600 "${TMP_ENC}" "${TMP_CIPH}" "${TMP_RAW}"
-CID=$(cd "${BDIR}" && docker compose ps -q swfs-filer | head -n1)
-[[ -n "${CID}" ]] || exit 1
-trap 'rm -f "${TMP_ENC}" "${TMP_CIPH}" "${TMP_RAW}"; docker exec "${CID}" rm -f "${TMP_RAW}" 2>/dev/null || true' EXIT
-
-python3 - "${ENDPOINT}" "${REGION}" "${BUCKET}" "${TMP_ENC}" <<'PYEOF'
-import datetime, hashlib, hmac, os, sys, urllib.parse, urllib.request
-endpoint, region, bucket, dst = sys.argv[1:]
-ak = os.environ["BACKUP_S3_ACCESS_KEY"]
-sk = os.environ["BACKUP_S3_SECRET_KEY"]
-if not endpoint.startswith(("http://", "https://")):
-    endpoint = "https://" + endpoint
-endpoint = endpoint.rstrip("/")
-host = urllib.parse.urlparse(endpoint).netloc
-def sign(k, m): return hmac.new(k, m.encode(), hashlib.sha256).digest()
-def s3_get(key):
-    now = datetime.datetime.now(datetime.timezone.utc)
-    ad, ds = now.strftime("%Y%m%dT%H%M%SZ"), now.strftime("%Y%m%d")
-    ph = hashlib.sha256(b"").hexdigest()
-    path = f"/{bucket}/{key}"
-    hdrs = {"host": host, "x-amz-date": ad, "x-amz-content-sha256": ph}
-    ch = "".join(f"{k}:{hdrs[k]}\n" for k in sorted(hdrs))
-    sh = ";".join(sorted(hdrs))
-    creq = f"GET\n{path}\n\n{ch}\n{sh}\n{ph}"
-    sc = f"{ds}/{region}/s3/aws4_request"
-    sts = f"AWS4-HMAC-SHA256\n{ad}\n{sc}\n{hashlib.sha256(creq.encode()).hexdigest()}"
-    ks = sign(sign(sign(sign(("AWS4" + sk).encode(), ds), region), "s3"), "aws4_request")
-    hdrs["authorization"] = f"AWS4-HMAC-SHA256 Credential={ak}/{sc}, SignedHeaders={sh}, Signature={hmac.new(ks, sts.encode(), hashlib.sha256).hexdigest()}"
-    return urllib.request.urlopen(urllib.request.Request(f"{endpoint}{path}", headers=hdrs), timeout=45).read()
-
-latest = s3_get("filer-meta/LATEST").decode().strip()
-open(dst, "wb").write(s3_get(latest))
-PYEOF
-
-ENC_KEY="${ENC_KEY}" python3 - "${TMP_ENC}" "${TMP_CIPH}" <<'PYVER'
-import hashlib, hmac, os, sys
-src, dst = sys.argv[1], sys.argv[2]
-raw = open(src, "rb").read()
-if raw.startswith(b"ETM1:"):
-    _, tag, cipher = raw.split(b":", 2)
-    mac_key = hashlib.sha256(("ligament-etm:" + os.environ["ENC_KEY"]).encode("utf-8")).digest()
-    expected = hmac.new(mac_key, cipher, hashlib.sha256).hexdigest().encode("ascii")
-    if not hmac.compare_digest(tag, expected):
-        raise SystemExit("HMAC verification FAILED for DR filer metadata archive!")
-    open(dst, "wb").write(cipher)
-else:
-    open(dst, "wb").write(raw)
-PYVER
-ENCK="${ENC_KEY}" openssl enc -d -aes-256-cbc -pbkdf2 -pass env:ENCK -in "${TMP_CIPH}" | gunzip > "${TMP_RAW}"
-docker cp "${TMP_RAW}" "${CID}:${TMP_RAW}"
-docker exec -i "${CID}" weed shell -master="${MPEERS}" -filer="127.0.0.1:${FPORT}" <<< "fs.meta.load -v=false ${TMP_RAW}" || true
-REMOTE_SWFS_RESTORE
-    fi
+    local count idx
+    count=$(get_node_count) || return 1
+    log_step "DR 3/4 — восстановление физических томов SeaweedFS и проверка версий и WORM"
+    for ((idx=1;idx<=count;idx++)); do
+        snapshot_on_node "${idx}" restore || return 1
+    done
+    bash "${SCRIPT_DIR}/scripts/stages/04-bootstrap-swfs.sh" || return 1
+    snapshot_on_node 1 check-objects
 }
 
 dr_step_edge_and_verify() {
     log_step "DR 4/4 — Запуск SFTPGo Edge, Арбитра и финальная валидация"
-    bash "${SCRIPT_DIR}/scripts/stages/05-edge-ssl-backup.sh"
+    bash "${SCRIPT_DIR}/scripts/stages/05-edge-ssl-backup.sh" || return 1
     bash "${SCRIPT_DIR}/scripts/verify/cluster-health.sh" --strict
 }
 
@@ -198,14 +168,27 @@ cmd_restore() {
         exit 1
     fi
 
-    confirm_action "⚠️  ВНИМАНИЕ: DR Restore перезапишет данные кластера из внешнего S3 (${target_time:-LATEST}). Продолжить?" || exit 0
-
-    init_op_checkpoints "dr-restore"
-    run_checkpoint "dr-restore" "1-infra-pki"      dr_step_infra
-    run_checkpoint "dr-restore" "2-etcd-pg-pitr"   dr_step_etcd_and_pg_restore "${target_time}"
-    run_checkpoint "dr-restore" "3-swfs-restore"   dr_step_swfs_restore
-    run_checkpoint "dr-restore" "4-edge-verify"    dr_step_edge_and_verify
-    clear_op_checkpoints "dr-restore"
+    if [[ "${DRY_RUN:-false}" == true ]]; then
+        log_info "[DRY-RUN] Проверка архива, PG PITR, восстановление томов, проверка файлов и WORM"
+        return 0
+    fi
+    local point operation at count
+    local args=()
+    count=$(get_node_count)
+    [[ -z "${target_time}" ]] || args+=(--at "${target_time}")
+    point=$(snapshot_controller select --nodes "${count}" "${args[@]}") || return 1
+    read -r SNAPSHOT_ID BACKUP_LABEL at <<< "${point}"
+    log_step "Полная точка восстановления ${at}, PG ${BACKUP_LABEL}, файловые тома ${SNAPSHOT_ID}"
+    snapshot_controller verify --id "${SNAPSHOT_ID}" --nodes "${count}" || return 1
+    confirm_action "Восстановить кластер на чистых узлах из этой точки?" || return 1
+    operation="dr-restore-${SNAPSHOT_ID}"
+    init_op_checkpoints "${operation}"
+    run_checkpoint "${operation}" "1-infra-pki" dr_step_infra
+    run_checkpoint "${operation}" "1a-clean-destination" dr_check_destination
+    run_checkpoint "${operation}" "2-etcd-pg-pitr" dr_step_etcd_and_pg_restore
+    run_checkpoint "${operation}" "3-swfs-restore" dr_step_swfs_restore
+    run_checkpoint "${operation}" "4-edge-verify" dr_step_edge_and_verify
+    clear_op_checkpoints "${operation}"
 
     [[ "${DRY_RUN:-false}" != "true" ]] && touch "$(state_root)/.cluster_installed"
     log_info "🎉 Аварийное восстановление ${PROJECT_NAME} из внешнего S3 успешно завершено!"
@@ -216,6 +199,7 @@ main() {
     shift || true
     case "${sub}" in
         restore)        cmd_restore "$@" ;;
+        list)           snapshot_controller list ;;
         verify-backup)  bash "${SCRIPT_DIR}/scripts/ops/backup-job.sh" verify-restore ;;
         ""|--help|-h|help) usage ;;
         *) log_error "Неизвестная подкоманда dr: ${sub}"; usage; exit 1 ;;

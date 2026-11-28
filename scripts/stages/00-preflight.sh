@@ -52,7 +52,7 @@ if [[ "${REPL_CFG}" =~ ^[0-9]{3}$ ]]; then
 fi
 
 if [[ "${CLUSTER_NODES}" == *FIXME* ]]; then
-    log_warn "  ⚠️  CLUSTER_NODES содержит FIXME-заглушки — заполните реальные IP в cluster.env"
+    log_warn "  ⚠️  CLUSTER_NODES содержит FIXME-заглушки — заполните реальные IP в базе управления"
     [[ "${DRY_RUN:-false}" != "true" ]] && PREFLIGHT_PASS=false
 fi
 
@@ -60,12 +60,8 @@ if [[ "${ADMIN_SSH_NET:-0.0.0.0/0}" == "0.0.0.0/0" ]]; then
     log_warn "  ⚠️  ADMIN_SSH_NET=0.0.0.0/0 — рекомендуется ограничить до статического IP/CIDR администратора!"
 fi
 
-if [[ -f "${CONFIG_ROOT}/secrets.env" ]] && grep -q "FIXME" "${CONFIG_ROOT}/secrets.env"; then
-    log_warn "  ⚠️  secrets.env содержит незаполненные FIXME-значения (обязательно заменить до Стадии 2)"
-fi
-
-if grep -q "FIXME" "${SCRIPT_DIR}/versions.env"; then
-    log_warn "  ⚠️  versions.env содержит незаполненные FIXME-дайджесты (запустите ./ligactl pin-versions)"
+if [[ "${SFTPGO_DIGEST}" == *FIXME* ]]; then
+    log_warn "В базе управления не закреплены дайджесты образов. Команда: ligactl pin-versions."
 fi
 
 if [[ "${DRY_RUN:-false}" == "true" ]]; then
@@ -280,14 +276,7 @@ for_each_node check_pasv_ports
 
 if [[ "${PORT_443_BUSY}" == "true" ]]; then
     export HTTPS_PORT=8444
-    ENV_TARGET="${CONFIG_ROOT:-${SCRIPT_DIR}}/cluster.env"
-    if [[ -f "${ENV_TARGET}" ]]; then
-        if grep -q '^HTTPS_PORT=' "${ENV_TARGET}"; then
-            sed -i.bak 's/^HTTPS_PORT=.*/HTTPS_PORT=8444/' "${ENV_TARGET}" && rm -f "${ENV_TARGET}.bak"
-        else
-            echo 'HTTPS_PORT=8444' >> "${ENV_TARGET}"
-        fi
-    fi
+    config_db_set HTTPS_PORT 8444
     log_warn "  ⚠️  Порт 443 уже занят другими сервисами (2FA/VPN/Nginx) — файловый веб-клиент автоматически перенесен на порт :8444 (существующие сервисы на :443 сохранены!)"
 fi
 

@@ -19,3 +19,8 @@ install.sh
 clusterctl
 ligactl
 docker-compose.yml.tpl
+
+control.sqlite3*
+.control.agekey
+**/control.sqlite3*
+**/.control.agekey

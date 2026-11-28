@@ -4,7 +4,7 @@
 # Все постоянные данные монтируются напрямую на хостовый раздел /data/...
 # (никаких именованных томов в /var/lib/docker на системном разделе /!).
 #
-# Профили Docker Compose (${REMOTE_BASE_DIR}/.env -> COMPOSE_PROFILES):
+# Профили Docker Compose (из ролей в базе контроллера):
 #   - quorum : etcd + swfs-master (голосующие ноды, всегда нечетное число)
 #   - admin  : swfs-admin (1 узел админки, по умолчанию node2)
 #   - backup : swfs-backup (непрерывный weed filer.backup на admin-ноде при настроенном S3)
@@ -35,32 +35,31 @@ services:
     cap_add:
       - DAC_OVERRIDE
     logging: *default-logging
-    environment:
-      ETCD_NAME: "etcd-${NODE_NAME}"
-      ETCD_DATA_DIR: "/etcd-data"
-      ETCD_LISTEN_CLIENT_URLS: "https://${NODE_IP}:${ETCD_CLIENT_PORT},https://127.0.0.1:${ETCD_CLIENT_PORT}"
-      ETCD_ADVERTISE_CLIENT_URLS: "https://${NODE_IP}:${ETCD_CLIENT_PORT}"
-      ETCD_LISTEN_PEER_URLS: "https://${NODE_IP}:${ETCD_PEER_PORT}"
-      ETCD_INITIAL_ADVERTISE_PEER_URLS: "https://${NODE_IP}:${ETCD_PEER_PORT}"
-      ETCD_LISTEN_METRICS_URLS: "http://${NODE_IP}:${ETCD_METRICS_PORT},http://127.0.0.1:${ETCD_METRICS_PORT}"
-      ETCD_INITIAL_CLUSTER: "${ETCD_INITIAL_CLUSTER}"
-      ETCD_INITIAL_CLUSTER_TOKEN: "${CLUSTER_SLUG}-etcd"
-      ETCD_INITIAL_CLUSTER_STATE: "${ETCD_CLUSTER_STATE}"
-      # --- mTLS + CRL ---
-      ETCD_CERT_FILE: "/certs/etcd-server.crt"
-      ETCD_KEY_FILE: "/certs/etcd-server.key"
-      ETCD_TRUSTED_CA_FILE: "/certs/ca.crt"
-      ETCD_CLIENT_CRL_FILE: "/certs/crl.pem"
-      ETCD_PEER_CERT_FILE: "/certs/etcd-peer.crt"
-      ETCD_PEER_KEY_FILE: "/certs/etcd-peer.key"
-      ETCD_PEER_TRUSTED_CA_FILE: "/certs/ca.crt"
-      ETCD_PEER_CRL_FILE: "/certs/crl.pem"
-      ETCD_CLIENT_CERT_AUTH: "true"
-      ETCD_PEER_CLIENT_CERT_AUTH: "true"
-      ETCD_EXPERIMENTAL_PEER_SKIP_CLIENT_SAN_VERIFICATION: "true"
-      # --- WAN Тайминги ---
-      ETCD_HEARTBEAT_INTERVAL: "${ETCD_HEARTBEAT_INTERVAL}"
-      ETCD_ELECTION_TIMEOUT: "${ETCD_ELECTION_TIMEOUT}"
+    command:
+      - "/usr/local/bin/etcd"
+      - "--name=etcd-${NODE_NAME}"
+      - "--data-dir=/etcd-data"
+      - "--listen-client-urls=https://${NODE_BIND_IP}:${ETCD_CLIENT_PORT},https://127.0.0.1:${ETCD_CLIENT_PORT}"
+      - "--advertise-client-urls=https://${NODE_IP}:${ETCD_CLIENT_PORT}"
+      - "--listen-peer-urls=https://${NODE_BIND_IP}:${ETCD_PEER_PORT}"
+      - "--initial-advertise-peer-urls=https://${NODE_IP}:${ETCD_PEER_PORT}"
+      - "--listen-metrics-urls=http://${NODE_BIND_IP}:${ETCD_METRICS_PORT},http://127.0.0.1:${ETCD_METRICS_PORT}"
+      - "--initial-cluster=${ETCD_INITIAL_CLUSTER}"
+      - "--initial-cluster-token=${CLUSTER_SLUG}-etcd"
+      - "--initial-cluster-state=${ETCD_CLUSTER_STATE}"
+      - "--cert-file=/certs/etcd-server.crt"
+      - "--key-file=/certs/etcd-server.key"
+      - "--trusted-ca-file=/certs/ca.crt"
+      - "--client-crl-file=/certs/crl.pem"
+      - "--peer-cert-file=/certs/etcd-peer.crt"
+      - "--peer-key-file=/certs/etcd-peer.key"
+      - "--peer-trusted-ca-file=/certs/ca.crt"
+      - "--peer-crl-file=/certs/crl.pem"
+      - "--client-cert-auth=true"
+      - "--peer-client-cert-auth=true"
+      - "--experimental-peer-skip-client-san-verification=true"
+      - "--heartbeat-interval=${ETCD_HEARTBEAT_INTERVAL}"
+      - "--election-timeout=${ETCD_ELECTION_TIMEOUT}"
     volumes:
       - ${ETCD_DATA_DIR}:/etcd-data
       - ./certs/${NODE_NAME}:/certs:ro
@@ -95,12 +94,8 @@ services:
       - ./configs/patroni.yml:/etc/patroni/patroni.yml:ro
       - ./configs/pgbackrest.conf:/etc/pgbackrest/pgbackrest.conf:ro
       - ./certs/${NODE_NAME}:/certs:ro
-    environment:
-      PATRONI_NAME: "${NODE_NAME}"
-      PATRONI_SCOPE: "${CLUSTER_SLUG}"
-      PATRONI_POSTGRESQL_DATA_DIR: "${PG_DATA_DIR}/data"
-      PATRONICTL_CONFIG_FILE: "/run/pg-certs/patroni.yml"
-      PGPORT: "${PG_PORT}"
+      - ./configs/start-patroni.sh:/usr/local/bin/start-vault-patroni:ro
+    entrypoint: ["bash", "/usr/local/bin/start-vault-patroni", "${PG_DATA_DIR}/data"]
     healthcheck:
       test: ["CMD", "curl", "-sf", "--cacert", "/run/pg-certs/ca.crt", "https://127.0.0.1:${PATRONI_API_PORT}/health"]
       interval: 10s
@@ -157,7 +152,7 @@ services:
       -port=${SWFS_MASTER_PORT}
       -port.grpc=${SWFS_MASTER_GRPC_PORT}
       -metricsPort=${SWFS_MASTER_METRICS_PORT}
-      -peers=${SWFS_MASTER_PEERS}
+      -peers=${SWFS_MASTER_SEEDS}
       -defaultReplication=${SWFS_DEFAULT_REPLICATION}
       -volumeSizeLimitMB=${SWFS_VOLUME_SIZE_LIMIT_MB}
       -mdir=/master-data
@@ -305,15 +300,15 @@ ${SWFS_VOLUME_MOUNTS}
       - DAC_OVERRIDE
       - CHOWN
     logging: *default-logging
-    command: >-
-      admin
-      -ip=0.0.0.0
-      -port=${SWFS_ADMIN_PORT}
-      -port.grpc=${SWFS_ADMIN_GRPC_PORT}
-      -port.legacy=0
-      -master=${SWFS_MASTER_PEERS}
-      -adminPassword=${SWFS_ADMIN_PASSWORD}
-      -dataDir=/data
+    command:
+      - admin
+      - -ip=0.0.0.0
+      - -port=${SWFS_ADMIN_PORT}
+      - -port.grpc=${SWFS_ADMIN_GRPC_PORT}
+      - -port.legacy=0
+      - -master=${SWFS_MASTER_PEERS}
+      - ${SWFS_ADMIN_PASSWORD}
+      - -dataDir=/data
     volumes:
       - swfs-admin-data:/data
       - ./configs/seaweedfs:/etc/seaweedfs:ro
@@ -397,11 +392,10 @@ ${SWFS_VOLUME_MOUNTS}
     logging: *default-logging
     cap_add:
       - NET_BIND_SERVICE
-    environment:
-      SFTPGO_DATA_PROVIDER__CREATE_DEFAULT_ADMIN: "true"
-      SFTPGO_DEFAULT_ADMIN_USERNAME: "${SFTPGO_ADMIN_USERNAME}"
-      SFTPGO_DEFAULT_ADMIN_PASSWORD: "${SFTPGO_ADMIN_PASSWORD}"
+    command: ["sftpgo", "serve", "--config-dir", "/etc/sftpgo", "--loaddata-from", "/etc/sftpgo/bootstrap.json", "--loaddata-mode", "1", "--log-level", "debug", "--log-utc-time", "--log-file-path", "/logs/events.log", "--log-max-size", "50", "--log-max-backups", "5", "--log-compress=false"]
     volumes:
+      - ${SFTPGO_DATA_DIR}-audit/logs:/logs
+      - ./configs/sftpgo-bootstrap.json:/etc/sftpgo/bootstrap.json:ro
       - ./configs/sftpgo.json:/etc/sftpgo/sftpgo.json:ro
       - ./configs/revoked_user_certs.json:/etc/sftpgo/revoked_user_certs.json:ro
       - ./hooks:/etc/sftpgo/hooks:ro
@@ -413,6 +407,8 @@ ${SWFS_VOLUME_MOUNTS}
       - ./certs/ssl:/etc/sftpgo/ssl:ro
       - ./ssh-host-keys:/etc/sftpgo/host_keys:ro
     depends_on:
+      client-audit:
+        condition: service_started
       swfs-s3:
         condition: service_healthy
     healthcheck:
@@ -424,6 +420,27 @@ ${SWFS_VOLUME_MOUNTS}
   # ════════════════════════════════════════════════════════════════════════
   # node_exporter
   # ════════════════════════════════════════════════════════════════════════
+  client-audit:
+    image: "${PATRONI_PG_IMAGE_REF}"
+    user: "1000:1000"
+    restart: unless-stopped
+    network_mode: host
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    logging: *default-logging
+    entrypoint: ["/usr/bin/python3", "/app/client-audit.py", "/app/config.json"]
+    healthcheck:
+      disable: true
+    volumes:
+      - ./configs/client-audit.py:/app/client-audit.py:ro
+      - ./configs/client-audit.json:/app/config.json:ro
+      - ${SFTPGO_DATA_DIR}-audit/logs:/logs:ro
+      - ${SFTPGO_DATA_DIR}-audit/spool:/spool
+      - ./certs/${NODE_NAME}/ca.crt:/certs/ca.crt:ro
+      - ./certs/${NODE_NAME}/pg-client.crt:/certs/pg-client.crt:ro
+      - ./certs/${NODE_NAME}/pg-client.key:/certs/pg-client.key:ro
+
   node-exporter:
     image: "${NODE_EXPORTER_IMAGE_REF}"
     <<: [*default-restart]
@@ -435,7 +452,7 @@ ${SWFS_VOLUME_MOUNTS}
       - ALL
     logging: *default-logging
     command:
-      - "--web.listen-address=${NODE_IP}:9100"
+      - "--web.listen-address=${NODE_BIND_IP}:9100"
       - "--path.rootfs=/host"
       - "--collector.textfile.directory=/textfile_collector"
     volumes:

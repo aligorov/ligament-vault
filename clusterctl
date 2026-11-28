@@ -5,11 +5,11 @@
 # Использование: ./ligactl [--env <name>] <команда> [опции]
 #
 # Команды Day-0 (установка и секреты):
-#   secrets         Управление секретами (init/encrypt/decrypt/edit/status через age)
+#   secrets         Управление секретами (init/encrypt/status через age)
 #   preflight       Проверка готовности VPS (RTT, диски, SSH, NTP, PASV)
 #   install         Послойная установка кластера (6 стадий: 0..5, поддержка --resume)
 #   sync-config     Обновление конфигов и UFW с проверкой синтаксиса и reload
-#   pin-versions    Получить реальные @sha256 дайджесты образов в versions.env
+#   pin-versions    Получить реальные @sha256 дайджесты образов в control.sqlite3
 #
 # Команды Day-1 (приемка и песочница):
 #   verify          Прогон приемочных тестов (--sprint 1 / --disruptive)
@@ -19,7 +19,7 @@
 #   user            Управление SFTP/Web клиентами и квотами (add/list/disable/rotate-key)
 #   pki             Статус и бесшовная ротация mTLS сертификатов (status/rotate)
 #   scale           Масштабирование (add/replace/remove/expand-disk)
-#   upgrade         Rolling-обновление по versions.env
+#   upgrade         Rolling-обновление по control.sqlite3
 #   rollback        Откат на .rollback_state дайджесты
 #   dr              Аварийное восстановление кластера из внешнего S3 (restore/verify-backup)
 #   status          Сводный статус кластера (--json / --strict)
@@ -63,7 +63,7 @@ parse_global_flags() {
             --dry-run)  DRY_RUN=true; shift ;;
             --yes)      AUTO_YES=true; shift ;;
             --resume)   RESUME_OP=true; shift ;;
-            --verbose)  VERBOSE=true; set -x; shift ;;
+            --verbose)  VERBOSE=true; shift ;;
             --env)
                 [[ $# -ge 2 ]] || { log_error "Флаг --env требует имя окружения"; exit 1; }
                 ENV_NAME="$2"
@@ -91,22 +91,14 @@ resolve_config_root() {
 }
 
 load_env() {
-    local env_file="${CONFIG_ROOT}/cluster.env"
-    if [[ ! -f "${env_file}" ]]; then
-        log_error "Файл ${env_file} не найден. Скопируйте: cp cluster.env.example '${env_file}'"
-        exit 1
-    fi
     load_cluster_env "${CONFIG_ROOT}"
-    if ! has_secrets_configured; then
-        log_warn "Секреты не найдены (${CONFIG_ROOT}/secrets.env.age или secrets.env). Сгенерируйте: ./${CLI_NAME} secrets init"
-    fi
 }
 
 show_help() {
     local cmd="${1:-}"
     case "${cmd}" in
         secrets)
-            echo "Использование: ./${CLI_NAME} secrets <init|encrypt|decrypt|edit|status> [опции]"
+            echo "Использование: ./${CLI_NAME} secrets <init|encrypt|status> [опции]"
             ;;
         preflight)
             echo "Использование: ./${CLI_NAME} preflight [--dry-run]"
@@ -122,7 +114,7 @@ show_help() {
             ;;
         pin-versions)
             echo "Использование: ./${CLI_NAME} pin-versions [--dry-run]"
-            echo "  Снимает актуальные @sha256 дайджесты с registry и обновляет versions.env."
+            echo "  Снимает актуальные @sha256 дайджесты с registry и обновляет control.sqlite3."
             ;;
         publish-image)
             echo "Использование: ./${CLI_NAME} publish-image [--repo aligorov/ligament_vault_patroni] [--tag 16] [--multiarch]"
@@ -150,7 +142,8 @@ show_help() {
             echo "Использование: ./${CLI_NAME} backup <incr|full|verify-restore|--verify> [--dry-run]"
             ;;
         lab)
-            echo "Использование: ./${CLI_NAME} lab <up|down|status|verify> [--provider auto|lima|multipass]"
+            echo "./${CLI_NAME} lab up [--provider auto|lima|multipass] [--with-arbiter] [--dns-zone lab.test]"
+            echo "./${CLI_NAME} lab verify [--with-backup] | lab status | lab down"
             ;;
         status)
             echo "Использование: ./${CLI_NAME} status [--json] [--strict]"
@@ -165,11 +158,12 @@ ${CLI_NAME} — Единый CLI-оркестратор Ligament Vault
 Использование: ./${CLI_NAME} [--env <name>] <команда> [опции]
 
 Day-0 (Секреты и Установка):
-  secrets        Управление секретами через age в RAM (init/encrypt/decrypt/edit/status)
+  config         База управления: init, get КЛЮЧ, set КЛЮЧ (stdin), ha-five
+  secrets        Управление секретами через age в RAM (init/encrypt/status)
   preflight      Проверка готовности VPS (Спринт 0)
   install        Послойная установка кластера (Стадии 0–5, флаг --resume)
   sync-config    Обновление конфигов и UFW без рестарта БД/томов
-  pin-versions   Фиксация реальных @sha256 дайджестов в versions.env
+  pin-versions   Фиксация реальных @sha256 дайджестов в control.sqlite3
   publish-image  Сборка Dockerfile.patroni и публикация в Docker Hub
 
 Day-1 (Приемка и Локальный стенд):
@@ -180,7 +174,7 @@ Day-2 (Эксплуатация, Клиенты, PKI и DR):
   user           Управление клиентами SFTPGo (/work + /worm, квоты, ключи, 2FA)
   pki            Мониторинг и бесшовная ротация mTLS сертификатов (status/rotate)
   scale          Масштабирование (add/replace/remove/expand-disk)
-  upgrade        Rolling-обновление по versions.env
+  upgrade        Rolling-обновление по control.sqlite3
   rollback       Откат на .rollback_state
   backup         Бэкапы БД и SeaweedFS во внешний S3 (incr/full/verify-restore)
   dr             Автоматическое восстановление кластера из внешнего S3 (restore)
@@ -244,13 +238,16 @@ cmd_sync_config() {
     reload_cb() {
         local ip="$1" name="$3"
         log_info "  Reload сервисов на ${name} (${ip})..."
-        remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d --no-deps haproxy"
-        remote_exec "${ip}" "CID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q sftpgo | head -n1); if [[ -n \"\${CID}\" ]]; then docker kill -s HUP \"\${CID}\" 2>/dev/null || (cd '${REMOTE_BASE_DIR}' && docker compose up -d --no-deps sftpgo); fi"
+        reload_node_haproxy "${ip}"
+        reload_node_patroni "${ip}"
+        remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && if docker compose ps -q sftpgo | grep -q .; then docker compose up -d --no-deps sftpgo client-audit && docker compose kill -s HUP sftpgo; fi"
     }
     for_each_node reload_cb
 
         local primary_ip primary_name
         primary_ip=$(find_patroni_primary_ip || get_node_ip 1)
+        apply_patroni_sync_policy "${primary_ip}"
+        provision_cluster_databases "${primary_ip}"
         primary_name=""
         for i in $(seq 1 "$(get_node_count)"); do
             [[ "$(get_node_ip "$i")" == "${primary_ip}" ]] && primary_name=$(get_node_name "$i") && break
@@ -258,13 +255,13 @@ cmd_sync_config() {
         if [[ "${BACKUP_S3_ACCESS_KEY:-FIXME}" != *FIXME* && -n "${BACKUP_S3_ACCESS_KEY:-}" ]]; then
             local target_archive_cmd="pgbackrest --stanza=${CLUSTER_SLUG} archive-push %p"
             log_info "Включение WAL-архивации pgBackRest и непрерывного бэкапа SeaweedFS (внешний S3 настроен)..."
-            remote_exec_env_stdin "${primary_ip}" "PATRONI_API_PASSWORD" "${PATRONI_API_PORT:-8008}" "${target_archive_cmd}" "${REMOTE_BASE_DIR}" "${primary_name}" <<'REMOTE_PATRONI_ARCH' || true
+            remote_exec_private_stdin "${primary_ip}" "PATRONI_API_PASSWORD" "${PATRONI_API_PORT:-8008}" "${target_archive_cmd}" "${REMOTE_BASE_DIR}" "${primary_name}" <<'REMOTE_PATRONI_ARCH' || true
 set -euo pipefail
 PPORT="$1"; ACMD="$2"; BDIR="$3"; PNAME="$4"
-python3 - "${PPORT}" "${ACMD}" "${BDIR}" "${PNAME}" <<'PYEOF'
+python3 - "${PPORT}" "${ACMD}" "${BDIR}" "${PNAME}" 3< <(printf '%s' "${PATRONI_API_PASSWORD}") <<'PYEOF'
 import base64, json, os, ssl, sys, urllib.request
 port, acmd, bdir, pname = sys.argv[1:]
-pw = os.environ["PATRONI_API_PASSWORD"]
+pw = os.fdopen(3).read()
 ctx = ssl.create_default_context(cafile=f"{bdir}/certs/ca.crt")
 if pname and os.path.exists(f"{bdir}/certs/{pname}/pg-client.crt"):
     ctx.load_cert_chain(certfile=f"{bdir}/certs/{pname}/pg-client.crt", keyfile=f"{bdir}/certs/{pname}/pg-client.key")
@@ -285,16 +282,18 @@ REMOTE_PATRONI_ARCH
         admin_ip=$(get_node_ip "${SWFS_ADMIN_NODE_INDEX:-2}")
         remote_exec "${admin_ip}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d swfs-backup" || true
     fi
-    remote_exec "${primary_ip}" "CID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q patroni | head -n1); [[ -n \"\${CID}\" ]] && docker exec \"\${CID}\" patronictl reload '${CLUSTER_SLUG}' --force" >/dev/null 2>&1 || true
+    remote_exec "${primary_ip}" "CID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q patroni | head -n1); [[ -n \"\${CID}\" ]] && docker exec \"\${CID}\" patronictl -c /run/pg-certs/patroni.yml reload '${CLUSTER_SLUG}' --force" >/dev/null 2>&1 || true
 
+    source "${SCRIPT_DIR}/scripts/lib/arbiter-deploy.sh"
+    deploy_arbiter
     log_info "✅ Конфигурации ${PROJECT_NAME} синхронизированы без рестарта БД и томов"
 }
 
 cmd_pin_versions() {
     local vars=("SFTPGO" "SEAWEEDFS" "ETCD" "HAPROXY" "LEGO" "PROMETHEUS" "ALERTMANAGER" "NODE_EXPORTER" "BLACKBOX_EXPORTER")
-    local vfile="${SCRIPT_DIR}/versions.env"
 
-    log_step "Фиксация @sha256 дайджестов в versions.env"
+
+    log_step "Фиксация @sha256 дайджестов в control.sqlite3"
     for prefix in "${vars[@]}"; do
         local img_var="${prefix}_IMAGE"
         local dig_var="${prefix}_DIGEST"
@@ -308,13 +307,7 @@ cmd_pin_versions() {
         local repo_digest
         repo_digest=$(docker inspect --format='{{index .RepoDigests 0}}' "${img}" 2>/dev/null | awk -F'@' '{print $2}')
         if [[ "${repo_digest}" == sha256:* ]]; then
-            python3 - "${vfile}" "${dig_var}" "${repo_digest}" <<'PYEOF'
-import re, sys
-path, key, val = sys.argv[1], sys.argv[2], sys.argv[3]
-text = open(path, "r", encoding="utf-8").read()
-text = re.sub(rf'^{key}=".*"', f'{key}="{val}"', text, flags=re.M)
-open(path, "w", encoding="utf-8").write(text)
-PYEOF
+            config_db_set "${dig_var}" "${repo_digest}"
             log_info "  ✅ ${dig_var}=${repo_digest}"
         else
             log_warn "  ⚠️  Не удалось получить RepoDigest для ${img}"
@@ -337,6 +330,10 @@ main() {
     export DRY_RUN AUTO_YES VERBOSE RESUME_OP ENV_NAME
 
     case "${cmd}" in
+        config)
+            config_db "${cmd_args[@]}"
+            return
+            ;;
         secrets)
             bash "${OPS_DIR}/secrets-manager.sh" "${cmd_args[@]+"${cmd_args[@]}"}"
             return 0
@@ -346,8 +343,7 @@ main() {
             return 0
             ;;
         pin-versions)
-            # shellcheck source=versions.env
-            source "${SCRIPT_DIR}/versions.env"
+            load_env
             cmd_pin_versions "${cmd_args[@]+"${cmd_args[@]}"}"
             return 0
             ;;

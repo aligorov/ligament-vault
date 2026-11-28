@@ -10,34 +10,16 @@ state_root() {
 }
 
 ensure_quorum_nodes_initialized() {
-    local qfile
-    qfile="$(state_root)/.quorum_nodes"
-    [[ "${DRY_RUN:-false}" == "true" ]] && return 0
-    if [[ ! -s "${qfile}" ]]; then
-        mkdir -p "$(dirname "${qfile}")"
-        local count i
-        count=$(get_node_count)
-        for i in $(seq 1 "${count}"); do
-            if (( i <= 3 )); then
-                get_node_name "$i" >> "${qfile}"
-            fi
-        done
+    if [[ -z "${QUORUM_NODES:-}" ]]; then
+        QUORUM_NODES=$(get_node_entries | awk -F: 'NR <= 3 {print $3}' | paste -sd' ' -)
+        [[ -n "$QUORUM_NODES" ]] || { log_error "Не задан состав кворума"; return 1; }
+        if [[ "${DRY_RUN:-false}" != true ]]; then config_db_set QUORUM_NODES "$QUORUM_NODES"; fi
     fi
 }
 
 is_quorum_node() {
-    local idx="$1"
-    local name="$2"
-    local qfile
-    qfile="$(state_root)/.quorum_nodes"
-    if [[ -s "${qfile}" ]]; then
-        grep -qx "${name}" "${qfile}"
-        return $?
-    fi
-    if (( idx <= 3 )); then
-        return 0
-    fi
-    return 1
+    if [[ -z "${QUORUM_NODES:-}" ]]; then (( $1 <= 3 )); return; fi
+    [[ " $QUORUM_NODES " == *" $2 "* ]]
 }
 
 build_etcd_cluster_string() {
@@ -85,6 +67,11 @@ build_swfs_master_peers() {
     echo "${result}"
 }
 
+verify_volume_placement() {
+    remote_exec_stdin "$1" "$(build_swfs_master_peers)" "${SWFS_DEFAULT_REPLICATION:-100}" \
+        < "${SCRIPT_DIR}/scripts/lib/seaweed-placement.sh"
+}
+
 build_pg_hosts() {
     get_node_ips | paste -sd, -
 }
@@ -97,18 +84,18 @@ build_pg_ports_csv() {
 
 EXTRA_PEER_IPS="${EXTRA_PEER_IPS:-}"
 
+# Service endpoints retain their DNS names. Firewall rules and bind addresses use A records.
+resolve_node_ipv4() {
+    python3 "${SCRIPT_DIR}/scripts/lib/node_address.py" "$@"
+}
+
 get_all_peer_ips() {
-    local extra_file
-    extra_file="$(state_root)/.state/extra_peer_ips"
-    {
-        get_node_ips
-        if [[ -n "${EXTRA_PEER_IPS:-}" ]]; then
-            printf '%s\n' "${EXTRA_PEER_IPS}" | tr ' ' '\n'
-        fi
-        if [[ -f "${extra_file}" ]]; then
-            cat "${extra_file}"
-        fi
-    } | awk 'NF && !seen[$0]++'
+    local endpoints=() endpoint resolved
+    while IFS= read -r endpoint; do
+        [[ -z "${endpoint}" ]] || endpoints+=("${endpoint}")
+    done < <(get_node_ips; printf '%s\n' "${EXTRA_PEER_IPS:-}" | tr ' ' '\n')
+    resolved=$(resolve_node_ipv4 "${endpoints[@]}") || return 1
+    printf '%s\n' "${resolved}" | awk 'NF && !seen[$0]++'
 }
 
 discover_extra_peer_ips() {
@@ -137,13 +124,7 @@ PYIP" 2>/dev/null | tail -n1 | tr -d '[:space:]' || true)
         fi
     done
     EXTRA_PEER_IPS="${found}"
-    export EXTRA_PEER_IPS
-    mkdir -p "$(state_root)/.state"
-    if [[ -n "${found}" ]]; then
-        printf '%s\n' "${found}" | tr ' ' '\n' > "$(state_root)/.state/extra_peer_ips"
-    else
-        rm -f "$(state_root)/.state/extra_peer_ips"
-    fi
+    config_db_set EXTRA_PEER_IPS "${found}"
 }
 
 build_haproxy_pg_servers() {
@@ -154,11 +135,33 @@ build_haproxy_pg_servers() {
         name=$(get_node_name "$i")
         ip=$(get_node_ip "$i")
         result+="    server ${name} ${ip}:${PG_PORT:-15432} check port ${PATRONI_API_PORT:-8008} check-ssl verify required ca-file /certs/ca.crt"
+        if [[ ! "${ip}" =~ ^[0-9.]+$ ]]; then
+            result+=" resolvers cluster_dns resolve-prefer ipv4 init-addr libc,none verifyhost ${ip}"
+        fi
         if (( i < count )); then
             result+=$'\n'
         fi
     done
     echo "${result}"
+}
+
+reload_node_haproxy() {
+    local node="$1"
+    remote_exec "${node}" "cd '${REMOTE_BASE_DIR}' && docker compose up -d --no-deps haproxy && docker compose exec -T haproxy haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg && docker compose kill -s USR2 haproxy"
+}
+
+reload_node_patroni() {
+    remote_exec_stdin "$1" "$REMOTE_BASE_DIR" <<'RELOAD_PATRONI'
+set -euo pipefail
+cd "$1"
+cid=$(docker compose ps -q patroni)
+[[ -n "$cid" ]] || { echo "Patroni container is not running" >&2; exit 1; }
+docker cp configs/patroni.yml "$cid:/run/pg-certs/patroni.yml.new"
+docker exec -u root "$cid" sh -ec 'chown postgres:postgres /run/pg-certs/patroni.yml.new
+chmod 600 /run/pg-certs/patroni.yml.new
+mv /run/pg-certs/patroni.yml.new /run/pg-certs/patroni.yml'
+docker kill -s HUP "$cid" >/dev/null
+RELOAD_PATRONI
 }
 
 build_patroni_slots_yaml() {
@@ -177,13 +180,14 @@ build_patroni_slots_yaml() {
 }
 
 build_pg_hba_peers_yaml() {
-    local result="" ip
+    local result="" ip peers
+    peers=$(get_all_peer_ips) || return 1
     while IFS= read -r ip; do
         [[ -z "${ip}" || "${ip}" == "127.0.0.1" || "${ip}" == "::1" ]] && continue
         [[ -n "${result}" ]] && result+=$'\n'
         result+="    - hostssl all all ${ip}/32 scram-sha-256 clientcert=verify-ca"$'\n'
         result+="    - hostssl replication replicator ${ip}/32 scram-sha-256 clientcert=verify-ca"
-    done < <(get_all_peer_ips)
+    done <<< "${peers}"
     echo "${result}"
 }
 
@@ -194,23 +198,15 @@ resolve_current_active_ip() {
         echo "${fallback}"
         return 0
     fi
-    local resolved
-    resolved=$(python3 - "${DOMAIN}" <<'PYEOF' 2>/dev/null || true
-import socket, sys
-try:
-    print(socket.gethostbyname(sys.argv[1]))
-except Exception:
-    pass
-PYEOF
-    )
-    local count
-    count=$(get_node_count)
-    for i in $(seq 1 "${count}"); do
-        if [[ "$(get_node_ip "$i")" == "${resolved}" ]]; then
-            echo "${resolved}"
+    local resolved node addr
+    resolved=$(resolve_node_ipv4 "${DOMAIN}" 2>/dev/null) || resolved=""
+    while IFS= read -r node; do
+        addr=$(resolve_node_ipv4 "${node}" 2>/dev/null) || continue
+        if [[ "${addr}" == "${resolved}" ]]; then
+            echo "${node}"
             return 0
         fi
-    done
+    done < <(get_node_ips)
     echo "${fallback}"
 }
 
@@ -434,47 +430,55 @@ remote_compose_up() {
     return "${rc}"
 }
 
+# Shell variables in this function are consumed by render_template via indirection.
+# shellcheck disable=SC2034
 export_node_render_vars() {
     local ip="$1" dc="$2" name="$3" idx="$4" etcd_state="${5:-new}"
     local admin_idx="${SWFS_ADMIN_NODE_INDEX:-2}"
 
-    export CLUSTER_SLUG="${CLUSTER_SLUG:-ligament-vault}"
-    export PROJECT_NAME="${PROJECT_NAME:-Ligament Vault}"
-    export REMOTE_BASE_DIR="${REMOTE_BASE_DIR:-/opt/${CLUSTER_SLUG}}"
-    export ARBITER_BASE_DIR="${ARBITER_BASE_DIR:-/opt/${CLUSTER_SLUG}-arbiter}"
+    CLUSTER_SLUG="${CLUSTER_SLUG:-ligament-vault}"
+    PROJECT_NAME="${PROJECT_NAME:-Ligament Vault}"
+    REMOTE_BASE_DIR="${REMOTE_BASE_DIR:-/opt/${CLUSTER_SLUG}}"
+    ARBITER_BASE_DIR="${ARBITER_BASE_DIR:-/opt/${CLUSTER_SLUG}-arbiter}"
 
-    export NODE_IP="${ip}"
-    export DC_NAME="${dc}"
-    export NODE_NAME="${name}"
-    export NODE_INDEX="${idx}"
-    export ETCD_CLUSTER_STATE="${etcd_state}"
+    NODE_IP="${ip}"
+    NODE_BIND_IP=$(resolve_node_ipv4 "${ip}") || return 1
+    DC_NAME="${dc}"
+    NODE_NAME="${name}"
+    NODE_INDEX="${idx}"
+    ETCD_CLUSTER_STATE="${etcd_state}"
 
-    export ETCD_DATA_DIR="${ETCD_DATA_DIR:-/data/etcd}"
-    export SWFS_MASTER_DIR="${SWFS_MASTER_DIR:-/data/swfs-master}"
-    export SFTPGO_DATA_DIR="${SFTPGO_DATA_DIR:-/data/sftpgo}"
-    export SFTPGO_TEMP_PATH="${SFTPGO_TEMP_PATH:-/data/sftpgo-temp}"
-    export ETCD_METRICS_PORT="${ETCD_METRICS_PORT:-2381}"
-    export SFTPGO_TELEMETRY_PORT="${SFTPGO_TELEMETRY_PORT:-10000}"
-    export HTTPS_PORT="${HTTPS_PORT:-443}"
-    export PG_PORT="${PG_PORT:-15432}"
-    export PATRONI_API_PORT="${PATRONI_API_PORT:-8008}"
-    export HAPROXY_PG_PORT="${HAPROXY_PG_PORT:-5433}"
-    export PG_MAX_SLOT_WAL_KEEP_SIZE="${PG_MAX_SLOT_WAL_KEEP_SIZE:-2GB}"
+    ETCD_DATA_DIR="${ETCD_DATA_DIR:-/data/etcd}"
+    SWFS_MASTER_DIR="${SWFS_MASTER_DIR:-/data/swfs-master}"
+    SFTPGO_DATA_DIR="${SFTPGO_DATA_DIR:-/data/sftpgo}"
+    SFTPGO_TEMP_PATH="${SFTPGO_TEMP_PATH:-/data/sftpgo-temp}"
+    ETCD_METRICS_PORT="${ETCD_METRICS_PORT:-2381}"
+    SFTPGO_TELEMETRY_PORT="${SFTPGO_TELEMETRY_PORT:-10000}"
+    HTTPS_PORT="${HTTPS_PORT:-443}"
+    PG_PORT="${PG_PORT:-15432}"
+    PG_SYNC_STANDBY_COUNT="${PG_SYNC_STANDBY_COUNT:-0}"
+    if [[ ! "$PG_SYNC_STANDBY_COUNT" =~ ^(0|[1-9][0-9]?)$ ]] || (( PG_SYNC_STANDBY_COUNT >= $(get_node_count) )); then
+        log_error "PG_SYNC_STANDBY_COUNT должен быть меньше числа узлов"
+        return 1
+    fi
+    PATRONI_SYNC_MODE=false
+    if (( PG_SYNC_STANDBY_COUNT > 0 )); then PATRONI_SYNC_MODE=true; fi
+    PATRONI_API_PORT="${PATRONI_API_PORT:-8008}"
+    HAPROXY_PG_PORT="${HAPROXY_PG_PORT:-5433}"
+    PG_MAX_SLOT_WAL_KEEP_SIZE="${PG_MAX_SLOT_WAL_KEEP_SIZE:-2GB}"
 
     if [[ -n "${ARBITER_IP:-}" ]]; then
-        export SFTPGO_TELEMETRY_BIND="0.0.0.0"
+        SFTPGO_TELEMETRY_BIND="0.0.0.0"
     else
-        export SFTPGO_TELEMETRY_BIND="127.0.0.1"
+        SFTPGO_TELEMETRY_BIND="127.0.0.1"
     fi
 
     if [[ "${LIGAMENT_2FA_ENABLED:-false}" == "true" ]]; then
-        export SFTPGO_PRE_LOGIN_HOOK="/etc/sftpgo/hooks/ligament-2fa-hook.sh"
+        SFTPGO_PRE_LOGIN_HOOK="/etc/sftpgo/hooks/ligament-2fa-hook.sh"
     else
-        export SFTPGO_PRE_LOGIN_HOOK=""
+        SFTPGO_PRE_LOGIN_HOOK=""
     fi
 
-    export ETCD_IMAGE_REF HAPROXY_IMAGE_REF PATRONI_PG_IMAGE_REF SEAWEEDFS_IMAGE_REF SFTPGO_IMAGE_REF NODE_EXPORTER_IMAGE_REF
-    export PROMETHEUS_IMAGE_REF ALERTMANAGER_IMAGE_REF BLACKBOX_IMAGE_REF
     ETCD_IMAGE_REF=$(resolve_image_ref "${ETCD_IMAGE}" "${ETCD_DIGEST:-}")
     HAPROXY_IMAGE_REF=$(resolve_image_ref "${HAPROXY_IMAGE}" "${HAPROXY_DIGEST:-}")
     PATRONI_PG_IMAGE_REF=$(resolve_image_ref "${PATRONI_PG_IMAGE}" "${PATRONI_PG_DIGEST:-}")
@@ -485,14 +489,13 @@ export_node_render_vars() {
     ALERTMANAGER_IMAGE_REF=$(resolve_image_ref "${ALERTMANAGER_IMAGE}" "${ALERTMANAGER_DIGEST:-}")
     BLACKBOX_IMAGE_REF=$(resolve_image_ref "${BLACKBOX_EXPORTER_IMAGE}" "${BLACKBOX_EXPORTER_DIGEST:-}")
 
-    export SFTPGO_ADMIN_USERNAME="${SFTPGO_ADMIN_USERNAME:-admin}"
-    export ALERT_WEBHOOK_URL="${ALERT_WEBHOOK_URL:-http://127.0.0.1:9099/alerts}"
+    SFTPGO_ADMIN_USERNAME="${SFTPGO_ADMIN_USERNAME:-admin}"
+    ALERT_WEBHOOK_URL="${ALERT_WEBHOOK_URL:-http://127.0.0.1:9099/alerts}"
 
-    export SWFS_MASTER_GRPC_PORT=$(( ${SWFS_MASTER_PORT:-9333} + 10000 ))
-    export SWFS_VOLUME_GRPC_PORT=$(( ${SWFS_VOLUME_PORT:-8082} + 10000 ))
-    export SWFS_FILER_GRPC_PORT=$(( ${SWFS_FILER_PORT:-8888} + 10000 ))
-    export SWFS_S3_METRICS_PORT=$(( ${SWFS_FILER_METRICS_PORT:-9326} + 1 ))
-    export SWFS_ADMIN_IP
+    SWFS_MASTER_GRPC_PORT=$(( ${SWFS_MASTER_PORT:-9333} + 10000 ))
+    SWFS_VOLUME_GRPC_PORT=$(( ${SWFS_VOLUME_PORT:-8082} + 10000 ))
+    SWFS_FILER_GRPC_PORT=$(( ${SWFS_FILER_PORT:-8888} + 10000 ))
+    SWFS_S3_METRICS_PORT=$(( ${SWFS_FILER_METRICS_PORT:-9326} + 1 ))
     SWFS_ADMIN_IP=$(get_node_ip "${admin_idx}")
 
     local vol_mounts="" vol_max=""
@@ -505,17 +508,16 @@ export_node_render_vars() {
         [[ -n "${vol_max}" ]] && vol_max+=","
         vol_max+="${SWFS_VOLUME_MAX_PER_DIR:-64}"
     done
-    export SWFS_VOLUME_MOUNTS="${vol_mounts}"
-    export SWFS_VOLUME_MAX="${SWFS_VOLUME_MAX_OVERRIDE:-${vol_max}}"
-    export SWFS_VOLUME_SIZE_LIMIT_MB="${SWFS_VOLUME_SIZE_LIMIT_MB:-128}"
-    export SWFS_MIN_FREE_SPACE="${SWFS_MIN_FREE_SPACE:-128MiB}"
+    SWFS_VOLUME_MOUNTS="${vol_mounts}"
+    SWFS_VOLUME_MAX="${SWFS_VOLUME_MAX_OVERRIDE:-${vol_max}}"
+    SWFS_VOLUME_SIZE_LIMIT_MB="${SWFS_VOLUME_SIZE_LIMIT_MB:-128}"
+    SWFS_MIN_FREE_SPACE="${SWFS_MIN_FREE_SPACE:-128MiB}"
 
     if (( $(get_node_count) >= 3 && ${ETCD_ELECTION_TIMEOUT:-2500} <= 2500 )); then
-        export ETCD_HEARTBEAT_INTERVAL=350
-        export ETCD_ELECTION_TIMEOUT=3500
+        ETCD_HEARTBEAT_INTERVAL=350
+        ETCD_ELECTION_TIMEOUT=3500
     fi
 
-    export ETCD_INITIAL_CLUSTER ETCD_HOSTS ETCD_PATRONI_HOSTS ETCD_PATRONI_USE_PROXIES SWFS_MASTER_PEERS PG_HOSTS PG_PORTS_CSV HAPROXY_PG_SERVERS PATRONI_SLOTS_YAML PG_HBA_PEERS_YAML
     ETCD_INITIAL_CLUSTER=$(build_etcd_cluster_string)
     ETCD_HOSTS=$(build_etcd_hosts)
     if is_quorum_node "${idx}" "${name}"; then
@@ -532,21 +534,32 @@ export_node_render_vars() {
     fi
     ETCD_PATRONI_USE_PROXIES="false"
     SWFS_MASTER_PEERS=$(build_swfs_master_peers)
+    # 4.55 requires an odd number of discovery peers including self, even during a 3 -> 5 expansion.
+    SWFS_MASTER_SEEDS="$SWFS_MASTER_PEERS"
+    local seed_list=() seed
+    IFS=',' read -ra seed_list <<< "$SWFS_MASTER_PEERS"
+    if (( ${#seed_list[@]} % 2 == 0 )) && is_quorum_node "$idx" "$name"; then
+        SWFS_MASTER_SEEDS=""
+        local omit=${seed_list[${#seed_list[@]}-1]}
+        if [[ "$omit" == "$ip:${SWFS_MASTER_PORT:-9333}" ]]; then omit=${seed_list[0]}; fi
+        for seed in "${seed_list[@]}"; do
+            [[ "$seed" == "$omit" ]] || SWFS_MASTER_SEEDS+="${SWFS_MASTER_SEEDS:+,}$seed"
+        done
+    fi
     PG_HOSTS=$(build_pg_hosts)
     PG_PORTS_CSV=$(build_pg_ports_csv)
     HAPROXY_PG_SERVERS=$(build_haproxy_pg_servers)
     PATRONI_SLOTS_YAML=$(build_patroni_slots_yaml)
     PG_HBA_PEERS_YAML=$(build_pg_hba_peers_yaml)
 
-    export BACKUP_S3_HOST
     BACKUP_S3_HOST="${BACKUP_S3_ENDPOINT#https://}"
     BACKUP_S3_HOST="${BACKUP_S3_HOST#http://}"
     BACKUP_S3_HOST="${BACKUP_S3_HOST%%/*}"
 
     if [[ -n "${BACKUP_S3_ACCESS_KEY:-}" && "${BACKUP_S3_ACCESS_KEY}" != *FIXME* ]]; then
-        export PG_ARCHIVE_COMMAND="pgbackrest --stanza=${CLUSTER_SLUG} archive-push %p"
+        PG_ARCHIVE_COMMAND="pgbackrest --stanza=${CLUSTER_SLUG} archive-push %p"
     else
-        export PG_ARCHIVE_COMMAND="/bin/true"
+        PG_ARCHIVE_COMMAND="/bin/true"
     fi
 
     local profiles=()
@@ -559,8 +572,7 @@ export_node_render_vars() {
             profiles+=("backup")
         fi
     fi
-    export COMPOSE_PROFILES
-    COMPOSE_PROFILES=$(IFS=,; echo "${profiles[*]}")
+    NODE_PROFILES=$(IFS=,; echo "${profiles[*]}")
 }
 
 render_node_configs() {
@@ -576,10 +588,7 @@ render_node_configs() {
     chmod 700 "${sroot}/.rendered" "${out}" "${out}/seaweedfs" "${out}/hooks"
 
     render_template "${SCRIPT_DIR}/docker-compose.yml.tpl" "${out}/docker-compose.yml"
-    cat > "${out}/.env" <<EOF
-COMPOSE_PROFILES=${COMPOSE_PROFILES}
-EOF
-
+    python3 "${SCRIPT_DIR}/scripts/lib/node_config.py" "${sroot}" "${out}" "${name}" "${NODE_PROFILES}"
     render_template "${SCRIPT_DIR}/configs/patroni.yml.tpl" "${out}/patroni.yml"
     render_template "${SCRIPT_DIR}/configs/haproxy-pg.cfg.tpl" "${out}/haproxy-pg.cfg"
     render_template "${SCRIPT_DIR}/configs/pgbackrest.conf.tpl" "${out}/pgbackrest.conf"
@@ -590,6 +599,13 @@ EOF
     render_template "${SCRIPT_DIR}/configs/seaweedfs/replication.toml.tpl" "${out}/seaweedfs/replication.toml"
     render_template "${SCRIPT_DIR}/configs/seaweedfs/s3.json.tpl" "${out}/seaweedfs/s3.json"
 
+    # Used by render_template for the libpq connection string.
+    # shellcheck disable=SC2034
+    local SFTPGO_DSN_PASSWORD
+    # shellcheck disable=SC2034
+    SFTPGO_DSN_PASSWORD=$(printf %s "$SFTPGO_DB_PASSWORD" | python3 -c 'import sys
+v=sys.stdin.read()
+print(chr(39)+v.replace(chr(92),chr(92)*2).replace(chr(39),chr(92)+chr(39))+chr(39),end="")')
     render_template "${SCRIPT_DIR}/configs/sftpgo.json.tpl" "${out}/sftpgo.json"
     if [[ ! -f "${sroot}/.pki/revoked_user_certs.json" ]]; then
         mkdir -p "${sroot}/.pki"
@@ -602,15 +618,6 @@ EOF
         cp "${SCRIPT_DIR}/scripts/hooks/ligament-2fa-hook.sh" "${out}/hooks/ligament-2fa-hook.sh"
         chmod 755 "${out}/hooks/ligament-2fa-hook.sh"
     fi
-    cat > "${out}/hooks/ligament-2fa.env" <<EOF
-LIGAMENT_2FA_ENABLED="${LIGAMENT_2FA_ENABLED:-false}"
-LIGAMENT_2FA_API_URL="${LIGAMENT_2FA_API_URL:-}"
-LIGAMENT_2FA_API_TOKEN="${LIGAMENT_2FA_API_TOKEN:-}"
-LIGAMENT_2FA_TIMEOUT_SEC="${LIGAMENT_2FA_TIMEOUT_SEC:-5}"
-LIGAMENT_2FA_FAIL_OPEN="${LIGAMENT_2FA_FAIL_OPEN:-false}"
-CLUSTER_SLUG="${CLUSTER_SLUG}"
-EOF
-    chmod 600 "${out}/hooks/ligament-2fa.env"
     umask "${umask_saved}"
 
     validate_json_file "${out}/sftpgo.json"
@@ -655,6 +662,12 @@ BASE_DIR="$1"; SFTP_TMP="$2"; SFTP_DATA="$3"; PG_DIR="$4"; ETCD_DIR="$5"; SWFS_M
 mkdir -p "${BASE_DIR}/configs/seaweedfs" "${BASE_DIR}/certs/ssl" "${BASE_DIR}/ssh-host-keys" "${BASE_DIR}/hooks" \
          /var/lib/node_exporter/textfile_collector \
          "${SFTP_TMP}" "${SFTP_DATA}/data" "${SFTP_DATA}/empty-root" "${SFTP_DATA}/backups" "${PG_DIR}" "${ETCD_DIR}" "${SWFS_MDIR}"
+install -d -m 700 -o 1000 -g 1000 "${SFTP_DATA}-audit/logs" "${SFTP_DATA}-audit/spool"
+# Retire the Compose profile file produced by earlier versions.
+if [[ -f "${BASE_DIR}/.env" ]] && grep -q '^COMPOSE_PROFILES=' "${BASE_DIR}/.env"; then
+    sed -i '/^COMPOSE_PROFILES=/d' "${BASE_DIR}/.env"
+    [[ -s "${BASE_DIR}/.env" ]] || rm -f "${BASE_DIR}/.env"
+fi
 for vd in ${VOL_DIRS}; do
     mkdir -p "${vd}"
     chown -R 1000:1000 "${vd}"
@@ -668,7 +681,11 @@ chmod 750 "${SWFS_MDIR}"
 REMOTE_DIRS
 
     remote_copy "${out}/docker-compose.yml" "${ip}:${REMOTE_BASE_DIR}/docker-compose.yml"
-    remote_copy "${out}/.env" "${ip}:${REMOTE_BASE_DIR}/.env"
+    remote_copy "${out}/sftpgo-bootstrap.json" "${ip}:${REMOTE_BASE_DIR}/configs/sftpgo-bootstrap.json"
+    remote_copy "${out}/client-audit.json" "${ip}:${REMOTE_BASE_DIR}/configs/client-audit.json"
+    remote_copy "${SCRIPT_DIR}/scripts/ops/client-audit.py" "${ip}:${REMOTE_BASE_DIR}/configs/client-audit.py"
+    remote_copy "${SCRIPT_DIR}/scripts/ops/provision-db.py" "${ip}:${REMOTE_BASE_DIR}/configs/provision-db.py"
+    remote_copy "${SCRIPT_DIR}/scripts/ops/start-patroni.sh" "${ip}:${REMOTE_BASE_DIR}/configs/start-patroni.sh"
     remote_copy "${out}/patroni.yml" "${ip}:${REMOTE_BASE_DIR}/configs/patroni.yml"
     remote_copy "${out}/haproxy-pg.cfg" "${ip}:${REMOTE_BASE_DIR}/configs/haproxy-pg.cfg"
     remote_copy "${out}/pgbackrest.conf" "${ip}:${REMOTE_BASE_DIR}/configs/pgbackrest.conf"
@@ -682,7 +699,7 @@ REMOTE_DIRS
     if [[ -f "${out}/hooks/ligament-2fa-hook.sh" ]]; then
         remote_copy "${out}/hooks/ligament-2fa-hook.sh" "${ip}:${REMOTE_BASE_DIR}/hooks/ligament-2fa-hook.sh"
     fi
-    remote_copy "${out}/hooks/ligament-2fa.env" "${ip}:${REMOTE_BASE_DIR}/hooks/ligament-2fa.env"
+    remote_copy "${out}/hooks/ligament-2fa.json" "${ip}:${REMOTE_BASE_DIR}/hooks/ligament-2fa.json"
     if [[ -f "$(state_root)/.pki/ca/ca.crt" ]] && [[ ! -f "$(state_root)/.pki/ca/crl.pem" ]] && [[ "${DRY_RUN:-false}" != "true" ]]; then
         ensure_ca_exists
     fi
@@ -695,6 +712,9 @@ REMOTE_DIRS
     fi
 
     remote_exec "${ip}" "
+        chown 1000:1000 '${REMOTE_BASE_DIR}/configs/client-audit.json' '${REMOTE_BASE_DIR}/configs/sftpgo-bootstrap.json' &&
+        chmod 600 '${REMOTE_BASE_DIR}/configs/client-audit.json' '${REMOTE_BASE_DIR}/configs/sftpgo-bootstrap.json' &&
+        chmod 644 '${REMOTE_BASE_DIR}/configs/client-audit.py' &&
         chmod 755 '${REMOTE_BASE_DIR}' '${REMOTE_BASE_DIR}/configs' '${REMOTE_BASE_DIR}/configs/seaweedfs' \
                   '${REMOTE_BASE_DIR}/certs' '${REMOTE_BASE_DIR}/certs/ssl' '${REMOTE_BASE_DIR}/ssh-host-keys' '${REMOTE_BASE_DIR}/hooks' && \
         chmod 600 '${REMOTE_BASE_DIR}/docker-compose.yml' '${REMOTE_BASE_DIR}/configs/patroni.yml' '${REMOTE_BASE_DIR}/configs/pgbackrest.conf' && \
@@ -704,8 +724,8 @@ REMOTE_DIRS
         chown 1000:1000 '${REMOTE_BASE_DIR}/configs/seaweedfs/'*.toml '${REMOTE_BASE_DIR}/configs/seaweedfs/s3.json' && \
         chmod 600 '${REMOTE_BASE_DIR}/configs/seaweedfs/'*.toml '${REMOTE_BASE_DIR}/configs/seaweedfs/s3.json' && \
         chown 1000:1000 '${REMOTE_BASE_DIR}/configs/sftpgo.json' '${REMOTE_BASE_DIR}/configs/revoked_user_certs.json' \
-                        '${REMOTE_BASE_DIR}/hooks/ligament-2fa.env' && \
-        chmod 600 '${REMOTE_BASE_DIR}/configs/sftpgo.json' '${REMOTE_BASE_DIR}/hooks/ligament-2fa.env' && \
+                        '${REMOTE_BASE_DIR}/hooks/ligament-2fa.json' && \
+        chmod 600 '${REMOTE_BASE_DIR}/configs/sftpgo.json' '${REMOTE_BASE_DIR}/hooks/ligament-2fa.json' && \
         chmod 644 '${REMOTE_BASE_DIR}/configs/revoked_user_certs.json' && \
         chmod 755 '${REMOTE_BASE_DIR}/hooks/ligament-2fa-hook.sh' 2>/dev/null || true
         if [[ -d '${REMOTE_BASE_DIR}/certs/${name}' ]]; then
@@ -725,7 +745,7 @@ REMOTE_DIRS
         fi
     "
     if [[ "${DRY_RUN:-false}" != "true" ]]; then
-        for _sf in "${out}/docker-compose.yml" "${out}/patroni.yml" "${out}/pgbackrest.conf" "${out}/sftpgo.json" "${out}/hooks/ligament-2fa.env" "${out}/seaweedfs/"*.toml "${out}/seaweedfs/s3.json"; do
+        for _sf in "${out}/sftpgo-bootstrap.json" "${out}/client-audit.json" "${out}/docker-compose.yml" "${out}/patroni.yml" "${out}/pgbackrest.conf" "${out}/sftpgo.json" "${out}/hooks/ligament-2fa.json" "${out}/seaweedfs/"*.toml "${out}/seaweedfs/s3.json"; do
             secure_wipe_file "${_sf}" 2>/dev/null || true
         done
     fi
@@ -734,7 +754,8 @@ REMOTE_DIRS
 # --- Бесшовное обновление UFW без отключения файрвола на живом кластере + 120s Dead-Man's Switch ---
 harden_node_ufw() {
     local ip="$1" dc="$2" name="$3" idx="$4"
-    local peer_ips
+    local peer_ips arbiter_v4=""
+    [[ -z "${ARBITER_IP:-}" ]] || arbiter_v4=$(resolve_node_ipv4 "${ARBITER_IP}") || return 1
     peer_ips=$(get_all_peer_ips | tr '\n' ' ')
 
     log_info "Синхронизация UFW на ${name} (${ip}) с внешним 120s Dead-Man's Switch..."
@@ -750,7 +771,7 @@ harden_node_ufw() {
         "${SFTPGO_TELEMETRY_PORT:-10000}" \
         "${PANEL_PORT:-9443}" \
         "${HTTPS_PORT:-443}" \
-        "${ARBITER_IP:-}" "${peer_ips}" <<'REMOTE_UFW'
+        "${arbiter_v4}" "${peer_ips}" <<'REMOTE_UFW'
 set -euo pipefail
 SLUG="$1"
 ADMIN_SSH_NET="$2"; ADMIN_SSH_PORT="$3"
@@ -1231,7 +1252,9 @@ REMOTE_BR_UNIT
         "ss -H -tln | awk '{print \$4}' | grep -Fxq '127.0.0.1:${first_lport}'" 15 1 \
         "$( [[ "${mode}" == "L" ]] && echo "systemctl status '${unit_name}.service' --no-pager -l 2>/dev/null || true" || echo "ss -H -tln | head -n 20 || true" )"
 
-    remote_exec_stdin "${src_ip}" "${CLUSTER_SLUG}" "${dst_name}" "${dst_ip}" "${dst_idx}" "${dnat_pairs}" <<'REMOTE_BR_DNAT'
+    local dst_v4
+    dst_v4=$(resolve_node_ipv4 "${dst_ip}") || return 1
+    remote_exec_stdin "${src_ip}" "${CLUSTER_SLUG}" "${dst_name}" "${dst_v4}" "${dst_idx}" "${dnat_pairs}" <<'REMOTE_BR_DNAT'
 set -euo pipefail
 SLUG="$1"; DST_NAME="$2"; DST_IP="$3"; DST_IDX="$4"; PAIRS="$5"
 CHAIN="LIG_BR_${DST_IDX}"
@@ -1485,6 +1508,9 @@ cat > /usr/local/bin/arbiter-helper.sh <<EOF
 set -euo pipefail
 CMD="\${SSH_ORIGINAL_COMMAND:-}"
 case "\${CMD}" in
+    ensure-sftpgo)
+        cd "${BASE_DIR}" && docker compose up -d --no-deps client-audit sftpgo
+        ;;
     restart-sftpgo)
         cd "${BASE_DIR}" && docker compose up -d sftpgo && docker compose restart sftpgo
         ;;
@@ -1499,15 +1525,14 @@ case "\${CMD}" in
         ;;
     check-gates)
         ETCD_CID=\$(cd "${BASE_DIR}" && docker compose ps -q etcd | head -n1 || true)
-        if [[ -n "\${ETCD_CID}" ]]; then
-            docker exec "\${ETCD_CID}" etcdctl --endpoints="https://127.0.0.1:${EC_PORT}" \
+        [[ -n "\${ETCD_CID}" ]] || { echo "ETCD_DOWN"; exit 1; }
+        docker exec "\${ETCD_CID}" etcdctl --endpoints="https://127.0.0.1:${EC_PORT}" \
                 --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key \
                 endpoint health >/dev/null
-        fi
         FILER_CID=\$(cd "${BASE_DIR}" && docker compose ps -q swfs-filer | head -n1 || true)
         [[ -n "\${FILER_CID}" ]] || { echo "FILER_DOWN"; exit 1; }
-        FIX_OUT=\$(docker exec -i "\${FILER_CID}" weed shell -master="${MASTER_PEERS}" -filer="127.0.0.1:${FILER_P}" <<< "volume.fix.replication" 2>/dev/null || echo "ERR")
-        if echo "\${FIX_OUT}" | grep -qiE "replicating|copying|deleting|under-replicated|over-replicated|flag provided|\bERR\b|error:"; then
+        FIX_OUT=\$(docker exec -i "\${FILER_CID}" weed shell -master="${MASTER_PEERS}" -filer="127.0.0.1:${FILER_P}" <<< \$'lock\nvolume.fix.replication\nunlock' 2>&1 || echo "ERR")
+        if echo "\${FIX_OUT}" | grep -qiE "replicating volume|copying volume|deleting volume|under[ -]replicated|over[ -]replicated|flag provided|\bERR\b|error:"; then
             echo "SWFS_DIRTY"
             exit 1
         fi
@@ -1658,7 +1683,10 @@ generate_node_certs() {
         remote_exec "${ip}" "chmod 644 '${REMOTE_BASE_DIR}/certs/ca.crt' '${REMOTE_BASE_DIR}/certs/${name}/ca.crt'"
     fi
 
-    local san="IP:${ip},IP:127.0.0.1,DNS:${name},DNS:${name}.${CLUSTER_SLUG}.internal,DNS:localhost"
+    local san endpoint_ip
+    endpoint_ip=$(resolve_node_ipv4 "${ip}") || return 1
+    san="IP:${endpoint_ip},IP:127.0.0.1,DNS:${name},DNS:${name}.${CLUSTER_SLUG}.internal,DNS:localhost"
+    [[ "${ip}" == "${endpoint_ip}" ]] || san+=",DNS:${ip}"
 
     for role in "${PKI_ROLES[@]}"; do
         remote_exec_stdin "${ip}" "${REMOTE_BASE_DIR}/certs/${name}" "${role}" <<'REMOTE_CSR'
@@ -1735,7 +1763,7 @@ revoke_node_certs() {
                 PCID=\$(cd '${REMOTE_BASE_DIR}' 2>/dev/null && docker compose ps -q patroni 2>/dev/null | head -n1 || true)
                 if [[ -n \"\${PCID}\" ]]; then
                     docker exec \"\${PCID}\" bash -c 'cp -L /certs/ca-crl.crt /run/pg-certs/ca-crl.crt && chown postgres:postgres /run/pg-certs/ca-crl.crt && chmod 644 /run/pg-certs/ca-crl.crt' 2>/dev/null || true
-                    docker exec -u postgres \"\${PCID}\" psql -U postgres -c 'SELECT pg_reload_conf();' >/dev/null 2>&1 || true
+                    docker exec -u postgres \"\${PCID}\" psql -p '${PG_PORT}' -U postgres -c 'SELECT pg_reload_conf();' >/dev/null 2>&1 || true
                 fi
             " 2>/dev/null || true
         done
@@ -1882,20 +1910,22 @@ REMOTE_BUILD
 
 cloudflare_dns_update() {
     local target_ip="$1"
-    if [[ -z "${CF_DNS_API_TOKEN:-}" || "${CF_DNS_API_TOKEN}" == *FIXME* ]]; then
-        log_warn "CF_DNS_API_TOKEN не задан — пропуск автоматического обновления DNS A-записи"
-        return 1
-    fi
     if [[ "${DRY_RUN:-false}" == "true" ]]; then
         log_info "[DRY-RUN] Cloudflare DNS: ${DOMAIN} -> ${target_ip} (TTL=${DNS_TTL:-60})"
         return 0
     fi
 
-    python3 - "${DOMAIN}" "${target_ip}" "${DNS_TTL:-60}" "${CLOUDFLARE_ZONE_ID:-}" <<'PYEOF'
+    if [[ -z "${CF_DNS_API_TOKEN:-}" || "${CF_DNS_API_TOKEN}" == *FIXME* ]]; then
+        log_warn "CF_DNS_API_TOKEN не задан — пропуск автоматического обновления DNS A-записи"
+        return 1
+    fi
+    python3 - "${DOMAIN}" "${target_ip}" "${DNS_TTL:-60}" "${CLOUDFLARE_ZONE_ID:-}" 3< <(config_db_get CF_DNS_API_TOKEN) <<'PYEOF'
 import json, os, sys, urllib.request
 
 domain, ip, ttl, zone_id = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
-token = os.environ["CF_DNS_API_TOKEN"]
+token = os.fdopen(3).read().strip()
+if not token:
+    raise ValueError("В БД отсутствует DNS-токен")
 headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
 def api(method, path, data=None):
@@ -1924,11 +1954,15 @@ if not zone_id:
 
 records = api("GET", f"/zones/{zone_id}/dns_records?type=A&name={domain}")
 payload = {"type": "A", "name": domain, "content": ip, "ttl": ttl, "proxied": False}
+if len(records) > 1:
+    raise ValueError("Для failover ожидается одна A-запись")
 if records:
     rec_id = records[0]["id"]
-    api("PUT", f"/zones/{zone_id}/dns_records/{rec_id}", payload)
+    saved = api("PUT", f"/zones/{zone_id}/dns_records/{rec_id}", payload)
 else:
-    api("POST", f"/zones/{zone_id}/dns_records", payload)
+    saved = api("POST", f"/zones/{zone_id}/dns_records", payload)
+if saved.get("content") != ip or saved.get("proxied") is not False:
+    raise ValueError("DNS-провайдер не подтвердил целевой адрес")
 print(f"Cloudflare DNS A updated: {domain} -> {ip} (TTL={ttl})")
 PYEOF
 }
@@ -1950,10 +1984,10 @@ assign_floating_ip() {
     case "${provider}" in
         hetzner)
             [[ -n "${HETZNER_CLOUD_TOKEN:-}" && -n "${fip_id}" ]] || { log_warn "Не заданы HETZNER_CLOUD_TOKEN или FLOATING_IP_ID"; return 1; }
-            python3 - "${fip_id}" "${target_ip}" <<'PYEOF'
+            python3 - "${fip_id}" "${target_ip}" 3< <(config_db_get HETZNER_CLOUD_TOKEN) <<'PYEOF'
 import json, os, sys, urllib.request
 fip_id, ip = sys.argv[1:]
-tok = os.environ["HETZNER_CLOUD_TOKEN"]
+tok = os.fdopen(3).read().strip()
 hdr = {"Authorization": f"Bearer {tok}", "Content-Type": "application/json"}
 req = urllib.request.Request("https://api.hetzner.cloud/v1/servers", headers=hdr)
 servers = json.loads(urllib.request.urlopen(req, timeout=10).read().decode()).get("servers", [])
@@ -1972,10 +2006,10 @@ PYEOF
             ;;
         digitalocean)
             [[ -n "${DO_API_TOKEN:-}" && -n "${fip_id}" ]] || { log_warn "Не заданы DO_API_TOKEN или FLOATING_IP_ID"; return 1; }
-            python3 - "${fip_id}" "${target_ip}" <<'PYEOF'
+            python3 - "${fip_id}" "${target_ip}" 3< <(config_db_get DO_API_TOKEN) <<'PYEOF'
 import json, os, sys, urllib.request
 fip, ip = sys.argv[1:]
-tok = os.environ["DO_API_TOKEN"]
+tok = os.fdopen(3).read().strip()
 hdr = {"Authorization": f"Bearer {tok}", "Content-Type": "application/json"}
 req = urllib.request.Request("https://api.digitalocean.com/v2/droplets?per_page=200", headers=hdr)
 droplets = json.loads(urllib.request.urlopen(req, timeout=10).read().decode()).get("droplets", [])
@@ -2000,9 +2034,14 @@ PYEOF
 }
 
 update_dns_provider() {
-    local target_ip="$1"
+    local target_ip
+    target_ip=$(resolve_node_ipv4 "$1") || return 1
     local mode="${FAILOVER_MODE:-dns}"
     local rc=0
+    case "${mode}" in
+        dns|floating-ip|hybrid) ;;
+        *) log_error "Неизвестный режим переключения ${mode}"; return 1 ;;
+    esac
 
     if [[ "${mode}" == "floating-ip" || "${mode}" == "hybrid" ]]; then
         assign_floating_ip "${target_ip}" || rc=1
@@ -2021,54 +2060,115 @@ update_dns_provider() {
     return "${rc}"
 }
 
-# --- Экспорт минимального набора DNS/VIP-токенов (совместим с secrets.env.age в RAM!) ---
-write_clean_lego_env() {
-    local out_file="$1"
-    mkdir -p "$(dirname "${out_file}")"
-    local sec_file
-    sec_file="$(state_root)/secrets.env"
-    python3 - "${sec_file}" "${out_file}" <<'PYEOF'
-import os, shlex, sys
-
-sec_path, out_path = sys.argv[1], sys.argv[2]
-dns_prefixes = (
-    "CF_", "CLOUDFLARE_", "AWS_", "HETZNER_", "DO_", "DIGITALOCEAN_",
-    "ROUTE53_", "OVH_", "GANDI_", "LINODE_", "PORKBUN_", "NAMECHEAP_", "DESEC_",
-)
-internal_block = {
-    "SFTPGO_KMS_MASTER_KEY", "SFTPGO_SIGNING_PASSPHRASE", "SFTPGO_INSTALLATION_CODE",
-    "SFTPGO_ADMIN_PASSWORD", "PG_SUPERUSER_PASSWORD", "PG_REPLICATION_PASSWORD",
-    "PATRONI_API_PASSWORD", "SFTPGO_DB_PASSWORD", "SWFS_FILER_DB_PASSWORD",
-    "SWFS_ADMIN_PASSWORD", "ETCD_ROOT_PASSWORD", "BACKUP_ENCRYPTION_KEY",
-    "CA_KEY_PASSPHRASE", "LIGAMENT_2FA_API_TOKEN",
+prepare_lego_credentials() {
+    LEGO_CREDENTIALS=$(make_ram_tempdir)
+    local path name
+    LEGO_ARGS=()
+    python3 "${SCRIPT_DIR}/scripts/lib/config_db.py" --root "$(state_root)" lego-files "${LEGO_CREDENTIALS}"
+    for path in "${LEGO_CREDENTIALS}"/*; do
+        [[ -f "$path" ]] || continue
+        name=${path##*/}
+        LEGO_ARGS+=(-v "${path}:/run/credentials/${name}:ro" -e "${name}_FILE=/run/credentials/${name}")
+    done
 }
-collected = {}
 
-for k, v in os.environ.items():
-    if k.startswith(dns_prefixes) and v and "FIXME" not in v:
-        collected[k] = v
+sync_arbiter_edge_trust() {
+    [[ -n "${ARBITER_IP:-}" ]] || return 0
+    local dir dst
+    dir="$(state_root)/.ssl"
+    dst="${ARBITER_BASE_DIR}/prometheus/edge-client-ca.pem"
+    if [[ -f "$dir/.selfsigned" && -f "$dir/certificates/${DOMAIN}.crt" ]]; then
+        remote_copy "$dir/certificates/${DOMAIN}.crt" "${ARBITER_IP}:${dst}"
+    else
+        remote_exec "${ARBITER_IP}" "rm -f '$dst'"
+    fi
+}
 
-if os.path.exists(sec_path):
-    for raw in open(sec_path, encoding="utf-8"):
-        s = raw.strip()
-        if not s or s.startswith("#") or "=" not in s:
-            continue
-        try:
-            tokens = shlex.split(s, comments=True)
-            if tokens and "=" in tokens[0]:
-                k, v = tokens[0].split("=", 1)
-                if k in internal_block or k.startswith(("SWFS_", "BACKUP_S3_", "PG_", "SFTPGO_")):
-                    continue
-                if v and "FIXME" not in v:
-                    collected[k] = v
-        except Exception:
-            pass
+issue_lego_certificate() (
+    set -euo pipefail
+    local ssl_dir="$1" days="$2" staging image_ref email file
+    mkdir -p "$ssl_dir"
+    staging=$(mktemp -d "${ssl_dir}/issue.XXXXXXXX")
+    trap 'rm -rf "$staging"' EXIT
+    local args=(run)
+    [[ ! -d "$ssl_dir/accounts" ]] || cp -R "$ssl_dir/accounts" "$staging/"
+    if [[ -f "$ssl_dir/certificates/${DOMAIN}.crt" && ! -f "$ssl_dir/.selfsigned" ]]; then
+        cp -R "$ssl_dir/certificates" "$staging/"
+        args=(renew --days "$days")
+    fi
+    email="${ACME_EMAIL:-}"
+    [[ -n "$email" && "$email" != admin@company.com ]] || email="admin@${DOMAIN}"
+    image_ref=$(resolve_image_ref "$LEGO_IMAGE" "${LEGO_DIGEST:-}")
+    ensure_local_image "$image_ref" || return 1
+    run_or_dry docker run --rm -v "${staging}:/lego" "${LEGO_ARGS[@]}" "$image_ref" \
+        --accept-tos --email "$email" --dns "${DNS_PROVIDER}" --domains "$DOMAIN" --path /lego "${args[@]}" || return 1
+    [[ "${DRY_RUN:-false}" != true ]] || return 0
+    openssl x509 -in "$staging/certificates/${DOMAIN}.crt" -checkend 0 -noout >/dev/null || return 1
+    [[ -s "$staging/certificates/${DOMAIN}.key" ]] || return 1
+    if [[ -d "$staging/accounts" ]]; then
+        mkdir -p "$ssl_dir/accounts"
+        cp -R "$staging/accounts/." "$ssl_dir/accounts/" || return 1
+    fi
+    mkdir -p "$ssl_dir/certificates"
+    for file in "$staging/certificates/${DOMAIN}".*; do
+        mv -f "$file" "$ssl_dir/certificates/" || return 1
+    done
+    rm -f "$ssl_dir/.selfsigned"
+)
 
-with open(out_path, "w", encoding="utf-8") as f:
-    for k in sorted(collected):
-        f.write(f"{k}={collected[k]}\n")
-os.chmod(out_path, 0o600)
-PYEOF
+apply_patroni_sync_policy() {
+    local primary="$1"
+    [[ "${PG_SYNC_MANAGED:-false}" == true ]] || return 0
+    remote_exec_stdin "$primary" "$REMOTE_BASE_DIR" "$CLUSTER_SLUG" "$PG_PORT" "$PG_SYNC_STANDBY_COUNT" <<'REMOTE_SYNC'
+set -euo pipefail
+cd "$1"
+target="$4"
+[[ "$target" =~ ^(0|[1-9][0-9]?)$ ]] || { echo "Некорректное число синхронных реплик: $target" >&2; exit 1; }
+cid=$(docker compose ps -q patroni </dev/null)
+[[ -n "$cid" ]] || { echo "Контейнер Patroni не запущен" >&2; exit 1; }
+# bash reads this remote script from stdin. docker exec without -i leaves that stream with bash.
+database=(docker exec -u postgres "$cid" psql -p "$3" -d postgres -XAt -v ON_ERROR_STOP=1)
+[[ $("${database[@]}" -c 'SELECT pg_is_in_recovery()') == f ]] || { echo "Узел Patroni не primary" >&2; exit 1; }
+enabled=false
+expect_names=f
+if (( target > 0 )); then
+    available=$("${database[@]}" -c "SELECT count(*) FROM pg_stat_replication WHERE state='streaming'")
+    if (( available < target )); then
+        echo "Доступно streaming-реплик: $available, запрошено: $target" >&2
+        exit 1
+    fi
+    enabled=true
+    expect_names=t
+fi
+docker exec "$cid" patronictl -c /run/pg-certs/patroni.yml edit-config "$2" --force \
+    --set "synchronous_mode=$enabled" --set "synchronous_mode_strict=$enabled" \
+    --set "synchronous_node_count=$((target > 0 ? target : 1))"
+for _ in $(seq 1 60); do
+    observed=$("${database[@]}" -c "SELECT pg_is_in_recovery(), current_setting('synchronous_standby_names') <> '', count(*)
+        FROM pg_stat_replication WHERE state='streaming' AND sync_state IN ('sync','quorum')")
+    IFS='|' read -r recovery has_names synced <<< "$observed"
+    [[ "$recovery" == f ]] || { echo "Узел перестал быть primary во время настройки" >&2; exit 1; }
+    if [[ "$has_names" == "$expect_names" && "$synced" == "$target" ]]; then exit 0; fi
+    sleep 2
+done
+echo "PostgreSQL подтвердил $synced синхронных реплик при цели $target" >&2
+exit 1
+REMOTE_SYNC
+}
+
+provision_cluster_databases() {
+    local host="$1" opts
+    if [[ "${DRY_RUN:-false}" == true ]]; then return 0; fi
+    opts=$(_ssh_base_opts)
+    local remote_dir
+    remote_dir=$(_shell_quote_posix "${REMOTE_BASE_DIR}")
+    python3 -c 'import json,sys
+sys.path.insert(0,sys.argv[1])
+from config_db import Store
+v=Store(sys.argv[2]).read(True)
+json.dump({r:v[k] for r,k in (("sftpgo","SFTPGO_DB_PASSWORD"),("seaweedfs","SWFS_FILER_DB_PASSWORD"),("client_logger","AUDIT_DB_PASSWORD"))},sys.stdout)' "${SCRIPT_DIR}/scripts/lib" "$(state_root)" | \
+        ssh ${opts} -p "${ADMIN_SSH_PORT:-22}" "root@${host}" \
+          "cd ${remote_dir} && cid=\$(docker compose ps -q patroni) && docker cp configs/provision-db.py \"\$cid:/tmp/provision-db.py\" && docker exec -i \"\$cid\" /usr/bin/python3 /tmp/provision-db.py '${PG_PORT}'"
 }
 
 sftpgo_provision_s3_folders() {
@@ -2079,17 +2179,17 @@ sftpgo_provision_s3_folders() {
     fi
 
     log_info "Настройка S3 Virtual Folders (sftp-work, sftp-worm) в SFTPGo через REST API..."
-    remote_exec_env_stdin "${node_ip}" "SFTPGO_ADMIN_PASSWORD,SWFS_S3_SECRET_KEY_SFTPGO" \
+    remote_exec_private_stdin "${node_ip}" "SFTPGO_ADMIN_PASSWORD,SWFS_S3_SECRET_KEY_SFTPGO" \
         "${SFTPGO_ADMIN_USERNAME:-admin}" "${SWFS_S3_PORT:-8333}" "sftpgo-s3-access" <<'REMOTE_PROV'
 set -euo pipefail
 ADMIN_USER="$1"; S3_PORT="$2"; S3_AK="$3"
 
-python3 - "${ADMIN_USER}" "${S3_PORT}" "${S3_AK}" <<'PYEOF'
+python3 - "${ADMIN_USER}" "${S3_PORT}" "${S3_AK}" 3< <(printf '%s' "${SFTPGO_ADMIN_PASSWORD}") 4< <(printf '%s' "${SWFS_S3_SECRET_KEY_SFTPGO}") <<'PYEOF'
 import base64, json, os, sys, urllib.error, urllib.request
 
 user, s3_port, ak = sys.argv[1:]
-pw = os.environ["SFTPGO_ADMIN_PASSWORD"]
-sk = os.environ["SWFS_S3_SECRET_KEY_SFTPGO"]
+pw = os.fdopen(3).read()
+sk = os.fdopen(4).read()
 base = "http://127.0.0.1:8081/api/v2"
 
 def req(method, path, body=None, headers=None):

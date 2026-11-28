@@ -62,7 +62,7 @@
         "apply_proxy_config": false,
         "tls_mode": 1,
         "min_tls_version": 12,
-        "force_passive_ip": "${NODE_IP}",
+        "passive_host": "${NODE_IP}",
         "passive_ip_overrides": [],
         "client_auth_type": 0,
         "tls_cipher_suites": [],
@@ -127,7 +127,7 @@
     "port": 0,
     "username": "sftpgo",
     "password": "${SFTPGO_DB_PASSWORD}",
-    "connection_string": "host=127.0.0.1,${PG_HOSTS} port=${HAPROXY_PG_PORT},${PG_PORTS_CSV} dbname=sftpgo user=sftpgo password=${SFTPGO_DB_PASSWORD} sslmode=verify-full sslrootcert=/certs/ca.crt sslcert=/certs/pg-client.crt sslkey=/certs/pg-client.key target_session_attrs=read-write connect_timeout=5",
+    "connection_string": "host=127.0.0.1,${PG_HOSTS} port=${HAPROXY_PG_PORT},${PG_PORTS_CSV} dbname=sftpgo user=sftpgo password=${SFTPGO_DSN_PASSWORD} sslmode=verify-full sslrootcert=/certs/ca.crt sslcert=/certs/pg-client.crt sslkey=/certs/pg-client.key target_session_attrs=read-write connect_timeout=5",
     "sql_tables_prefix": "",
     "track_quota": 2,
     "delayed_quota_update": 0,
@@ -140,7 +140,7 @@
       "hook": ""
     },
     "update_mode": 0,
-    "create_default_admin": true,
+    "create_default_admin": false,
     "skip_natural_keys_validation": false,
     "password_hashing": {
       "bcrypt_options": {

@@ -4,9 +4,9 @@
 # ============================================================================
 # Предоставляет:
 #   - Логирование с уровнями (log_info/warn/error/debug/step)
-#   - Загрузку env + прозрачную расшифровку secrets.env.age в RAM (через age)
+#   - Чтение базы управления с расшифровкой секретов через age
 #   - Защищенную работу с ключом УЦ (ca.key / ca.key.age в RAM)
-#   - Распределенную блокировку кластера (etcd CAS lease + локальный lock)
+#   - Блокировку операций в etcd с проверкой владельца и локальную блокировку БД
 #   - Транзакционный журнал операций (.state/journal.jsonl) и --resume чекпоинты
 #   - Безопасную SSH/SCP обертку и строгий Python-шаблонизатор
 # ============================================================================
@@ -60,7 +60,7 @@ confirm_action() {
 
 # --- Поиск ключа age ---
 resolve_age_key_file() {
-    echo "${AGE_KEY_FILE:-${SOPS_AGE_KEY_FILE:-${HOME}/.config/ligament/age.key}}"
+    echo "${CONFIG_ROOT:-${SCRIPT_DIR}}/.control.agekey"
 }
 
 # --- Безопасная временная директория (в RAM /dev/shm на Linux, иначе mktemp) ---
@@ -82,110 +82,35 @@ secure_wipe_file() {
     fi
 }
 
-# --- Автономная загрузка env (мульти-контур CONFIG_ROOT + age RAM decrypt) ---
+config_db() {
+    python3 "${SCRIPT_DIR}/scripts/lib/config_db.py" --root "${CONFIG_ROOT:-${SCRIPT_DIR}}" "$@"
+}
+config_db_get() { config_db get "$1"; }
+config_db_set() { printf '%s' "$2" | config_db set "$1"; }
+config_db_set_many() {
+    (( $# > 0 && $# % 2 == 0 )) || return 1
+    printf '%s\0' "$@" | config_db batch
+}
+
 load_cluster_env() {
-    local root_dir="${CONFIG_ROOT:-${1:-${SCRIPT_DIR}}}"
+    local root_dir="${1:-${CONFIG_ROOT:-${SCRIPT_DIR}}}" key value complete=false
     export CONFIG_ROOT="${root_dir}"
-
-    local versions_file="${SCRIPT_DIR}/versions.env"
-    [[ -f "${root_dir}/versions.env" ]] && versions_file="${root_dir}/versions.env"
-    local env_file="${root_dir}/cluster.env"
-    local secrets_file="${root_dir}/secrets.env"
-    local secrets_age="${root_dir}/secrets.env.age"
-
-    set -a
-    # shellcheck disable=SC1090
-    [[ -f "${versions_file}" ]] && source "${versions_file}"
-    if [[ -f "${env_file}" ]]; then
-        # shellcheck disable=SC1090
-        source "${env_file}"
+    while IFS= read -r -d '' key && IFS= read -r -d '' value; do
+        if [[ "${key}" == "_END" ]]; then complete=true; break; fi
+        [[ "${key}" =~ ^[A-Z][A-Z0-9_]*$ ]] || return 1
+        printf -v "${key}" '%s' "${value}"
+        export -n "${key?}"
+    done < <(config_db pairs)
+    if [[ "${complete}" != true ]]; then
+        log_error "Не удалось загрузить базу управления ${root_dir}/control.sqlite3. Для первичной установки: ligactl config init"
+        return 1
     fi
-
-    if [[ -f "${secrets_file}" ]]; then
-        local perms
-        perms=$(stat -c '%a' "${secrets_file}" 2>/dev/null || stat -f '%Lp' "${secrets_file}" 2>/dev/null || echo "600")
-        if [[ "${perms}" != "600" ]]; then
-            log_warn "secrets.env имеет права ${perms}, ожидается 600 (chmod 600 '${secrets_file}')"
-        fi
-        # shellcheck disable=SC1090
-        source "${secrets_file}"
-    elif [[ -f "${secrets_age}" ]]; then
-        local age_key
-        age_key=$(resolve_age_key_file)
-        if ! command -v age &>/dev/null; then
-            log_error "Найден ${secrets_age}, но утилита 'age' не установлена!"
-            exit 1
-        fi
-        if [[ ! -f "${age_key}" ]]; then
-            log_error "Ключ расшифровки age не найден: ${age_key} (задайте AGE_KEY_FILE)"
-            exit 1
-        fi
-        local decrypted_env
-        decrypted_env=$(age -d -i "${age_key}" "${secrets_age}")
-        while IFS= read -r -d '' _k && IFS= read -r -d '' _v; do
-            if [[ "${_k}" =~ ^[A-Z][A-Z0-9_]*$ ]]; then
-                printf -v "${_k}" '%s' "${_v}"
-                # shellcheck disable=SC2163
-                export "${_k}"
-            fi
-        done < <(printf '%s\n' "${decrypted_env}" | python3 -c '
-import re, shlex, sys
-
-def unescape_dq(s):
-    out = []
-    i = 0
-    while i < len(s):
-        if s[i] == "\\" and i + 1 < len(s) and s[i + 1] in ("\\", "\"", "$", "`"):
-            out.append(s[i + 1])
-            i += 2
-        else:
-            out.append(s[i])
-            i += 1
-    return "".join(out)
-
-for raw in sys.stdin:
-    line = raw.strip()
-    if not line or line.startswith("#") or "=" not in line:
-        continue
-    m = re.match(r"^([A-Z][A-Z0-9_]*)=(.*)$", line)
-    if not m:
-        continue
-    k, rest = m.group(1), m.group(2).strip()
-    if rest.startswith("\""):
-        # Parse double-quoted value honoring bash escapes without executing commands
-        buf, i, closed = [], 1, False
-        while i < len(rest):
-            c = rest[i]
-            if c == "\\" and i + 1 < len(rest):
-                buf.append(rest[i:i+2])
-                i += 2
-            elif c == "\"":
-                closed = True
-                break
-            else:
-                buf.append(c)
-                i += 1
-        val = unescape_dq("".join(buf)) if closed else rest.strip("\"")
-    elif rest.startswith("\x27"):
-        end = rest.find("\x27", 1)
-        val = rest[1:end] if end != -1 else rest.strip("\x27")
-    else:
-        val = shlex.split(rest, comments=True)[0] if rest else ""
-    sys.stdout.buffer.write(k.encode("utf-8") + b"\x00" + val.encode("utf-8") + b"\x00")
-')
-        unset decrypted_env _k _v
-    fi
-
-    export PROJECT_NAME="${PROJECT_NAME:-Ligament Vault}"
-    export CLUSTER_SLUG="${CLUSTER_SLUG:-ligament-vault}"
-    export REMOTE_BASE_DIR="${REMOTE_BASE_DIR:-/opt/${CLUSTER_SLUG}}"
-    export ARBITER_BASE_DIR="${ARBITER_BASE_DIR:-/opt/${CLUSTER_SLUG}-arbiter}"
-    set +a
+    REMOTE_BASE_DIR="${REMOTE_BASE_DIR:-/opt/${CLUSTER_SLUG}}"
+    ARBITER_BASE_DIR="${ARBITER_BASE_DIR:-/opt/${CLUSTER_SLUG}-arbiter}"
 }
 
 has_secrets_configured() {
-    local root_dir="${CONFIG_ROOT:-${SCRIPT_DIR}}"
-    [[ -f "${root_dir}/secrets.env" || -f "${root_dir}/secrets.env.age" ]]
+    [[ -f "${CONFIG_ROOT:-${SCRIPT_DIR}}/control.sqlite3" ]]
 }
 
 # --- Выполнение коллбэка с расшифрованным в RAM ca.key (поддержка ca.key.age) ---
@@ -210,7 +135,11 @@ with_ca_key() {
         age_key=$(resolve_age_key_file)
         ram_dir=$(make_ram_tempdir)
         tmp_key="${ram_dir}/ca.key"
-        age -d -i "${age_key}" -o "${tmp_key}" "${ca_dir}/ca.key.age"
+        local identities=() legacy="${LEGACY_CA_IDENTITY:-${HOME}/.config/ligament/age.key}"
+        if [[ -f "$age_key" ]]; then identities+=(-i "$age_key"); fi
+        if [[ -f "$legacy" && "$legacy" != "$age_key" ]]; then identities+=(-i "$legacy"); fi
+        (( ${#identities[@]} )) || { log_error "Отсутствует ключ age для Root CA"; return 1; }
+        age -d "${identities[@]}" -o "${tmp_key}" "${ca_dir}/ca.key.age" || { rm -rf "$ram_dir"; return 1; }
         chmod 600 "${tmp_key}"
         ACTIVE_CA_KEY="${tmp_key}" "${cb}" "$@" || rc=$?
         secure_wipe_file "${tmp_key}"
@@ -261,7 +190,7 @@ find_node_by_name() {
 }
 
 for_each_node() {
-    local callback="$1"; shift
+    local callback="$1" rc i; shift
     local count
     count=$(get_node_count)
     for i in $(seq 1 "${count}"); do
@@ -270,6 +199,8 @@ for_each_node() {
         dc=$(get_node_dc "$i")
         name=$(get_node_name "$i")
         "${callback}" "${ip}" "${dc}" "${name}" "$i" "$@"
+        rc=$?
+        (( rc == 0 )) || return "$rc"
     done
 }
 
@@ -329,8 +260,9 @@ remote_exec_stdin() {
         log_info "[DRY-RUN] ssh root@${ip} bash -s -- $*"
         return 0
     fi
-    local tmp_in attempt rc=0 arg
-    tmp_in=$(mktemp)
+    local tmp_in ram_dir attempt rc=0 arg
+    ram_dir=$(make_ram_tempdir)
+    tmp_in="${ram_dir}/input"
     # Передаем позиционные аргументы в самом теле скрипта, исключая склейку/сплит OpenSSH на удаленном shell
     printf 'set --' > "${tmp_in}"
     for arg in "$@"; do
@@ -341,20 +273,22 @@ remote_exec_stdin() {
     for attempt in 1 2 3; do
         rc=0
         # shellcheck disable=SC2086
-        ssh ${ssh_opts} "root@${ip}" bash -s < "${tmp_in}" || rc=$?
+        # Commands such as docker compose exec -T read stdin even for psql -c.
+        # Give Bash the script on a separate fd so they cannot consume the rest of the stage.
+        ssh ${ssh_opts} "root@${ip}" 'bash /dev/fd/3 3<&0 </dev/null' < "${tmp_in}" || rc=$?
         if (( rc != 255 )) || (( attempt == 3 )); then
-            rm -f "${tmp_in}"
+            rm -rf "${ram_dir}"
             return "${rc}"
         fi
         log_warn "SSH-соединение с ${ip} прервалось (код 255, попытка ${attempt}/3) — повтор через 5с..."
         sleep 5
     done
-    rm -f "${tmp_in}"
+    rm -rf "${ram_dir}"
     return "${rc}"
 }
 
 # Передача секретов удаленному скрипту через stdin (0600 в RAM), минуя argv / ps aux
-remote_exec_env_stdin() {
+remote_exec_private_stdin() {
     local ip="$1" env_csv="$2"; shift 2
     local ram_dir tmp_script
     ram_dir=$(make_ram_tempdir)
@@ -367,7 +301,7 @@ remote_exec_env_stdin() {
     IFS=',' read -ra _vars <<< "${env_csv}"
     for _vn in "${_vars[@]}"; do
         [[ "${_vn}" =~ ^[A-Z][A-Z0-9_]*$ ]] || continue
-        printf 'export %s=%q\n' "${_vn}" "${!_vn:-}" >> "${tmp_script}"
+        printf '%s=%q\n' "${_vn}" "${!_vn:-}" >> "${tmp_script}"
     done
     cat >> "${tmp_script}"
 
@@ -409,122 +343,75 @@ remote_copy() {
     return "${rc}"
 }
 
-# --- Распределенная блокировка операций (локальный PID + etcd CAS lease) ---
+# A kernel lock on the control DB is released on process exit. The etcd key
+# has an owner token and survives long-running repairs as well as controller crashes.
 OPS_LOCK_ACQUIRED=false
-OPS_LOCK_ETCD_IP=""
+OPS_LOCK_TOKEN=""
+
+lock_control_db() {
+    exec 9<"${CONFIG_ROOT:-$SCRIPT_DIR}/control.sqlite3" || return 1
+    if ! python3 -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)' 2>/dev/null; then
+        exec 9<&-
+        log_error "Локальная операция ещё выполняется"
+        return 1
+    fi
+}
+
+cluster_lock_request() {
+    local action="$1" token="$2" i host answer
+    for i in $(seq 1 "$(get_node_count)"); do
+        is_quorum_node "$i" "$(get_node_name "$i")" || continue
+        host=$(get_node_ip "$i")
+        answer=$(remote_exec_stdin "$host" "$REMOTE_BASE_DIR" "${ETCD_CLIENT_PORT:-2379}" \
+            "/${CLUSTER_SLUG}/ops-lock" "$action" "$token" < "$SCRIPT_DIR/scripts/lib/etcd-ops-lock.sh") || continue
+        case "${answer##*$'\n'}" in
+            LOCKED|UNLOCKED) return 0 ;;
+            BUSY) log_error "Операция уже заблокирована другим владельцем в etcd"; return 1 ;;
+            NOT_OWNER) log_error "Владелец блокировки etcd изменился"; return 1 ;;
+        esac
+    done
+    log_error "Ни один голосующий узел не подтвердил $action в etcd"
+    return 1
+}
 
 acquire_ops_lock() {
-    local op_name="${1:-operation}"
-    if [[ "${OPS_LOCK_HELD_BY_PARENT:-false}" == "true" ]]; then
-        return 0
-    fi
-
-    local state_dir="${CONFIG_ROOT:-${SCRIPT_DIR}}/.state"
-    local lock_file="${state_dir}/ops.lock"
-    mkdir -p "${state_dir}"
-
-    if [[ "${DRY_RUN:-false}" == "true" ]]; then
-        log_debug "[DRY-RUN] acquire_ops_lock(${op_name})"
-        export OPS_LOCK_HELD_BY_PARENT=true
-        return 0
-    fi
-
-    if [[ -f "${lock_file}" ]]; then
-        local old_pid old_info
-        old_pid=$(awk -F'|' '{print $1}' "${lock_file}" 2>/dev/null || echo "")
-        old_info=$(cat "${lock_file}" 2>/dev/null || echo "")
-        if [[ -n "${old_pid}" ]] && kill -0 "${old_pid}" 2>/dev/null; then
-            log_error "Операция заблокирована другим локальным процессом: ${old_info}"
-            log_error "Дождитесь завершения или снимите блокировку: ./ligactl unlock --force"
-            exit 1
+    local op_name="${1:-operation}" live=false
+    [[ "${OPS_LOCK_HELD_BY_PARENT:-false}" != true ]] || return 0
+    if [[ "${DRY_RUN:-false}" == true ]]; then export OPS_LOCK_HELD_BY_PARENT=true; return 0; fi
+    lock_control_db || return 1
+    case "$op_name" in
+        scale|sync-config|upgrade|rollback) live=true ;;
+        install|pki) [[ ! -f "${CONFIG_ROOT:-$SCRIPT_DIR}/.cluster_installed" ]] || live=true ;;
+    esac
+    if [[ "$live" == true ]]; then
+        OPS_LOCK_TOKEN="$op_name-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+        if ! cluster_lock_request acquire "$OPS_LOCK_TOKEN"; then
+            exec 9<&-
+            return 1
         fi
-        rm -f "${lock_file}"
     fi
-
-    local operator_id
-    operator_id="$(whoami)@$(hostname -s 2>/dev/null || hostname)"
-    local ts
-    ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-    echo "$$|${operator_id}|${op_name}|${ts}" > "${lock_file}"
     OPS_LOCK_ACQUIRED=true
-
-    # Если кластер уже установлен — берем распределенную блокировку в etcd (CAS CreateRevision == 0)
-    if [[ -f "${CONFIG_ROOT:-${SCRIPT_DIR}}/.cluster_installed" && "${CLUSTER_NODES:-FIXME}" != *FIXME* ]]; then
-        local q_ip
-        q_ip=$(get_node_ip 1)
-        local payload="{\"operator\":\"${operator_id}\",\"op\":\"${op_name}\",\"ts\":\"${ts}\"}"
-        local etcd_res
-        etcd_res=$(remote_exec_stdin "${q_ip}" "${REMOTE_BASE_DIR}" "${ETCD_CLIENT_PORT:-2379}" "/${CLUSTER_SLUG}/ops-lock" "${payload}" <<'REMOTE_LOCK' 2>/dev/null || echo "ETCD_UNREACHABLE"
-set -euo pipefail
-BDIR="$1"; EC="$2"; LKEY="$3"; LVAL="$4"
-CID=$(cd "${BDIR}" 2>/dev/null && docker compose ps -q etcd | head -n1 || true)
-[[ -n "${CID}" ]] || CID=$(docker ps -qf "label=com.docker.compose.service=etcd" | head -n1)
-[[ -n "${CID}" ]] || { echo "ETCD_UNREACHABLE"; exit 0; }
-LID=$(docker exec "${CID}" etcdctl --endpoints="https://127.0.0.1:${EC}" \
-    --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key \
-    lease grant 600 | awk '/lease/{print $2}')
-OUT=$(docker exec -i "${CID}" etcdctl --endpoints="https://127.0.0.1:${EC}" \
-    --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key txn <<TXN
-create("${LKEY}") = "0"
-
-put "${LKEY}" '${LVAL}' --lease=${LID}
-
-get "${LKEY}"
-TXN
-)
-if echo "${OUT}" | head -n1 | grep -qx "SUCCESS"; then
-    echo "LOCKED"
-else
-    HOLDER=$(echo "${OUT}" | tail -n1)
-    echo "BUSY:${HOLDER}"
-fi
-REMOTE_LOCK
-        )
-        if [[ "${etcd_res}" == BUSY:* ]]; then
-            rm -f "${lock_file}"
-            OPS_LOCK_ACQUIRED=false
-            log_error "Кластер уже заблокирован другим оператором в etcd: ${etcd_res#BUSY:}"
-            log_error "Для принудительного снятия используйте: ./ligactl unlock --force"
-            exit 1
-        elif [[ "${etcd_res}" == "LOCKED" ]]; then
-            OPS_LOCK_ETCD_IP="${q_ip}"
-        fi
-    fi
-
     export OPS_LOCK_HELD_BY_PARENT=true
 }
 
 release_ops_lock() {
-    if [[ "${OPS_LOCK_ACQUIRED:-false}" != "true" ]]; then
-        return 0
+    [[ "${OPS_LOCK_ACQUIRED:-false}" == true ]] || return 0
+    if [[ -n "${OPS_LOCK_TOKEN:-}" ]]; then
+        cluster_lock_request release "$OPS_LOCK_TOKEN" || log_warn "Проверьте состав и владельца перед unlock --force"
     fi
-    local state_dir="${CONFIG_ROOT:-${SCRIPT_DIR}}/.state"
-    rm -f "${state_dir}/ops.lock"
-    if [[ -n "${OPS_LOCK_ETCD_IP:-}" && "${DRY_RUN:-false}" != "true" ]]; then
-        remote_exec "${OPS_LOCK_ETCD_IP}" "
-            CID=\$(cd '${REMOTE_BASE_DIR}' 2>/dev/null && docker compose ps -q etcd | head -n1 || true)
-            [[ -n \"\${CID}\" ]] && docker exec \"\${CID}\" etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} \
-                --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key \
-                del '/${CLUSTER_SLUG}/ops-lock' >/dev/null 2>&1 || true
-        " >/dev/null 2>&1 || true
-    fi
+    exec 9<&-
     OPS_LOCK_ACQUIRED=false
+    unset OPS_LOCK_HELD_BY_PARENT
 }
 
 force_unlock_ops() {
-    local state_dir="${CONFIG_ROOT:-${SCRIPT_DIR}}/.state"
-    rm -f "${state_dir}/ops.lock"
-    if [[ "${DRY_RUN:-false}" != "true" && "${CLUSTER_NODES:-FIXME}" != *FIXME* ]]; then
-        local q_ip
-        q_ip=$(get_node_ip 1)
-        remote_exec "${q_ip}" "
-            CID=\$(cd '${REMOTE_BASE_DIR}' 2>/dev/null && docker compose ps -q etcd | head -n1 || true)
-            [[ -n \"\${CID}\" ]] && docker exec \"\${CID}\" etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} \
-                --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key \
-                del '/${CLUSTER_SLUG}/ops-lock' >/dev/null 2>&1 || true
-        " >/dev/null 2>&1 || true
-    fi
-    log_info "✅ Локальная и распределенная (etcd) блокировки сняты"
+    [[ "${DRY_RUN:-false}" != true ]] || return 0
+    lock_control_db || return 1
+    local rc=0
+    cluster_lock_request force "" || rc=$?
+    exec 9<&-
+    if (( rc == 0 )); then log_info "Блокировка etcd снята"; fi
+    return "$rc"
 }
 
 # --- Журнал транзакций (.state/journal.jsonl) и чекпоинты (--resume) ---
@@ -598,32 +485,19 @@ render_template() {
     local output="$2"
     mkdir -p "$(dirname "${output}")"
 
-    python3 - "${template}" "${output}" <<'PYEOF'
-import os, re, sys
-
-tpl_path, out_path = sys.argv[1], sys.argv[2]
-with open(tpl_path, "r", encoding="utf-8") as f:
-    content = f.read()
-
-pattern = re.compile(r"\$\{([A-Z][A-Z0-9_]*)\}")
-missing = []
-
-def repl(match):
-    name = match.group(1)
-    if name in os.environ:
-        return os.environ[name]
-    missing.append(name)
-    return match.group(0)
-
-rendered = pattern.sub(repl, content)
-if missing:
-    uniq = ", ".join(sorted(set(missing)))
-    sys.stderr.write(f"[ERROR] В шаблоне {tpl_path} не заданы переменные: {uniq}\n")
-    sys.exit(1)
-
-with open(out_path, "w", encoding="utf-8") as f:
-    f.write(rendered)
-PYEOF
+    local key
+    while IFS= read -r key; do
+        [[ -n "${key}" ]] || continue
+        if [[ -z "${!key+x}" ]]; then
+            log_error "Не задан параметр шаблона ${template}: ${key}"
+            return 1
+        fi
+    done < <(grep -oE '\$\{[A-Z][A-Z0-9_]*\}' "${template}" | tr -d '${}' | sort -u)
+    {
+        while IFS= read -r key; do
+            [[ -n "${key}" ]] && printf '%s\0%s\0' "${key}" "${!key}"
+        done < <(grep -oE '\$\{[A-Z][A-Z0-9_]*\}' "${template}" | tr -d '${}' | sort -u)
+    } | python3 "${SCRIPT_DIR}/scripts/lib/render_config.py" "${template}" "${output}"
     log_debug "Шаблон ${template} -> ${output}"
 }
 
@@ -666,7 +540,7 @@ patroni_is_writable_primary() {
         [[ "${ip}" == "$(get_node_ip 1)" ]]
         return $?
     fi
-    remote_exec_stdin "${ip}" "${REMOTE_BASE_DIR}" "${PATRONI_API_PORT:-8008}" <<'REMOTE_PG_RW_CHK' 2>/dev/null
+    remote_exec_stdin "${ip}" "${REMOTE_BASE_DIR}" "${PATRONI_API_PORT:-8008}" "${PG_PORT}" <<'REMOTE_PG_RW_CHK' 2>/dev/null
 set -euo pipefail
 BDIR="$1"; PPORT="$2"
 CA="${BDIR}/certs/ca.crt"
@@ -674,7 +548,7 @@ code=$(curl -s --max-time 4 --cacert "${CA}" -o /dev/null -w '%{http_code}' "htt
 [[ "${code}" == "200" ]] || exit 1
 PCID=$(cd "${BDIR}" 2>/dev/null && docker compose ps -q patroni 2>/dev/null | head -n1 || true)
 [[ -n "${PCID}" ]] || exit 1
-in_rec=$(docker exec -u postgres "${PCID}" psql -U postgres -d postgres -tAc "SELECT pg_is_in_recovery();" 2>/dev/null | tr -d '[:space:]' || true)
+in_rec=$(docker exec -u postgres "${PCID}" psql -p "$3" -U postgres -d postgres -tAc "SELECT pg_is_in_recovery();" 2>/dev/null | tr -d '[:space:]' || true)
 [[ "${in_rec}" == "f" ]]
 REMOTE_PG_RW_CHK
 }
@@ -744,23 +618,6 @@ remote_tcp_probe() {
     remote_exec "${from_ip}" "python3 -c 'import socket, sys; s = socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=float(sys.argv[3])); s.close()' '${target_ip}' '${port}' '${timeout_s}'" >/dev/null 2>&1
 }
 
-# Атомарное сохранение переменной в cluster.env
 persist_cluster_env_var() {
-    local key="$1" val="$2"
-    local env_file="${CONFIG_ROOT:-${SCRIPT_DIR}}/cluster.env"
-    if [[ "${DRY_RUN:-false}" == "true" || ! -f "${env_file}" ]]; then
-        return 0
-    fi
-    python3 - "${env_file}" "${key}" "${val}" <<'PYENV'
-import pathlib, re, sys
-p = pathlib.Path(sys.argv[1])
-key, val = sys.argv[2], sys.argv[3]
-txt = p.read_text(encoding="utf-8")
-pat = rf"^{re.escape(key)}=.*$"
-if re.search(pat, txt, flags=re.M):
-    txt = re.sub(pat, lambda _: f"{key}={val}", txt, flags=re.M)
-else:
-    txt = txt.rstrip("\n") + f"\n{key}={val}\n"
-p.write_text(txt, encoding="utf-8")
-PYENV
+    [[ "${DRY_RUN:-false}" == "true" ]] || config_db_set "$1" "$2"
 }

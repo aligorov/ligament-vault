@@ -19,6 +19,17 @@ defaults
     timeout server  60s
     timeout check    3s
 
+resolvers cluster_dns
+    parse-resolv-conf
+    resolve_retries 3
+    timeout resolve 1s
+    timeout retry 1s
+    hold valid 5s
+    hold nx 2s
+    hold refused 2s
+    hold timeout 2s
+    hold obsolete 2s
+
 # --- Фронтенд: локальный вход для SeaweedFS Filer ---
 frontend pg_primary_frontend
     bind 127.0.0.1:${HAPROXY_PG_PORT}

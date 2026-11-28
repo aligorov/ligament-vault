@@ -59,11 +59,10 @@ if [[ -f /etc/patroni/patroni.yml ]]; then
 fi
 
 # Права на каталог данных и логи pgbackrest
-if [[ -n "${PATRONI_POSTGRESQL_DATA_DIR:-}" ]]; then
-    mkdir -p "$(dirname "${PATRONI_POSTGRESQL_DATA_DIR}")" "${PATRONI_POSTGRESQL_DATA_DIR}"
-    chown -R postgres:postgres "$(dirname "${PATRONI_POSTGRESQL_DATA_DIR}")"
-    chmod 700 "${PATRONI_POSTGRESQL_DATA_DIR}"
-fi
+data_dir=$(python3 -c 'import yaml; print(yaml.safe_load(open("/run/pg-certs/patroni.yml"))["postgresql"]["data_dir"])')
+mkdir -p "$data_dir"
+chown postgres:postgres "$(dirname "$data_dir")" "$data_dir"
+chmod 700 "$data_dir"
 chown -R postgres:postgres /var/log/pgbackrest /var/lib/pgbackrest
 
 exec gosu postgres patroni /run/pg-certs/patroni.yml

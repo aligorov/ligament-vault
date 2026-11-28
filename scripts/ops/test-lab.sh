@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# test-lab.sh — Локальная песочница из 3 Ubuntu VM (Lima / Multipass) + MinIO
+# test-lab.sh — Локальная песочница из 3 Ubuntu VM (Lima / Multipass)
 # ============================================================================
 # Вызов: ./ligactl lab <up|down|status|verify> [--provider auto|lima|multipass] [--with-arbiter]
 # ============================================================================
@@ -22,13 +22,18 @@ usage() {
 Использование: ./ligactl lab <подкоманда> [опции]
 
 Подкоманды:
-  up [--provider auto|lima|multipass] [--with-arbiter]
-         Поднять 3 локальные Ubuntu 24.04 VM (+ опц. VM Арбитра с MinIO S3),
-         установить Docker и сгенерировать готовое окружение environments/lab/
-  verify Прогнать полный боевой цикл на lab-стенде (install -> verify --sprint 1 -> status --strict)
+  up [--provider auto|lima|multipass] [--with-arbiter] [--dns-zone lab.test]
+         Создать VM и записать IPv4 или проверенные FQDN в environments/lab/control.sqlite3.
+         Для своей DNS-зоны создать выведенные A-записи на локальном резолвере и повторить up.
+  verify [--with-backup]  Установка, S3/WORM, статус; с флагом также полный внешний backup и проверка восстановления.
   status Показать состояние локальных VM стенда
   down   Удалить все локальные VM стенда и очистить environments/lab/
 EOF
+}
+
+lab_guest() {
+    local provider="$1" vm="$2"; shift 2
+    if [[ "$provider" == multipass ]]; then multipass exec "$vm" -- "$@"; else limactl shell "$vm" "$@"; fi
 }
 
 detect_provider() {
@@ -47,20 +52,32 @@ detect_provider() {
 }
 
 cmd_up() {
-    local provider="auto" with_arbiter=false
+    local provider="auto" with_arbiter=false zone=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --provider)     provider="$2"; shift 2 ;;
+            --dns-zone)     zone="${2:?Укажите DNS-зону}"; shift 2 ;;
             --with-arbiter) with_arbiter=true; shift ;;
             *)              log_error "Неизвестный флаг lab up: $1"; usage; exit 1 ;;
         esac
     done
 
+    case "$provider" in auto|multipass|lima) ;; *) log_error "Неизвестный VM-провайдер: $provider"; return 1 ;; esac
+    if [[ -n "$zone" ]]; then
+        python3 - "$SCRIPT_DIR/scripts/lib" "$zone" <<'VALID_ZONE'
+import sys
+sys.path.insert(0, sys.argv[1])
+from node_address import valid_node_address
+if not valid_node_address("arbiter." + sys.argv[2]) or sys.argv[2].replace(".", "").isdigit():
+    sys.exit("Некорректная DNS-зона стенда")
+VALID_ZONE
+    fi
+
     local resolved
     resolved=$(detect_provider "${provider}")
 
     if [[ "${DRY_RUN:-false}" == "true" ]]; then
-        log_info "[DRY-RUN] lab up (provider=${resolved}, vms=${VM_PREFIX}-node1..3, arbiter=${with_arbiter}) -> ${LAB_DIR}/cluster.env"
+        log_info "[DRY-RUN] lab up (provider=${resolved}, vms=${VM_PREFIX}-node1..3, arbiter=${with_arbiter}, DNS=${zone:-IPv4}) -> ${LAB_DIR}/control.sqlite3"
         return 0
     fi
 
@@ -100,7 +117,7 @@ runcmd:
   - systemctl enable --now docker
 EOF
 
-    local node_entries=() arbiter_ip="" idx=1
+    local node_entries=() records=() node_ips=() arbiter_ip="" idx=1 vm endpoint
     for vm in "${vms[@]}"; do
         log_info "Запуск VM ${vm} (${resolved})..."
         local ip=""
@@ -113,35 +130,99 @@ EOF
             ip=$(limactl shell "${vm}" hostname -I | awk '{print $1}')
         fi
 
+        python3 -c 'import ipaddress,sys; ipaddress.IPv4Address(sys.argv[1])' "$ip"
+        endpoint="$ip"
+        if [[ -n "$zone" ]]; then
+            endpoint="${vm#"$VM_PREFIX-"}.$zone"
+            records+=("$endpoint=$ip")
+        fi
         if [[ "${vm}" == "${VM_PREFIX}-arbiter" ]]; then
-            arbiter_ip="${ip}"
-            ssh -o StrictHostKeyChecking=no -i "${LAB_KEY}" "root@${ip}" \
-                "docker rm -f lab-minio >/dev/null 2>&1 || true; docker run -d --name lab-minio -p 9000:9000 -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadminsecret quay.io/minio/minio server /data/minio"
+            arbiter_ip="$endpoint"
+            lab_guest "$resolved" "$vm" sudo bash -ec '
+                if [ "$(docker inspect --format "{{.Config.Image}} {{join .Args \" \"}}" lab-minio 2>/dev/null)" = "quay.io/minio/minio server /data/minio" ]; then
+                    docker stop lab-minio >/dev/null
+                    echo "Остановлен устаревший HTTP lab-minio. Его данные сохранены."
+                fi'
         else
-            node_entries+=("${ip}:dc${idx}:node${idx}")
+            node_ips+=("$ip")
+            node_entries+=("${endpoint}:dc${idx}:node${idx}")
             idx=$((idx + 1))
         fi
     done
 
-    local c_env
-    c_env=$(cat "${SCRIPT_DIR}/cluster.env.example")
-    c_env="${c_env/FIXME_IP1:dc1:node1 FIXME_IP2:dc2:node2 FIXME_IP3:dc3:node3/${node_entries[*]}}"
-    c_env="${c_env/MIN_FREE_DISK_GB=80/MIN_FREE_DISK_GB=10}"
-    c_env="${c_env/ARBITER_IP=\"\"/ARBITER_IP=\"${arbiter_ip}\"}"
-    printf '%s\nSSH_IDENTITY_FILE="%s"\n' "${c_env}" "${LAB_KEY}" > "${LAB_DIR}/cluster.env"
-    chmod 600 "${LAB_DIR}/cluster.env"
-
-    CONFIG_ROOT="${LAB_DIR}" bash "${SCRIPT_DIR}/scripts/ops/secrets-manager.sh" init --force
-    log_info "✅ Стенд готов! Запустите проверку: ./ligactl lab verify"
+    local extra=()
+    if [[ -n "$zone" ]]; then
+        log_info "A-записи частной зоны:"
+        printf '  %s\n' "${records[@]}"
+        printf '  files.%s=%s (первоначальный edge)\n' "$zone" "${node_ips[0]}"
+        local allowed
+        allowed=$(IFS=,; echo "${node_ips[*]}")
+        records+=("files.$zone=$allowed")
+        local checker
+        checker='import socket,sys
+for record in sys.argv[1:]:
+    name, expected = record.split("=")
+    try:
+        ips = {row[4][0] for row in socket.getaddrinfo(name, None, socket.AF_INET)}
+    except OSError as err:
+        sys.exit(f"{name}: {err}")
+    if len(ips) != 1 or not ips.issubset(expected.split(",")):
+        sys.exit(f"{name}: получено {ips}, ожидается {expected}")'
+        python3 -c "$checker" "${records[@]}"
+        for vm in "${vms[@]}"; do
+            lab_guest "$resolved" "$vm" python3 -c "$checker" "${records[@]}"
+        done
+        extra+=(DOMAIN "files.$zone")
+        local ssl_dir="$LAB_DIR/.ssl/certificates" domain="files.$zone"
+        if [[ ! -e "$ssl_dir/$domain.crt" && ! -e "$ssl_dir/$domain.key" ]]; then
+            mkdir -p "$ssl_dir"
+            (umask 077
+             openssl req -x509 -nodes -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -days 90 \
+                 -keyout "$ssl_dir/$domain.key" -out "$ssl_dir/$domain.crt" -subj "/CN=$domain" \
+                 -addext "subjectAltName=DNS:$domain" -addext "basicConstraints=critical,CA:FALSE")
+            touch "$LAB_DIR/.ssl/.selfsigned"
+        fi
+        [[ -s "$ssl_dir/$domain.crt" && -s "$ssl_dir/$domain.key" ]] || { log_error "Неполная TLS-пара для $domain"; return 1; }
+    fi
+    export CONFIG_ROOT="${LAB_DIR}"
+    config_db init
+    config_db_set_many CLUSTER_NODES "${node_entries[*]}" MIN_FREE_DISK_GB 10 ARBITER_IP "${arbiter_ip}" SSH_IDENTITY_FILE "${LAB_KEY}" "${extra[@]+"${extra[@]}"}"
+    log_info "Инвентарь VM сохранён. Для проверки сервисов запустите ./ligactl lab verify"
 }
 
 cmd_verify() {
+    local with_backup=false
+    if [[ "${1:-}" == --with-backup ]]; then with_backup=true; shift; fi
+    (( $# == 0 )) || { usage; return 1; }
     if [[ "${DRY_RUN:-false}" == "true" ]]; then
-        log_info "[DRY-RUN] ./ligactl --env lab install --yes && ./ligactl --env lab verify --sprint 1 && ./ligactl --env lab status --strict"
+        log_info "[DRY-RUN] lab install, verify --sprint 1, внешний backup и проверка восстановления=$with_backup, status --strict"
         return 0
+    fi
+    if [[ "$with_backup" == true ]]; then
+        load_cluster_env "$LAB_DIR"
+        python3 - "$BACKUP_S3_ENDPOINT" <<'S3_DNS'
+import ipaddress, sys
+from urllib.parse import urlsplit
+u = urlsplit(sys.argv[1])
+if u.scheme != "https" or not u.hostname or u.username is not None or u.password is not None:
+    sys.exit("Для резервной копии укажите HTTPS endpoint с DNS-именем в БД lab")
+try:
+    ipaddress.ip_address(u.hostname)
+except ValueError:
+    pass
+else:
+    sys.exit("Для endpoint S3 требуется DNS-имя")
+S3_DNS
+        if [[ -z "$BACKUP_S3_BUCKET" || -z "$BACKUP_S3_ACCESS_KEY" || "$BACKUP_S3_ACCESS_KEY" == *FIXME* || -z "$BACKUP_S3_SECRET_KEY" || "$BACKUP_S3_SECRET_KEY" == *FIXME* ]]; then
+            log_error "Заполните BACKUP_S3_BUCKET и ключи отдельного тестового бакета в БД lab"; return 1
+        fi
     fi
     bash "${SCRIPT_DIR}/ligactl" --env lab install --yes
     bash "${SCRIPT_DIR}/ligactl" --env lab verify --sprint 1
+    if [[ "$with_backup" == true ]]; then
+        bash "${SCRIPT_DIR}/ligactl" --env lab backup full
+        bash "${SCRIPT_DIR}/ligactl" --env lab backup --verify
+    fi
     bash "${SCRIPT_DIR}/ligactl" --env lab status --strict
 }
 

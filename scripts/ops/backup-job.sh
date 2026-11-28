@@ -15,6 +15,7 @@ source "${SCRIPT_DIR}/scripts/lib/common.sh"
 # shellcheck source=../lib/deploy.sh
 source "${SCRIPT_DIR}/scripts/lib/deploy.sh"
 
+source "${SCRIPT_DIR}/scripts/ops/file-snapshot.sh"
 load_cluster_env "${CONFIG_ROOT:-${SCRIPT_DIR}}"
 MODE="${1:-incr}"
 
@@ -57,7 +58,7 @@ REMOTE_PROM
 run_pgbackrest() {
     local type="$1"
     local primary_ip
-    primary_ip=$(find_patroni_primary_ip || get_node_ip 1)
+    primary_ip=$(find_patroni_primary_ip) || return 1
 
     log_step "pgBackRest (${type}, stanza=${CLUSTER_SLUG}) на Primary ${primary_ip}"
     if ! remote_exec "${primary_ip}" "CID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q patroni | head -n1); [[ -n \"\${CID}\" ]] && docker exec -u postgres \"\${CID}\" pgbackrest --stanza='${CLUSTER_SLUG}' --type=${type} backup"; then
@@ -67,194 +68,84 @@ run_pgbackrest() {
 }
 
 run_swfs_backup() {
-    local admin_idx="${SWFS_ADMIN_NODE_INDEX:-2}"
-    local node_ip mpeers
-    node_ip=$(get_node_ip "${admin_idx}")
-    mpeers=$(build_swfs_master_peers)
-    log_step "SeaweedFS off-cluster meta-backup + контроль демона swfs-backup (${node_ip})"
-
-    remote_exec "${node_ip}" "
-        cd '${REMOTE_BASE_DIR}'
-        if [[ -z \$(docker compose ps -q swfs-backup | head -n1) ]]; then
-            docker compose --profile backup up -d swfs-backup
-        fi
-    "
-
-    if ! remote_exec_env_stdin "${node_ip}" \
-        "BACKUP_S3_ACCESS_KEY,BACKUP_S3_SECRET_KEY,BACKUP_ENCRYPTION_KEY" \
-        "${REMOTE_BASE_DIR}" \
-        "${mpeers}" \
-        "${SWFS_FILER_PORT:-8888}" \
-        "${BACKUP_S3_ENDPOINT}" \
-        "${BACKUP_S3_REGION:-us-east-1}" \
-        "${BACKUP_S3_BUCKET}" <<'REMOTE_META_BKP'
+    local count primary cut info label at idx
+    count=$(get_node_count)
+    primary=$(find_patroni_primary_ip) || return 1
+    SNAPSHOT_ID=$(python3 -c 'import uuid;print(uuid.uuid4().hex)')
+    for ((idx=1; idx<=count; idx++)); do snapshot_on_node "${idx}" capture || return $?; done
+    snapshot_on_node 1 objects || return 1
+    info=$(remote_exec_stdin "${primary}" "${REMOTE_BASE_DIR}" "${CLUSTER_SLUG}" "${SNAPSHOT_ID}" "${PG_PORT}" <<'REMOTE_CUT'
 set -euo pipefail
-BDIR="$1"; MPEERS="$2"; FPORT="$3"; ENDPOINT="$4"; REGION="$5"; BUCKET="$6"
-AK="${BACKUP_S3_ACCESS_KEY}"; SK="${BACKUP_S3_SECRET_KEY}"; ENC_KEY="${BACKUP_ENCRYPTION_KEY}"
+cd "$1"
+cid=$(docker compose ps -q patroni)
+label=$(docker exec -u postgres "${cid}" pgbackrest --stanza="$2" info --output=json | jq -er '.[0].backup[-1].label')
+sql=(docker exec -u postgres "${cid}" psql -p "$4" -XAt -v ON_ERROR_STOP=1 -d postgres)
+[[ "$("${sql[@]}" -c "select pg_is_in_recovery()")" == f ]]
+at=$("${sql[@]}" -c "select to_char(clock_timestamp() at time zone 'UTC','YYYY-MM-DD HH24:MI:SS.US') || '+00:00' from pg_create_restore_point('lv_$3')")
+"${sql[@]}" -c 'select pg_switch_wal()' >/dev/null
+docker exec -u postgres "${cid}" pgbackrest --stanza="$2" check >&2
+printf '%s|%s\n' "${label}" "${at}"
+REMOTE_CUT
+) || return 1
+    cut=$(printf '%s\n' "${info}" | tail -n1)
+    IFS='|' read -r label at <<< "${cut}"
+    for ((idx=1; idx<=count; idx++)); do snapshot_on_node "${idx}" stable || return $?; done
+    snapshot_on_node 1 check-objects || return 1
+    snapshot_controller verify --id "${SNAPSHOT_ID}" --nodes "${count}" || return 1
+    snapshot_controller commit --id "${SNAPSHOT_ID}" --at "${at}" --label "${label}" --nodes "${count}"
+}
 
-TS=$(date -u +%Y%m%dT%H%M%SZ)
-TMP_META=$(mktemp /tmp/filer-meta-XXXXXX.meta)
-TMP_CIPH=$(mktemp /tmp/filer-meta-XXXXXX.ciph)
-TMP_ENC=$(mktemp /tmp/filer-meta-XXXXXX.enc)
-chmod 600 "${TMP_META}" "${TMP_CIPH}" "${TMP_ENC}"
-CID=$(cd "${BDIR}" && docker compose ps -q swfs-filer | head -n1)
-[[ -n "${CID}" ]] || { echo "swfs-filer not running" >&2; exit 1; }
-
-trap 'rm -f "${TMP_META}" "${TMP_CIPH}" "${TMP_ENC}"; docker exec "${CID}" rm -f "${TMP_META}" 2>/dev/null || true' EXIT
-
-docker exec -i "${CID}" weed shell -master="${MPEERS}" -filer="127.0.0.1:${FPORT}" <<< "fs.meta.save -o ${TMP_META} /"
-docker cp "${CID}:${TMP_META}" "${TMP_META}"
-docker exec "${CID}" rm -f "${TMP_META}"
-
-gzip -c "${TMP_META}" | ENCK="${ENC_KEY}" openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:ENCK -out "${TMP_CIPH}"
-python3 - "${TMP_CIPH}" "${TMP_ENC}" <<'PYETM'
-import hashlib, hmac, os, sys
-src, dst = sys.argv[1], sys.argv[2]
-mac_key = hashlib.sha256(("ligament-etm:" + os.environ["ENC_KEY"]).encode("utf-8")).digest()
-cipher = open(src, "rb").read()
-tag = hmac.new(mac_key, cipher, hashlib.sha256).hexdigest()
-with open(dst, "wb") as f:
-    f.write(b"ETM1:" + tag.encode("ascii") + b":" + cipher)
-PYETM
-
-python3 - "${ENDPOINT}" "${REGION}" "${BUCKET}" "${TMP_ENC}" "filer-meta/filer-meta-${TS}.meta.gz.enc" <<'PYEOF'
-import datetime, hashlib, hmac, os, sys, urllib.parse, urllib.request
-
-endpoint, region, bucket, local_file, obj_key = sys.argv[1:]
-ak = os.environ["BACKUP_S3_ACCESS_KEY"]
-sk = os.environ["BACKUP_S3_SECRET_KEY"]
-if not endpoint.startswith(("http://", "https://")):
-    endpoint = "https://" + endpoint
-endpoint = endpoint.rstrip("/")
-parsed = urllib.parse.urlparse(endpoint)
-host = parsed.netloc
-body = open(local_file, "rb").read()
-
-def sign(key, msg):
-    return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
-
-for key_target, payload in ((obj_key, body), ("filer-meta/LATEST", obj_key.encode("utf-8"))):
-    now = datetime.datetime.now(datetime.timezone.utc)
-    amz_date = now.strftime("%Y%m%dT%H%M%SZ")
-    date_stamp = now.strftime("%Y%m%d")
-    payload_hash = hashlib.sha256(payload).hexdigest()
-    path = f"/{bucket}/{key_target}"
-    headers = {"host": host, "x-amz-date": amz_date, "x-amz-content-sha256": payload_hash}
-    sorted_keys = sorted(headers.keys())
-    canonical_headers = "".join(f"{k}:{headers[k]}\n" for k in sorted_keys)
-    signed_headers = ";".join(sorted_keys)
-    canonical_req = f"PUT\n{path}\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
-    scope = f"{date_stamp}/{region}/s3/aws4_request"
-    sts = f"AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{hashlib.sha256(canonical_req.encode()).hexdigest()}"
-    k_signing = sign(sign(sign(sign(("AWS4" + sk).encode(), date_stamp), region), "s3"), "aws4_request")
-    sig = hmac.new(k_signing, sts.encode(), hashlib.sha256).hexdigest()
-    headers["authorization"] = f"AWS4-HMAC-SHA256 Credential={ak}/{scope}, SignedHeaders={signed_headers}, Signature={sig}"
-    req = urllib.request.Request(f"{endpoint}{path}", data=payload, headers=headers, method="PUT")
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        assert resp.status in (200, 201, 204), f"S3 upload failed: {resp.status}"
-print(f"Uploaded encrypted filer metadata backup -> s3://{bucket}/{obj_key}")
-PYEOF
-REMOTE_META_BKP
-    then
-        write_backup_metrics "${node_ip}" 0 false
-        return 1
-    fi
-
-    write_backup_metrics "${node_ip}" 1 true
+snapshot_with_retry() {
+    local attempt status
+    for attempt in 1 2 3; do
+        if run_swfs_backup; then return 0; else status=$?; fi
+        [[ "${status}" == 75 && "${attempt}" != 3 ]] || return "${status}"
+        log_warn "Тома менялись во время снятия копии. Повтор ${attempt}/3"
+        sleep "$((2 * attempt))"
+    done
 }
 
 run_verify_restore() {
-    local test_ip
-    test_ip=$(get_node_ip "${SWFS_ADMIN_NODE_INDEX:-2}")
-    log_step "Проверка целостности PostgreSQL + SeaweedFS бэкапов (verify-restore) на ${test_ip}"
-    remote_exec_env_stdin "${test_ip}" \
-        "BACKUP_S3_ACCESS_KEY,BACKUP_S3_SECRET_KEY,BACKUP_ENCRYPTION_KEY" \
-        "${REMOTE_BASE_DIR}" \
-        "${CLUSTER_SLUG}" \
-        "${BACKUP_S3_ENDPOINT}" \
-        "${BACKUP_S3_REGION:-us-east-1}" \
-        "${BACKUP_S3_BUCKET}" <<'REMOTE_VERIFY'
+    local primary point label at
+    primary=$(find_patroni_primary_ip) || return 1
+    point=$(snapshot_controller select --nodes "$(get_node_count)") || return 1
+    read -r SNAPSHOT_ID label at <<< "${point}"
+    snapshot_controller verify --id "${SNAPSHOT_ID}" --nodes "$(get_node_count)" || return 1
+    remote_exec_stdin "${primary}" "${REMOTE_BASE_DIR}" "${CLUSTER_SLUG}" "${label}" "lv_${SNAPSHOT_ID}" <<'VERIFY_PG'
 set -euo pipefail
-BDIR="$1"; SLUG="$2"; ENDPOINT="$3"; REGION="$4"; BUCKET="$5"
-ENC_KEY="${BACKUP_ENCRYPTION_KEY}"
-
-CID=$(cd "${BDIR}" && docker compose ps -q patroni | head -n1)
-[[ -n "${CID}" ]] || { echo "Patroni container not found" >&2; exit 1; }
-docker exec -u postgres "${CID}" pgbackrest --stanza="${SLUG}" check
-docker exec -u postgres "${CID}" pgbackrest --stanza="${SLUG}" info --output=json | jq '.[0].backup[-1]'
-AVAIL_MB=$(df -Pm /var/lib/docker 2>/dev/null | awk 'NR==2{print $4}' || echo 0)
-if (( AVAIL_MB >= 1200 )); then
-    docker exec -u postgres "${CID}" bash -c "
-        rm -rf /tmp/pgbr-verify && mkdir -p /tmp/pgbr-verify
-        pgbackrest --stanza='${SLUG}' --pg1-path=/tmp/pgbr-verify --no-delta --type=immediate restore || \
-        pgbackrest --stanza='${SLUG}' --pg1-path=/tmp/pgbr-verify restore
-        ls -la /tmp/pgbr-verify/PG_VERSION
-        rm -rf /tmp/pgbr-verify
-    "
-else
-    echo "Пропуск полного test-restore в /tmp (/var/lib/docker free=${AVAIL_MB}MB < 1200MB); stanza check и metadata info выполнены OK"
-fi
-
-# Проверяем скачивание, HMAC-целостность и AES-256 расшифровку последнего дампа метаданных SeaweedFS
-TMP_DEC=$(mktemp /tmp/verify-meta-XXXXXX.enc)
-TMP_CIPH=$(mktemp /tmp/verify-meta-XXXXXX.ciph)
-chmod 600 "${TMP_DEC}" "${TMP_CIPH}"
-trap 'rm -f "${TMP_DEC}" "${TMP_CIPH}"' EXIT
-python3 - "${ENDPOINT}" "${REGION}" "${BUCKET}" "${TMP_DEC}" <<'PYEOF'
-import datetime, hashlib, hmac, os, sys, urllib.parse, urllib.request
-endpoint, region, bucket, dst = sys.argv[1:]
-ak = os.environ["BACKUP_S3_ACCESS_KEY"]
-sk = os.environ["BACKUP_S3_SECRET_KEY"]
-if not endpoint.startswith(("http://", "https://")):
-    endpoint = "https://" + endpoint
-endpoint = endpoint.rstrip("/")
-host = urllib.parse.urlparse(endpoint).netloc
-def sign(k, m): return hmac.new(k, m.encode(), hashlib.sha256).digest()
-def s3_get(key):
-    now = datetime.datetime.now(datetime.timezone.utc)
-    ad, ds = now.strftime("%Y%m%dT%H%M%SZ"), now.strftime("%Y%m%d")
-    ph = hashlib.sha256(b"").hexdigest()
-    path = f"/{bucket}/{key}"
-    hdrs = {"host": host, "x-amz-date": ad, "x-amz-content-sha256": ph}
-    ch = "".join(f"{k}:{hdrs[k]}\n" for k in sorted(hdrs))
-    sh = ";".join(sorted(hdrs))
-    creq = f"GET\n{path}\n\n{ch}\n{sh}\n{ph}"
-    sc = f"{ds}/{region}/s3/aws4_request"
-    sts = f"AWS4-HMAC-SHA256\n{ad}\n{sc}\n{hashlib.sha256(creq.encode()).hexdigest()}"
-    ks = sign(sign(sign(sign(("AWS4" + sk).encode(), ds), region), "s3"), "aws4_request")
-    hdrs["authorization"] = f"AWS4-HMAC-SHA256 Credential={ak}/{sc}, SignedHeaders={sh}, Signature={hmac.new(ks, sts.encode(), hashlib.sha256).hexdigest()}"
-    return urllib.request.urlopen(urllib.request.Request(f"{endpoint}{path}", headers=hdrs), timeout=30).read()
-
-latest_key = s3_get("filer-meta/LATEST").decode().strip()
-open(dst, "wb").write(s3_get(latest_key))
-print(f"Downloaded {latest_key} for decryption verification")
-PYEOF
-
-ENC_KEY="${ENC_KEY}" python3 - "${TMP_DEC}" "${TMP_CIPH}" <<'PYVER'
-import hashlib, hmac, os, sys
-src, dst = sys.argv[1], sys.argv[2]
-raw = open(src, "rb").read()
-if raw.startswith(b"ETM1:"):
-    _, tag, cipher = raw.split(b":", 2)
-    mac_key = hashlib.sha256(("ligament-etm:" + os.environ["ENC_KEY"]).encode("utf-8")).digest()
-    expected = hmac.new(mac_key, cipher, hashlib.sha256).hexdigest().encode("ascii")
-    if not hmac.compare_digest(tag, expected):
-        raise SystemExit("HMAC verification FAILED for filer metadata archive!")
-    open(dst, "wb").write(cipher)
-else:
-    open(dst, "wb").write(raw)
-PYVER
-ENCK="${ENC_KEY}" openssl enc -d -aes-256-cbc -pbkdf2 -pass env:ENCK -in "${TMP_CIPH}" | gunzip -t
-echo "SeaweedFS encrypted metadata archive verified OK (AEAD/ETM)"
-REMOTE_VERIFY
-    log_info "✅ Автотест восстановления PostgreSQL + SeaweedFS метаданных (verify-restore) пройден"
+cd "$1"
+cid=$(docker compose ps -q patroni)
+docker exec -i -u postgres "${cid}" bash -s -- "$2" "$3" "$4" <<'PG'
+set -euo pipefail
+d=$(mktemp -d /tmp/pgbr-verify.XXXXXXXX)
+cleanup() { pg_ctl -D "$d/data" -m immediate stop >/dev/null 2>&1 || true; rm -rf -- "$d"; }
+trap cleanup EXIT
+pgbackrest --stanza="$1" --set="$2" --type=name --target="$3" --target-action=promote --pg1-path="$d/data" restore
+mkdir "$d/socket"
+pg_ctl -D "$d/data" -l "$d/log" -w -t 120 -o "-p 55432 -k $d/socket -c data_directory=$d/data -c listen_addresses='' -c archive_mode=off -c ssl=off" start
+for ((i=0;i<120;i++)); do
+    ready=$(psql -XAt -v ON_ERROR_STOP=1 -h "$d/socket" -p 55432 -d postgres -c 'SELECT NOT pg_is_in_recovery()')
+    [[ "${ready}" == t ]] && break
+    sleep 1
+done
+[[ "${ready}" == t ]]
+PG
+VERIFY_PG
 }
 
 case "${MODE}" in
-    full)           run_pgbackrest full; run_swfs_backup ;;
-    incr)           run_pgbackrest incr; run_swfs_backup ;;
-    verify-restore) run_verify_restore ;;
-    *)              log_error "Использование: $0 [full|incr|verify-restore]"; exit 1 ;;
+    full|incr)
+        if [[ "${DRY_RUN:-false}" == true ]]; then log_info "[DRY-RUN] PostgreSQL + SeaweedFS volume snapshot"; exit 0; fi
+        admin=$(get_node_ip "${SWFS_ADMIN_NODE_INDEX:-2}")
+        if run_pgbackrest "${MODE}" && snapshot_with_retry; then
+            write_backup_metrics "${admin}" 1 true
+        else
+            write_backup_metrics "${admin}" 0 false
+            exit 1
+        fi ;;
+    verify-restore)
+        if [[ "${DRY_RUN:-false}" == true ]]; then log_info "[DRY-RUN] Verify physical snapshot and PG restore"; exit 0; fi
+        run_verify_restore ;;
+    *) log_error "Использование: $0 [full|incr|verify-restore]"; exit 1 ;;
 esac
-
-log_info "✅ Задача бэкапа (${MODE}) завершена"
+log_info "Задача бэкапа (${MODE}) завершена"

@@ -58,7 +58,7 @@ if [[ "${DISRUPTIVE}" == "true" ]]; then
     log_warn "  Пауза контейнера patroni на ${old_primary} для симуляции отказа лидера..."
     remote_exec "${old_primary}" "cd '${REMOTE_BASE_DIR}' && docker compose pause patroni"
 else
-    remote_exec "${old_primary}" "PCID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q patroni | head -n1); docker exec \"\${PCID}\" patronictl switchover '${CLUSTER_SLUG}' --force"
+    remote_exec "${old_primary}" "PCID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q patroni | head -n1); docker exec \"\${PCID}\" patronictl -c /run/pg-certs/patroni.yml switchover '${CLUSTER_SLUG}' --force"
 fi
 
 new_primary=""
@@ -81,7 +81,7 @@ else
 fi
 
 wait_for_remote_health "${NODE2_IP}" "HAProxy :5433 -> новый Primary" \
-    "PCID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q patroni | head -n1); docker exec -u postgres -e PGSSLMODE=verify-full -e PGSSLROOTCERT=/run/pg-certs/ca.crt -e PGSSLCERT=/run/pg-certs/pg-client.crt -e PGSSLKEY=/run/pg-certs/pg-client.key \"\${PCID}\" pg_isready -h 127.0.0.1 -p ${HAPROXY_PG_PORT:-5433} -U postgres" 15 2
+    "PCID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q patroni | head -n1); docker exec -u postgres \"\${PCID}\" pg_isready -d 'host=127.0.0.1 port=${HAPROXY_PG_PORT:-5433} user=postgres sslmode=verify-full sslrootcert=/run/pg-certs/ca.crt sslcert=/run/pg-certs/pg-client.crt sslkey=/run/pg-certs/pg-client.key'" 15 2
 log_info "  ✅ PASS: HAProxy :5433 принимает подключения к новому Primary"
 
 if [[ "${DISRUPTIVE}" == "true" ]]; then

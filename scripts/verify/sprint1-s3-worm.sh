@@ -47,15 +47,15 @@ fail() { log_error "  ❌ FAIL: $1"; FAIL_COUNT=$((FAIL_COUNT + 1)); }
 
 # --- 1. S3 & WORM SigV4 Spike ---
 log_step "1/3 — S3 & WORM SigV4 Spike (127.0.0.1:${S3_PORT})"
-if remote_exec_env_stdin "${TEST_NODE_IP}" "SWFS_ADMIN_PASSWORD,SWFS_S3_SECRET_KEY_SFTPGO" "${S3_PORT}" "provision-s3-admin" <<'REMOTE_SPIKE'
+if remote_exec_private_stdin "${TEST_NODE_IP}" "SWFS_ADMIN_PASSWORD" "${S3_PORT}" "provision-s3-admin" <<'REMOTE_SPIKE'
 set -euo pipefail
 S3_PORT="$1"; ACCESS_KEY="$2"
 
-python3 - "${S3_PORT}" "${ACCESS_KEY}" <<'PYEOF'
+python3 - "${S3_PORT}" "${ACCESS_KEY}" 3< <(printf '%s' "${SWFS_ADMIN_PASSWORD}") <<'PYEOF'
 import datetime, hashlib, hmac, os, sys, urllib.error, urllib.request
 
 port, ak = sys.argv[1], sys.argv[2]
-sk = os.environ["SWFS_ADMIN_PASSWORD"]
+sk = os.fdopen(3).read()
 endpoint = f"http://127.0.0.1:{port}"
 region = "us-east-1"
 
@@ -139,7 +139,7 @@ fi
 # --- 2. E2E SFTP -> SFTPGo -> SeaweedFS (work & worm) ---
 log_step "2/3 — E2E SFTP -> SFTPGo -> SeaweedFS (/work и /worm)"
 sftpgo_provision_s3_folders "${TEST_NODE_IP}" || true
-if remote_exec_env_stdin "${TEST_NODE_IP}" "SFTPGO_ADMIN_PASSWORD,SWFS_ADMIN_PASSWORD" "${SFTPGO_ADMIN_USERNAME:-admin}" "${SFTP_PORT:-2022}" "${S3_PORT}" "provision-s3-admin" <<'REMOTE_SFTP_E2E'
+if remote_exec_private_stdin "${TEST_NODE_IP}" "SFTPGO_ADMIN_PASSWORD,SWFS_ADMIN_PASSWORD" "${SFTPGO_ADMIN_USERNAME:-admin}" "${SFTP_PORT:-2022}" "${S3_PORT}" "provision-s3-admin" <<'REMOTE_SFTP_E2E'
 set -euo pipefail
 ADMIN_U="$1"; SFTP_PORT="$2"; S3_PORT="$3"; S3_AK="$4"
 ADMIN_P="${SFTPGO_ADMIN_PASSWORD}"; S3_SK="${SWFS_ADMIN_PASSWORD}"
@@ -198,9 +198,10 @@ SFTP
 cmp -s "${TMPDIR}/src.txt" "${TMPDIR}/got.txt"
 
 # 2.2 Проверяем через S3 API, что файл, загруженный через SFTPGo в /worm, унаследовал DefaultRetention!
-python3 - "${S3_PORT}" "${S3_AK}" "${S3_SK}" "${WORM_FNAME}" <<'PYCHECK'
-import datetime, hashlib, hmac, sys, urllib.error, urllib.request
-port, ak, sk, key = sys.argv[1:]
+python3 - "${S3_PORT}" "${S3_AK}" "${WORM_FNAME}" 3< <(printf '%s' "${S3_SK}") <<'PYCHECK'
+import datetime, hashlib, hmac, os, sys, urllib.error, urllib.request
+port, ak, key = sys.argv[1:]
+sk = os.fdopen(3).read()
 now = datetime.datetime.now(datetime.timezone.utc)
 amz_date, ds = now.strftime("%Y%m%dT%H%M%SZ"), now.strftime("%Y%m%d")
 ph = hashlib.sha256(b"").hexdigest()
@@ -248,8 +249,8 @@ fi
 
 # --- 3. Проверка конфигурации и периметра ---
 log_step "3/3 — Конфигурация SFTPGo и сетевая изоляция портов"
-if remote_exec "${TEST_NODE_IP}" "jq -e '.common.setstat_mode == 2 and .data_provider.update_mode == 0 and .data_provider.is_shared == 1 and .data_provider.create_default_admin == true' '${REMOTE_BASE_DIR}/configs/sftpgo.json' >/dev/null"; then
-    pass "sftpgo.json: setstat_mode=2, update_mode=0, is_shared=1, create_default_admin=true"
+if remote_exec "${TEST_NODE_IP}" "jq -e '.common.setstat_mode == 2 and .data_provider.update_mode == 0 and .data_provider.is_shared == 1 and .data_provider.create_default_admin == false' '${REMOTE_BASE_DIR}/configs/sftpgo.json' >/dev/null && jq -e '.admins[0].password | length == 60 and (explode[0:2] == [36,50])' '${REMOTE_BASE_DIR}/configs/sftpgo-bootstrap.json' >/dev/null"; then
+    pass "sftpgo.json: setstat_mode=2, update_mode=0, is_shared=1, bcrypt в bootstrap.json"
 else
     fail "sftpgo.json: некорректные параметры"
 fi

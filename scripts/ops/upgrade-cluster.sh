@@ -38,7 +38,7 @@ guard_pg_major_version() {
     local primary_ip running_major
     primary_ip=$(find_patroni_primary_ip || get_node_ip 1)
     running_major=$(remote_exec "${primary_ip}" \
-        "PCID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q patroni | head -n1); [[ -n \"\${PCID}\" ]] && docker exec \"\${PCID}\" psql -U postgres -tAc 'SHOW server_version_num;'" 2>/dev/null | cut -c1-2 || echo "16")
+        "PCID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q patroni | head -n1); [[ -n \"\${PCID}\" ]] && docker exec \"\${PCID}\" psql -p '${PG_PORT}' -U postgres -tAc 'SHOW server_version_num;'" 2>/dev/null | cut -c1-2 || echo "16")
     local dockerfile_major
     dockerfile_major=$(awk '/^FROM postgres:/{split($2,a,":"); split(a[2],b,"-"); print b[1]}' "${SCRIPT_DIR}/Dockerfile.patroni")
 
@@ -64,7 +64,7 @@ pre_upgrade_gate() {
 
     log_info "Сохранение текущего состояния образов в ${ROLLBACK_FILE}..."
     if [[ "${DRY_RUN:-false}" != "true" ]]; then
-        cp "${SCRIPT_DIR}/versions.env" "${ROLLBACK_FILE}.versions"
+        config_db images-save
         date -u +"%Y-%m-%dT%H:%M:%SZ" > "${ROLLBACK_FILE}"
         for i in $(seq 1 "$(get_node_count)"); do
             local ip name
@@ -180,8 +180,8 @@ upgrade_patroni() {
     done
 
     if [[ -n "${primary_ip}" && ${#replicas[@]} -gt 0 ]]; then
-        log_info "Управляемый patronictl switchover с ${primary_ip}..."
-        remote_exec "${primary_ip}" "PCID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q patroni | head -n1); docker exec \"\${PCID}\" patronictl switchover '${CLUSTER_SLUG}' --force"
+        log_info "Управляемый patronictl -c /run/pg-certs/patroni.yml switchover с ${primary_ip}..."
+        remote_exec "${primary_ip}" "PCID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q patroni | head -n1); docker exec \"\${PCID}\" patronictl -c /run/pg-certs/patroni.yml switchover '${CLUSTER_SLUG}' --force"
         run_or_dry sleep 8
         log_info "Обновление бывшего Primary (${primary_ip})..."
         rerender_and_push_node_by_ip "${primary_ip}"
@@ -284,16 +284,16 @@ upgrade_sftpgo() {
 }
 
 run_rollback() {
-    log_step "Откат контейнеров на состояние из ${ROLLBACK_FILE}.versions"
-    if [[ ! -f "${ROLLBACK_FILE}.versions" ]]; then
-        log_error "Отсутствует ${ROLLBACK_FILE}.versions"
+    log_step "Откат контейнеров на состояние из снимка версий в БД"
+    if [[ ! -f "${ROLLBACK_FILE}" ]]; then
+        log_error "Отсутствует снимок версий БД"
         exit 1
     fi
-    confirm_action "Восстановить версии из ${ROLLBACK_FILE}.versions и откатить сервисы?" || exit 0
+    confirm_action "Восстановить версии из снимка версий в БД и откатить сервисы?" || exit 0
 
     if [[ "${DRY_RUN:-false}" != "true" ]]; then
-        cp "${ROLLBACK_FILE}.versions" "${SCRIPT_DIR}/versions.env"
-        load_cluster_env "${SCRIPT_DIR}"
+        config_db images-restore
+        load_cluster_env "$(state_root)"
     fi
 
     local count primary_ip="" replicas=()
@@ -322,7 +322,7 @@ run_rollback() {
     done
     if [[ -n "${primary_ip}" ]]; then
         if (( ${#replicas[@]} > 0 )); then
-            remote_exec "${primary_ip}" "PCID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q patroni | head -n1); docker exec \"\${PCID}\" patronictl switchover '${CLUSTER_SLUG}' --force" || true
+            remote_exec "${primary_ip}" "PCID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q patroni | head -n1); docker exec \"\${PCID}\" patronictl -c /run/pg-certs/patroni.yml switchover '${CLUSTER_SLUG}' --force" || true
             run_or_dry sleep 5
         fi
         log_info "Откат стека на бывшем Primary (${primary_ip})..."

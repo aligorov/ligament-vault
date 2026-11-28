@@ -51,8 +51,9 @@ bootstrap:
     retry_timeout: 25
     primary_start_timeout: 60
     maximum_lag_on_failover: 1048576
-    synchronous_mode: false           # Включается только после замера в Sprint 2
-    synchronous_mode_strict: false
+    synchronous_mode: ${PATRONI_SYNC_MODE}
+    synchronous_mode_strict: ${PATRONI_SYNC_MODE}
+    synchronous_node_count: ${PG_SYNC_STANDBY_COUNT}
     failsafe_mode: true
     slots:
 ${PATRONI_SLOTS_YAML}

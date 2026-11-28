@@ -1,0 +1,2963 @@
+{
+  "audit_date": "2026-11-28",
+  "revision": "2380e03a9ae14e7a1e001c278d81ea1aa4ff015c",
+  "scope": "Isolated local Docker experiments. Each receipt applies to its described fixture only; synthetic names and data. Manual DNS switching in the integrated tests.",
+  "three_node_ftps": {
+    "node_1_then_2": [
+      {
+        "setup": "PG 3/3",
+        "first_leader": 1
+      },
+      {
+        "setup": "S3 bucket + three SeaweedFS nodes"
+      },
+      {
+        "type": "write",
+        "name": "baseline.bin",
+        "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+        "s": 30.8
+      },
+      {
+        "type": "read",
+        "name": "baseline.bin",
+        "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+        "s": 0.17
+      },
+      {
+        "failure": "active node 1",
+        "prior_pg_leader": 1,
+        "seconds_to_dns": 0.81
+      },
+      {
+        "type": "read",
+        "name": "baseline.bin",
+        "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+        "s": 84.9
+      },
+      {
+        "type": "write",
+        "name": "after_one.bin",
+        "sha256": "12f1ecfc80d57d887561e27bed9ea1ab831be560b2fd27069097badf70772118",
+        "s": 0.36
+      },
+      {
+        "failure": "nodes 1,2",
+        "seconds": 9.32,
+        "client_operations": {
+          "read": true,
+          "write": false
+        }
+      },
+      {
+        "failure": "nodes 1,2",
+        "seconds": 36.35,
+        "client_operations": {
+          "read": true,
+          "write": false
+        }
+      },
+      {
+        "failure": "nodes 1,2",
+        "seconds": 87.3,
+        "client_operations": {
+          "read": false,
+          "write": false
+        }
+      },
+      {
+        "type": "read",
+        "name": "baseline.bin",
+        "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+        "s": 0.13
+      },
+      {
+        "type": "read",
+        "name": "after_one.bin",
+        "sha256": "12f1ecfc80d57d887561e27bed9ea1ab831be560b2fd27069097badf70772118",
+        "s": 0.12
+      },
+      {
+        "type": "write",
+        "name": "after_return.bin",
+        "sha256": "892f115b6e30e89059bb369198a7cbf79e249cd931dd277c626f1615eca7c824",
+        "s": 2.61
+      },
+      {
+        "completed": true
+      }
+    ],
+    "node_2_then_3": [
+      {
+        "setup": "PG 3/3",
+        "first_leader": 1
+      },
+      {
+        "setup": "S3 bucket + three SeaweedFS nodes"
+      },
+      {
+        "type": "write",
+        "name": "baseline.bin",
+        "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+        "s": 10.54
+      },
+      {
+        "type": "read",
+        "name": "baseline.bin",
+        "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+        "s": 0.13
+      },
+      {
+        "failure": "one",
+        "node": 2,
+        "prior_pg_leader": 1,
+        "seconds_to_dns": 0.23
+      },
+      {
+        "type": "read",
+        "name": "baseline.bin",
+        "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+        "s": 0.23
+      },
+      {
+        "type": "write",
+        "name": "after_one.bin",
+        "sha256": "12f1ecfc80d57d887561e27bed9ea1ab831be560b2fd27069097badf70772118",
+        "s": 0.37
+      },
+      {
+        "failure": "pair",
+        "nodes": [
+          2,
+          3
+        ],
+        "second_was_leader": false,
+        "seconds": 10.82,
+        "client_operations": {
+          "read": false,
+          "write": false
+        }
+      },
+      {
+        "failure": "pair",
+        "nodes": [
+          2,
+          3
+        ],
+        "second_was_leader": false,
+        "seconds": 38.92,
+        "client_operations": {
+          "read": false,
+          "write": false
+        }
+      },
+      {
+        "failure": "pair",
+        "nodes": [
+          2,
+          3
+        ],
+        "second_was_leader": false,
+        "seconds": 87.26,
+        "client_operations": {
+          "read": false,
+          "write": false
+        }
+      },
+      {
+        "type": "read",
+        "name": "baseline.bin",
+        "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+        "s": 12.15
+      },
+      {
+        "type": "read",
+        "name": "after_one.bin",
+        "sha256": "12f1ecfc80d57d887561e27bed9ea1ab831be560b2fd27069097badf70772118",
+        "s": 0.11
+      },
+      {
+        "type": "write",
+        "name": "after_return.bin",
+        "sha256": "892f115b6e30e89059bb369198a7cbf79e249cd931dd277c626f1615eca7c824",
+        "s": 13.46
+      },
+      {
+        "completed": true
+      }
+    ],
+    "node_3_then_1": [
+      {
+        "setup": "PG 3/3",
+        "first_leader": 2
+      },
+      {
+        "setup": "S3 bucket + three SeaweedFS nodes"
+      },
+      {
+        "type": "write",
+        "name": "baseline.bin",
+        "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+        "s": 10.56
+      },
+      {
+        "type": "read",
+        "name": "baseline.bin",
+        "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+        "s": 0.11
+      },
+      {
+        "failure": "one",
+        "node": 3,
+        "prior_pg_leader": 2,
+        "seconds_to_dns": 0.19
+      },
+      {
+        "type": "read",
+        "name": "baseline.bin",
+        "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+        "s": 0.19
+      },
+      {
+        "type": "write",
+        "name": "after_one.bin",
+        "sha256": "12f1ecfc80d57d887561e27bed9ea1ab831be560b2fd27069097badf70772118",
+        "s": 8.23
+      },
+      {
+        "failure": "pair",
+        "nodes": [
+          3,
+          1
+        ],
+        "second_was_leader": false,
+        "seconds": 9.44,
+        "client_operations": {
+          "read": true,
+          "write": false
+        }
+      },
+      {
+        "failure": "pair",
+        "nodes": [
+          3,
+          1
+        ],
+        "second_was_leader": false,
+        "seconds": 36.22,
+        "client_operations": {
+          "read": true,
+          "write": false
+        }
+      },
+      {
+        "failure": "pair",
+        "nodes": [
+          3,
+          1
+        ],
+        "second_was_leader": false,
+        "seconds": 87.27,
+        "client_operations": {
+          "read": false,
+          "write": false
+        }
+      },
+      {
+        "type": "read",
+        "name": "baseline.bin",
+        "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+        "s": 0.25
+      },
+      {
+        "type": "read",
+        "name": "after_one.bin",
+        "sha256": "12f1ecfc80d57d887561e27bed9ea1ab831be560b2fd27069097badf70772118",
+        "s": 0.13
+      },
+      {
+        "type": "write",
+        "name": "after_return.bin",
+        "sha256": "892f115b6e30e89059bb369198a7cbf79e249cd931dd277c626f1615eca7c824",
+        "s": 29.59
+      },
+      {
+        "completed": true
+      }
+    ]
+  },
+  "file_probe_definition": "write = authenticated FTPS STOR, RETR and byte-for-byte comparison. A failed cycle does not prove that no partial write occurred. Each file is a deterministic 131072-byte sequence derived from its basename. In three-node runs seconds_to_dns, read.s, write.s are successive durations. The initial write duration includes startup and retries.",
+  "postgres_lose_pair": [
+    {
+      "setup": "3/3 online",
+      "pg": "16.16 (Debian 16.16-1.pgdg12+1)",
+      "patroni": "3.3.11",
+      "leader": 1
+    },
+    {
+      "preexisting_receipt_on_all": 100
+    },
+    {
+      "after_pair_restart": [
+        1,
+        2
+      ],
+      "mapped": {
+        "lva-pg-1bff5e2-pg1": "172.21.0.3",
+        "lva-pg-1bff5e2-pg2": "172.21.0.5",
+        "lva-pg-1bff5e2-pg3": "172.21.0.7",
+        "lva-pg-1bff5e2-ec1": "172.21.0.2",
+        "lva-pg-1bff5e2-ec2": "172.21.0.6",
+        "lva-pg-1bff5e2-ec3": "172.21.0.4"
+      }
+    },
+    {
+      "scenario": "lose_pair",
+      "stopped": [
+        1,
+        2
+      ],
+      "prior_leader": 1,
+      "samples": [
+        {
+          "offset_s": 5.1,
+          "ack": false
+        },
+        {
+          "offset_s": 25.1,
+          "ack": false
+        },
+        {
+          "offset_s": 53.1,
+          "ack": false
+        },
+        {
+          "offset_s": 90.1,
+          "ack": false
+        }
+      ],
+      "streaming_after": 2,
+      "all_acks_present": true,
+      "present_ids": "100,300",
+      "ack_ids": [
+        100,
+        300
+      ],
+      "restored_leader": 1
+    },
+    {
+      "after_pair_restart": [
+        1,
+        3
+      ],
+      "mapped": {
+        "lva-pg-1bff5e2-pg1": "172.21.0.2",
+        "lva-pg-1bff5e2-pg2": "172.21.0.5",
+        "lva-pg-1bff5e2-pg3": "172.21.0.7",
+        "lva-pg-1bff5e2-ec1": "172.21.0.4",
+        "lva-pg-1bff5e2-ec2": "172.21.0.6",
+        "lva-pg-1bff5e2-ec3": "172.21.0.3"
+      }
+    },
+    {
+      "scenario": "lose_pair",
+      "stopped": [
+        1,
+        3
+      ],
+      "prior_leader": 1,
+      "samples": [
+        {
+          "offset_s": 5.1,
+          "ack": false
+        },
+        {
+          "offset_s": 25.1,
+          "ack": false
+        },
+        {
+          "offset_s": 53.1,
+          "ack": false
+        },
+        {
+          "offset_s": 90.1,
+          "ack": false
+        }
+      ],
+      "streaming_after": 2,
+      "all_acks_present": true,
+      "present_ids": "100,300,301",
+      "ack_ids": [
+        100,
+        300,
+        301
+      ],
+      "restored_leader": 1
+    },
+    {
+      "after_pair_restart": [
+        2,
+        3
+      ],
+      "mapped": {
+        "lva-pg-1bff5e2-pg1": "172.21.0.2",
+        "lva-pg-1bff5e2-pg2": "172.21.0.3",
+        "lva-pg-1bff5e2-pg3": "172.21.0.5",
+        "lva-pg-1bff5e2-ec1": "172.21.0.4",
+        "lva-pg-1bff5e2-ec2": "172.21.0.6",
+        "lva-pg-1bff5e2-ec3": "172.21.0.7"
+      }
+    },
+    {
+      "scenario": "lose_pair",
+      "stopped": [
+        2,
+        3
+      ],
+      "prior_leader": 1,
+      "samples": [
+        {
+          "offset_s": 3.1,
+          "ack": true
+        },
+        {
+          "offset_s": 25.1,
+          "ack": true
+        },
+        {
+          "offset_s": 53.1,
+          "ack": false
+        },
+        {
+          "offset_s": 90.1,
+          "ack": false
+        }
+      ],
+      "streaming_after": 2,
+      "all_acks_present": true,
+      "present_ids": "100,300,301,302,420,421",
+      "ack_ids": [
+        100,
+        300,
+        301,
+        302,
+        420,
+        421
+      ],
+      "restored_leader": 1
+    },
+    {
+      "completed": true,
+      "confirmed_markers": 6
+    }
+  ],
+  "postgres_three_single_attempts": [
+    {
+      "setup": "3/3 online",
+      "pg": "16.16 (Debian 16.16-1.pgdg12+1)",
+      "patroni": "3.3.11",
+      "leader": 1
+    },
+    {
+      "preexisting_receipt_on_all": 100
+    },
+    {
+      "scenario": "lose_one",
+      "stopped": 1,
+      "prior_leader": 1,
+      "new_leader": 3,
+      "sql_write_s": 84.9,
+      "all_acks_present": true,
+      "present_ids": "100,101,201",
+      "ack_ids": [
+        100,
+        101,
+        201
+      ]
+    },
+    {
+      "scenario": "rejoin",
+      "node": 1,
+      "streaming": 2
+    },
+    {
+      "scenario": "lose_one",
+      "stopped": 2,
+      "prior_leader": 3,
+      "new_leader": 3,
+      "sql_write_s": 0.64,
+      "all_acks_present": true,
+      "present_ids": "100,101,102,201,202",
+      "ack_ids": [
+        100,
+        101,
+        102,
+        201,
+        202
+      ]
+    },
+    {
+      "scenario": "rejoin",
+      "node": 2,
+      "streaming": 2
+    },
+    {
+      "stopped": 3,
+      "outcome": "No confirmed SQL write via HAProxy in 155 s after an earlier stop/start with dynamic container addresses. Patroni identified a new leader."
+    }
+  ],
+  "postgres_primary_loss_before_ddl_propagation": {
+    "note": "With 2 streaming replicas, the client created the receipt table and acknowledged two immediate SQL markers (100,101). After stopping the primary immediately, SQL on the new primary reported relation audit_receipts does not exist. No first post-failover write to that table in 155 s. See separate controlled lag experiment for causal proof."
+  },
+  "postgres_intentional_replica_lag": {
+    "scope": {
+      "engine": "16.16 (Debian 16.16-1.pgdg12+1)",
+      "old_primary": 1,
+      "replicas": [
+        2,
+        3
+      ],
+      "topology": "3 PG/Patroni, 3 etcd, 1 HAProxy SQL endpoint via internal DNS/mTLS",
+      "recovery_rule": "original primary kept down during election and final SQL measurements",
+      "synchronous_standby_names": "",
+      "synchronous_commit": "on",
+      "replica_states": [
+        "pg2|streaming|async",
+        "pg3|streaming|async"
+      ],
+      "etcd": {
+        "https://ec2.audit.test:2379": true,
+        "https://ec1.audit.test:2379": true,
+        "https://ec3.audit.test:2379": true
+      }
+    },
+    "baseline": {
+      "primary_insert": "base_c85825757f419969\nINSERT 0 1",
+      "replica_and_primary_rows": {
+        "1": "base_c85825757f419969",
+        "2": "base_c85825757f419969",
+        "3": "base_c85825757f419969"
+      },
+      "primary_lsn": "0/402C1E0"
+    },
+    "confirmed_on_original_primary": {
+      "replication_connections": "0",
+      "transaction_reply": [
+        "ack_1dd51f434dd56c1e",
+        "INSERT 0 1"
+      ],
+      "new_session_select": "ack_1dd51f434dd56c1e",
+      "pg_is_in_recovery": "f",
+      "flush_lsn": "0/402C2A8",
+      "before_data_loss_raft_health": {
+        "https://ec2.audit.test:2379": true,
+        "https://ec1.audit.test:2379": true,
+        "https://ec3.audit.test:2379": true
+      }
+    },
+    "after_election": {
+      "new_primary": 3,
+      "patroni_role": "master",
+      "new_primary_pg_is_in_recovery": "f",
+      "new_primary_rows": "base_c85825757f419969",
+      "old_primary_running": false,
+      "count_acknowledged_marker": 0,
+      "replica_restart_to_observation_approx_s": 71.8,
+      "etcd": {
+        "https://ec1.audit.test:2379": true,
+        "https://ec3.audit.test:2379": true,
+        "https://ec2.audit.test:2379": true
+      },
+      "timeline": 2
+    },
+    "result": "RPO=0 disproved for this forced asynchronous lag/failover sequence; 1 of 2 committed test markers absent on elected primary"
+  },
+  "component_quorum_and_repair": {
+    "etcd_3": [
+      {
+        "run": "ftpaudit-qeae185e",
+        "test": "baseline",
+        "n": 3,
+        "replicas": [
+          "e1",
+          "e2",
+          "e3"
+        ],
+        "version": "3.5.17"
+      },
+      {
+        "run": "ftpaudit-qeae185e",
+        "test": "loss",
+        "n": 3,
+        "lost": [
+          "e1"
+        ],
+        "leader_lost": false,
+        "wrote": true,
+        "read": true,
+        "seconds_to_ack": 0.16
+      },
+      {
+        "run": "ftpaudit-qeae185e",
+        "test": "loss",
+        "n": 3,
+        "lost": [
+          "e2"
+        ],
+        "leader_lost": false,
+        "wrote": true,
+        "read": true,
+        "seconds_to_ack": 0.16
+      },
+      {
+        "run": "ftpaudit-qeae185e",
+        "test": "loss",
+        "n": 3,
+        "lost": [
+          "e3"
+        ],
+        "leader_lost": true,
+        "wrote": true,
+        "read": true,
+        "seconds_to_ack": 4.38
+      },
+      {
+        "run": "ftpaudit-qeae185e",
+        "test": "loss",
+        "n": 3,
+        "lost": [
+          "e1",
+          "e2"
+        ],
+        "leader_lost": true,
+        "wrote": false,
+        "linearizable_read": false,
+        "observed": 6.67
+      },
+      {
+        "run": "ftpaudit-qeae185e",
+        "test": "loss",
+        "n": 3,
+        "lost": [
+          "e1",
+          "e3"
+        ],
+        "leader_lost": true,
+        "wrote": false,
+        "linearizable_read": false,
+        "observed": 6.62
+      },
+      {
+        "run": "ftpaudit-qeae185e",
+        "test": "loss",
+        "n": 3,
+        "lost": [
+          "e2",
+          "e3"
+        ],
+        "leader_lost": true,
+        "wrote": false,
+        "linearizable_read": false,
+        "observed": 6.52
+      }
+    ],
+    "etcd_5": [
+      {
+        "run": "ftpaudit-qf8aa6bd",
+        "test": "baseline",
+        "n": 5,
+        "replicas": [
+          "e1",
+          "e2",
+          "e3",
+          "e4",
+          "e5"
+        ],
+        "version": "3.5.17"
+      },
+      {
+        "run": "ftpaudit-qf8aa6bd",
+        "test": "loss",
+        "n": 5,
+        "lost": [
+          "e1"
+        ],
+        "leader_lost": true,
+        "wrote": true,
+        "read": true,
+        "seconds_to_ack": 5.1
+      },
+      {
+        "run": "ftpaudit-qf8aa6bd",
+        "test": "loss",
+        "n": 5,
+        "lost": [
+          "e2"
+        ],
+        "leader_lost": false,
+        "wrote": true,
+        "read": true,
+        "seconds_to_ack": 0.8
+      },
+      {
+        "run": "ftpaudit-qf8aa6bd",
+        "test": "loss",
+        "n": 5,
+        "lost": [
+          "e3"
+        ],
+        "leader_lost": false,
+        "wrote": true,
+        "read": true,
+        "seconds_to_ack": 0.61
+      },
+      {
+        "run": "ftpaudit-qf8aa6bd",
+        "test": "loss",
+        "n": 5,
+        "lost": [
+          "e4"
+        ],
+        "leader_lost": true,
+        "wrote": true,
+        "read": true,
+        "seconds_to_ack": 5.29
+      },
+      {
+        "run": "ftpaudit-qf8aa6bd",
+        "test": "loss",
+        "n": 5,
+        "lost": [
+          "e5"
+        ],
+        "leader_lost": false,
+        "wrote": true,
+        "read": true,
+        "seconds_to_ack": 3.23
+      },
+      {
+        "run": "ftpaudit-qf8aa6bd",
+        "test": "loss",
+        "n": 5,
+        "lost": [
+          "e1",
+          "e2"
+        ],
+        "leader_lost": true,
+        "wrote": true,
+        "read": true,
+        "seconds_to_ack": 5.22
+      },
+      {
+        "run": "ftpaudit-qf8aa6bd",
+        "test": "loss",
+        "n": 5,
+        "lost": [
+          "e1",
+          "e3"
+        ],
+        "leader_lost": true,
+        "wrote": true,
+        "read": true,
+        "seconds_to_ack": 4.99
+      },
+      {
+        "run": "ftpaudit-qf8aa6bd",
+        "test": "loss",
+        "n": 5,
+        "lost": [
+          "e1",
+          "e4"
+        ],
+        "leader_lost": false,
+        "wrote": true,
+        "read": true,
+        "seconds_to_ack": 0.59
+      },
+      {
+        "run": "ftpaudit-qf8aa6bd",
+        "test": "loss",
+        "n": 5,
+        "lost": [
+          "e1",
+          "e5"
+        ],
+        "leader_lost": true,
+        "wrote": true,
+        "read": true,
+        "seconds_to_ack": 4.34
+      },
+      {
+        "run": "ftpaudit-qf8aa6bd",
+        "test": "loss",
+        "n": 5,
+        "lost": [
+          "e2",
+          "e3"
+        ],
+        "leader_lost": true,
+        "wrote": true,
+        "read": true,
+        "seconds_to_ack": 4.82
+      },
+      {
+        "run": "ftpaudit-qf8aa6bd",
+        "test": "loss",
+        "n": 5,
+        "lost": [
+          "e2",
+          "e4"
+        ],
+        "leader_lost": false,
+        "wrote": true,
+        "read": true,
+        "seconds_to_ack": 0.15
+      },
+      {
+        "run": "ftpaudit-qf8aa6bd",
+        "test": "loss",
+        "n": 5,
+        "lost": [
+          "e2",
+          "e5"
+        ],
+        "leader_lost": true,
+        "wrote": true,
+        "read": true,
+        "seconds_to_ack": 4.52
+      },
+      {
+        "run": "ftpaudit-qf8aa6bd",
+        "test": "loss",
+        "n": 5,
+        "lost": [
+          "e3",
+          "e4"
+        ],
+        "leader_lost": true,
+        "wrote": true,
+        "read": true,
+        "seconds_to_ack": 5.88
+      },
+      {
+        "run": "ftpaudit-qf8aa6bd",
+        "test": "loss",
+        "n": 5,
+        "lost": [
+          "e3",
+          "e5"
+        ],
+        "leader_lost": true,
+        "wrote": true,
+        "read": true,
+        "seconds_to_ack": 4.33
+      },
+      {
+        "run": "ftpaudit-qf8aa6bd",
+        "test": "loss",
+        "n": 5,
+        "lost": [
+          "e4",
+          "e5"
+        ],
+        "leader_lost": true,
+        "wrote": true,
+        "read": true,
+        "seconds_to_ack": 4.47
+      },
+      {
+        "run": "ftpaudit-qf8aa6bd",
+        "test": "converged",
+        "n": 5
+      }
+    ],
+    "etcd_learner": [
+      {
+        "run": "ftpaudit-q6b938b7",
+        "test": "add-learner",
+        "learner_health_rc": 1,
+        "learner_health_err": "etcd-endpoints://0x400001c000/e4:2379\",\"attempt\":35,\"error\":\"rpc error: code = Unavailable desc = etcdserver: rpc not supported for learner\"}\nhttps://e4:2379 is unhealthy: failed to commit proposal: context deadline exceeded\nError: unhealthy cluster\n",
+        "raw_decimal_promote_rc": 128,
+        "raw_decimal_promote_err": "Error: bad member ID arg (strconv.ParseUint: parsing \"15576677333292869415\": value out of range), expecting ID in Hex\n",
+        "hex_promote_ok": true,
+        "is_learner": false,
+        "confirmed_preexisting": true
+      }
+    ],
+    "swfs": [
+      {
+        "run": "ftpaudit-w69fb308",
+        "test": "baseline",
+        "n": 3,
+        "replication": "100",
+        "leader": "w1",
+        "sha256": "f9d1db34b19640d6dbf3932d9bbf1ec9206e7bd8bd5e5f18800db5d7188ce43a",
+        "fid": "4,012f841a01",
+        "checked": [
+          "w1",
+          "w2"
+        ]
+      },
+      {
+        "run": "ftpaudit-w69fb308",
+        "test": "loss",
+        "n": 3,
+        "lost": [
+          "w1"
+        ],
+        "leader_lost": true,
+        "active_leader": "w2",
+        "old_read_directly": {
+          "w2": true,
+          "w3": false
+        },
+        "acknowledged_and_verified": true,
+        "seconds_to_full_copies": 30.43,
+        "new_object": {
+          "fid": "3,0250632b16",
+          "checked": [
+            "w2",
+            "w3"
+          ]
+        }
+      },
+      {
+        "run": "ftpaudit-w69fb308",
+        "test": "returned",
+        "n": 3,
+        "original_copies": [
+          "w1",
+          "w2"
+        ],
+        "data_intact": true
+      },
+      {
+        "run": "ftpaudit-w69fb308",
+        "test": "loss",
+        "n": 3,
+        "lost": [
+          "w1",
+          "w2"
+        ],
+        "leader_lost": true,
+        "active_leader": "",
+        "old_read_directly": {
+          "w3": false
+        },
+        "acknowledged_and_verified": false,
+        "observed_s": 14.85
+      },
+      {
+        "run": "ftpaudit-w69fb308",
+        "test": "returned",
+        "n": 3,
+        "original_copies": [
+          "w1",
+          "w2"
+        ],
+        "data_intact": true
+      },
+      {
+        "run": "ftpaudit-w69fb308",
+        "test": "baseline",
+        "n": 5,
+        "replication": "200",
+        "leader": "w1",
+        "sha256": "21c804446ae7bd3cb59e8beac8167f06c952e89c4550a2e5ae053afa00a0a491",
+        "fid": "2,011cc3fe3a",
+        "checked": [
+          "w3",
+          "w5",
+          "w4"
+        ]
+      },
+      {
+        "run": "ftpaudit-w69fb308",
+        "test": "loss",
+        "n": 5,
+        "lost": [
+          "w3",
+          "w5"
+        ],
+        "leader_lost": false,
+        "active_leader": "w1",
+        "old_read_directly": {
+          "w1": true,
+          "w2": true,
+          "w4": true
+        },
+        "acknowledged_and_verified": true,
+        "seconds_to_full_copies": 0.89,
+        "new_object": {
+          "fid": "4,0200d1f11a",
+          "checked": [
+            "w2",
+            "w1",
+            "w4"
+          ]
+        }
+      },
+      {
+        "run": "ftpaudit-w69fb308",
+        "test": "returned",
+        "n": 5,
+        "original_copies": [
+          "w3",
+          "w5",
+          "w4"
+        ],
+        "data_intact": true
+      }
+    ],
+    "scheme": {
+      "etcd": "3.5.17, client + peer mTLS, internal Docker DNS, heartbeat 350 ms, election timeout 3500 ms; elapsed seconds from initial docker kill to first successful etcdctl put; one trial per combination, baseline and new probe verified with linearizable reads. Shared ephemeral test certificate, no CRL/WAN.",
+      "seaweedfs": "4.55. A master and a volume in each test process, one DC label per process. Checked content and master-listed locations through volume HTTP APIs. Docker DNS; these are component tests, with no filer/SFTPGo/production transport or public DNS in these measurements. A volume can proxy reads."
+    },
+    "swfs_new_volume": [
+      {
+        "test": "initial",
+        "run": "ftpaudit-r49c0d0d",
+        "fid": "1,01130721ab",
+        "locations": [
+          "a",
+          "b"
+        ],
+        "sha256": "22bda681067f5191d76bd5ac4dffd53d7aa3542bd5e9d7983bc321717c3cf634"
+      },
+      {
+        "test": "shell",
+        "run": "ftpaudit-r49c0d0d",
+        "input": "volume.fix.replication -apply\n",
+        "rc": 1,
+        "out": " error: need to run \"lock\" first to continue\n"
+      },
+      {
+        "test": "after_project_cmd",
+        "run": "ftpaudit-r49c0d0d",
+        "locations": [
+          "a"
+        ],
+        "cnew_data_files": [
+          "vol_dir.uuid"
+        ]
+      },
+      {
+        "test": "shell",
+        "run": "ftpaudit-r49c0d0d",
+        "input": "lock\nvolume.fix.replication -apply\nunlock\n",
+        "rc": 0,
+        "out": "volume 6 replication 100, but under replicated +1\nvolume 1 replication 100, but under replicated +1\nvolume 2 replication 100, but under replicated +1\nvolume 3 replication 100, but under replicated +1\nvolume 4 replication 100, but under replicated +1\nvolume 5 replication 100, but under replicated +1\nreplicating volume 5 100 from a:8080 to dataNode cnew:8080 ...\nreplicating volume 2 100 from a:8080 to dataNode cnew:8080 ...\nreplicating volume 6 100 from a:8080 to dataNode cnew:8080 ...\nreplicating volume 1 100 from a:8080 to dataNode cnew:8080 ...\nreplicating volume 3 100 from a:8080 to dataNode cnew:8080 ...\nreplicating volume 4 100 from a:8080 to dataNode cnew:8080 ...\n "
+      },
+      {
+        "test": "after_locked_cmd",
+        "run": "ftpaudit-r49c0d0d",
+        "locations": [
+          "a",
+          "cnew"
+        ],
+        "new_hash_ok": true
+      },
+      {
+        "test": "new_disk_read",
+        "run": "ftpaudit-r49c0d0d",
+        "original_sources_offline": true,
+        "sha256": "22bda681067f5191d76bd5ac4dffd53d7aa3542bd5e9d7983bc321717c3cf634"
+      }
+    ]
+  },
+  "component_all_pairs_and_partition": {
+    "etcd_network_partition": [
+      {
+        "run": "ftpaudit-qc82fa27",
+        "test": "baseline",
+        "n": 3,
+        "replicas": [
+          "e1",
+          "e2",
+          "e3"
+        ],
+        "version": "3.5.17"
+      },
+      {
+        "run": "ftpaudit-qc82fa27",
+        "test": "partition",
+        "disconnected_old_leader": "e2",
+        "majority": [
+          "e1",
+          "e3"
+        ],
+        "elected": "e1",
+        "majority_old_read": true,
+        "majority_new_read": true,
+        "majority_write_seconds": 7.46,
+        "minority_linear_old_rc": 1,
+        "minority_write_rc": 1,
+        "minority_local_serializable_old": "confirmed",
+        "minority_local_serializable_new": ""
+      },
+      {
+        "run": "ftpaudit-qc82fa27",
+        "test": "healed",
+        "all_three_fresh": true,
+        "minority_ambiguous_final_value": "",
+        "all_three_running": true
+      },
+      {
+        "run": "ftpaudit-qc82fa27",
+        "test": "converged",
+        "n": 3
+      }
+    ],
+    "swfs_all_pairs_one_cluster": [
+      {
+        "run": "ftpaudit-wd754677",
+        "test": "baseline",
+        "n": 5,
+        "replication": "200",
+        "leader": "w1",
+        "sha256": "74edc8be95541a9cc15fc1ed3e64beddb538869cf6c3e33288af4ccdf8802ecc",
+        "fid": "1,012b69aca6",
+        "checked": [
+          "w3",
+          "w4",
+          "w2"
+        ]
+      },
+      {
+        "run": "ftpaudit-wd754677",
+        "test": "loss",
+        "n": 5,
+        "lost": [
+          "w1",
+          "w2"
+        ],
+        "leader_lost": true,
+        "active_leader": "w3",
+        "old_read_on_http": {
+          "w3": true,
+          "w4": true,
+          "w5": false
+        },
+        "old_verified_physical": [
+          "w3",
+          "w4"
+        ],
+        "acknowledged_and_verified": true,
+        "seconds_to_full_copies": 29.54,
+        "new_object": {
+          "fid": "2,0214e2fd27",
+          "checked": [
+            "w5",
+            "w3",
+            "w4"
+          ]
+        }
+      },
+      {
+        "run": "ftpaudit-wd754677",
+        "test": "returned",
+        "n": 5,
+        "original_copies": [
+          "w3",
+          "w4",
+          "w2"
+        ],
+        "data_intact": true
+      },
+      {
+        "run": "ftpaudit-wd754677",
+        "test": "loss",
+        "n": 5,
+        "lost": [
+          "w1",
+          "w3"
+        ],
+        "leader_lost": true,
+        "active_leader": "w4",
+        "old_read_on_http": {
+          "w2": true,
+          "w4": true,
+          "w5": false
+        },
+        "old_verified_physical": [
+          "w2",
+          "w4"
+        ],
+        "acknowledged_and_verified": true,
+        "seconds_to_full_copies": 32.03,
+        "new_object": {
+          "fid": "4,03410f755b",
+          "checked": [
+            "w2",
+            "w5",
+            "w4"
+          ]
+        }
+      },
+      {
+        "run": "ftpaudit-wd754677",
+        "test": "returned",
+        "n": 5,
+        "original_copies": [
+          "w3",
+          "w4",
+          "w2"
+        ],
+        "data_intact": true
+      },
+      {
+        "run": "ftpaudit-wd754677",
+        "test": "loss",
+        "n": 5,
+        "lost": [
+          "w1",
+          "w4"
+        ],
+        "leader_lost": true,
+        "active_leader": "w5",
+        "old_read_on_http": {
+          "w2": true,
+          "w3": true,
+          "w5": false
+        },
+        "old_verified_physical": [
+          "w2",
+          "w3"
+        ],
+        "acknowledged_and_verified": true,
+        "seconds_to_full_copies": 27.46,
+        "new_object": {
+          "fid": "8,04ea24be96",
+          "checked": [
+            "w2",
+            "w3",
+            "w5"
+          ]
+        }
+      },
+      {
+        "run": "ftpaudit-wd754677",
+        "test": "returned",
+        "n": 5,
+        "original_copies": [
+          "w3",
+          "w4",
+          "w2"
+        ],
+        "data_intact": true
+      },
+      {
+        "run": "ftpaudit-wd754677",
+        "test": "loss",
+        "n": 5,
+        "lost": [
+          "w1",
+          "w5"
+        ],
+        "leader_lost": true,
+        "active_leader": "w2",
+        "old_read_on_http": {
+          "w2": true,
+          "w3": true,
+          "w4": true
+        },
+        "old_verified_physical": [
+          "w2",
+          "w3",
+          "w4"
+        ],
+        "acknowledged_and_verified": true,
+        "seconds_to_full_copies": 28.2,
+        "new_object": {
+          "fid": "1,053d26425a",
+          "checked": [
+            "w4",
+            "w2",
+            "w3"
+          ]
+        }
+      },
+      {
+        "run": "ftpaudit-wd754677",
+        "test": "returned",
+        "n": 5,
+        "original_copies": [
+          "w3",
+          "w4",
+          "w2"
+        ],
+        "data_intact": true
+      },
+      {
+        "run": "ftpaudit-wd754677",
+        "test": "loss",
+        "n": 5,
+        "lost": [
+          "w2",
+          "w3"
+        ],
+        "leader_lost": true,
+        "active_leader": "w1",
+        "old_read_on_http": {
+          "w1": false,
+          "w4": true,
+          "w5": false
+        },
+        "old_verified_physical": [
+          "w4"
+        ],
+        "acknowledged_and_verified": true,
+        "seconds_to_full_copies": 31.24,
+        "new_object": {
+          "fid": "3,06e0dc7793",
+          "checked": [
+            "w1",
+            "w5",
+            "w4"
+          ]
+        }
+      },
+      {
+        "run": "ftpaudit-wd754677",
+        "test": "returned",
+        "n": 5,
+        "original_copies": [
+          "w3",
+          "w4",
+          "w2"
+        ],
+        "data_intact": true
+      },
+      {
+        "run": "ftpaudit-wd754677",
+        "test": "loss",
+        "n": 5,
+        "lost": [
+          "w2",
+          "w4"
+        ],
+        "leader_lost": false,
+        "active_leader": "w1",
+        "old_read_on_http": {
+          "w1": true,
+          "w3": true,
+          "w5": true
+        },
+        "old_verified_physical": [
+          "w3"
+        ],
+        "acknowledged_and_verified": true,
+        "seconds_to_full_copies": 9.24,
+        "new_object": {
+          "fid": "10,0725879b06",
+          "checked": [
+            "w1",
+            "w5",
+            "w3"
+          ]
+        }
+      },
+      {
+        "run": "ftpaudit-wd754677",
+        "test": "returned",
+        "n": 5,
+        "original_copies": [
+          "w3",
+          "w4",
+          "w2"
+        ],
+        "data_intact": true
+      },
+      {
+        "run": "ftpaudit-wd754677",
+        "test": "loss",
+        "n": 5,
+        "lost": [
+          "w2",
+          "w5"
+        ],
+        "leader_lost": false,
+        "active_leader": "w1",
+        "old_read_on_http": {
+          "w1": true,
+          "w3": true,
+          "w4": true
+        },
+        "old_verified_physical": [
+          "w3",
+          "w4"
+        ],
+        "acknowledged_and_verified": true,
+        "seconds_to_full_copies": 6.58,
+        "new_object": {
+          "fid": "14,081af0fc5a",
+          "checked": [
+            "w1",
+            "w3",
+            "w4"
+          ]
+        }
+      },
+      {
+        "run": "ftpaudit-wd754677",
+        "test": "returned",
+        "n": 5,
+        "original_copies": [
+          "w3",
+          "w4",
+          "w2"
+        ],
+        "data_intact": true
+      },
+      {
+        "run": "ftpaudit-wd754677",
+        "test": "loss",
+        "n": 5,
+        "lost": [
+          "w3",
+          "w4"
+        ],
+        "leader_lost": false,
+        "active_leader": "w1",
+        "old_read_on_http": {
+          "w1": false,
+          "w2": true,
+          "w5": true
+        },
+        "old_verified_physical": [
+          "w2"
+        ],
+        "acknowledged_and_verified": true,
+        "seconds_to_full_copies": 13.35,
+        "new_object": {
+          "fid": "17,09d78bf131",
+          "checked": [
+            "w2",
+            "w5",
+            "w1"
+          ]
+        }
+      },
+      {
+        "run": "ftpaudit-wd754677",
+        "test": "returned",
+        "n": 5,
+        "original_copies": [
+          "w3",
+          "w4",
+          "w2"
+        ],
+        "data_intact": true
+      },
+      {
+        "run": "ftpaudit-wd754677",
+        "test": "loss",
+        "n": 5,
+        "lost": [
+          "w3",
+          "w5"
+        ],
+        "leader_lost": false,
+        "active_leader": "w1",
+        "old_read_on_http": {
+          "w1": false,
+          "w2": true,
+          "w4": true
+        },
+        "old_verified_physical": [
+          "w2",
+          "w4"
+        ],
+        "acknowledged_and_verified": true,
+        "seconds_to_full_copies": 2.27,
+        "new_object": {
+          "fid": "19,0ad7d1693b",
+          "checked": [
+            "w2",
+            "w1",
+            "w4"
+          ]
+        }
+      },
+      {
+        "run": "ftpaudit-wd754677",
+        "test": "returned",
+        "n": 5,
+        "original_copies": [
+          "w3",
+          "w4",
+          "w2"
+        ],
+        "data_intact": true
+      },
+      {
+        "run": "ftpaudit-wd754677",
+        "test": "loss",
+        "n": 5,
+        "lost": [
+          "w4",
+          "w5"
+        ],
+        "leader_lost": false,
+        "active_leader": "w1",
+        "old_read_on_http": {
+          "w1": true,
+          "w2": true,
+          "w3": true
+        },
+        "old_verified_physical": [
+          "w2",
+          "w3"
+        ],
+        "acknowledged_and_verified": true,
+        "seconds_to_full_copies": 8.08,
+        "new_object": {
+          "fid": "23,0bc77ecdb5",
+          "checked": [
+            "w1",
+            "w3",
+            "w2"
+          ]
+        }
+      },
+      {
+        "run": "ftpaudit-wd754677",
+        "test": "returned",
+        "n": 5,
+        "original_copies": [
+          "w3",
+          "w4",
+          "w2"
+        ],
+        "data_intact": true
+      }
+    ],
+    "swfs_repeat_four_pairs": [
+      {
+        "run": "ftpaudit-w8d31cf5",
+        "test": "baseline",
+        "n": 5,
+        "replication": "200",
+        "leader": "w1",
+        "sha256": "d1eb88d1e984ae6a15d8776d0d53ab28d9547ab81033912b3c2daca5dc6afcde",
+        "fid": "1,018c4c7e0d",
+        "checked": [
+          "w4",
+          "w1",
+          "w3"
+        ]
+      },
+      {
+        "run": "ftpaudit-w8d31cf5",
+        "test": "loss",
+        "n": 5,
+        "lost": [
+          "w2",
+          "w5"
+        ],
+        "leader_lost": false,
+        "active_leader": "w1",
+        "old_read_on_http": {
+          "w1": true,
+          "w3": true,
+          "w4": true
+        },
+        "old_verified_physical": [
+          "w1",
+          "w3",
+          "w4"
+        ],
+        "acknowledged_and_verified": true,
+        "seconds_to_full_copies": 2.48,
+        "new_object": {
+          "fid": "1,02e105a5fc",
+          "checked": [
+            "w4",
+            "w1",
+            "w3"
+          ]
+        }
+      },
+      {
+        "run": "ftpaudit-w8d31cf5",
+        "test": "returned",
+        "n": 5,
+        "original_copies": [
+          "w4",
+          "w1",
+          "w3"
+        ],
+        "data_intact": true
+      },
+      {
+        "run": "ftpaudit-w8d31cf5",
+        "test": "loss",
+        "n": 5,
+        "lost": [
+          "w3",
+          "w4"
+        ],
+        "leader_lost": false,
+        "active_leader": "w1",
+        "old_read_on_http": {
+          "w1": true,
+          "w2": true,
+          "w5": true
+        },
+        "old_verified_physical": [
+          "w1"
+        ],
+        "acknowledged_and_verified": true,
+        "seconds_to_full_copies": 2.01,
+        "new_object": {
+          "fid": "6,03208950cb",
+          "checked": [
+            "w5",
+            "w1",
+            "w2"
+          ]
+        }
+      },
+      {
+        "run": "ftpaudit-w8d31cf5",
+        "test": "returned",
+        "n": 5,
+        "original_copies": [
+          "w4",
+          "w1",
+          "w3"
+        ],
+        "data_intact": true
+      },
+      {
+        "run": "ftpaudit-w8d31cf5",
+        "test": "loss",
+        "n": 5,
+        "lost": [
+          "w3",
+          "w5"
+        ],
+        "leader_lost": false,
+        "active_leader": "w1",
+        "old_read_on_http": {
+          "w1": true,
+          "w2": true,
+          "w4": true
+        },
+        "old_verified_physical": [
+          "w1",
+          "w4"
+        ],
+        "acknowledged_and_verified": true,
+        "seconds_to_full_copies": 3.3,
+        "new_object": {
+          "fid": "7,04f101f793",
+          "checked": [
+            "w4",
+            "w2",
+            "w1"
+          ]
+        }
+      },
+      {
+        "run": "ftpaudit-w8d31cf5",
+        "test": "returned",
+        "n": 5,
+        "original_copies": [
+          "w4",
+          "w1",
+          "w3"
+        ],
+        "data_intact": true
+      },
+      {
+        "run": "ftpaudit-w8d31cf5",
+        "test": "loss",
+        "n": 5,
+        "lost": [
+          "w4",
+          "w5"
+        ],
+        "leader_lost": false,
+        "active_leader": "w1",
+        "old_read_on_http": {
+          "w1": true,
+          "w2": true,
+          "w3": true
+        },
+        "old_verified_physical": [
+          "w1",
+          "w3"
+        ],
+        "acknowledged_and_verified": true,
+        "seconds_to_full_copies": 1.98,
+        "new_object": {
+          "fid": "2,05ec63e30a",
+          "checked": [
+            "w1",
+            "w2",
+            "w3"
+          ]
+        }
+      },
+      {
+        "run": "ftpaudit-w8d31cf5",
+        "test": "returned",
+        "n": 5,
+        "original_copies": [
+          "w4",
+          "w1",
+          "w3"
+        ],
+        "data_intact": true
+      }
+    ],
+    "method": "One SeaweedFS 4.55 five-master/five-volume test cluster, one DC per host alias, placement 200. Every one of the ten pairs was killed, then both returned before next pair. File contents verified by HTTP GET and by direct fixed-string search of marker payload in the live volume .dat file for that fid. New writes verified by GET and physical bytes on three remaining DCs. Duration includes docker kill, leader polling, client/physical verification and retries. Repeated runs are separate."
+  },
+  "dns_edge_and_router": {
+    "test_date": "2026-11-28",
+    "router": {
+      "type": "HAProxy backend DNS address change",
+      "network": "Docker internal DNS TTL 2 s",
+      "backend": "TCP marker and HTTPS /primary test doubles",
+      "pg_or_patroni_instance": false,
+      "receipts": {
+        "before": {
+          "direct": "172.31.0.3 OLD 200",
+          "numeric": "OLD",
+          "fqdn": "OLD"
+        },
+        "old_routes": [
+          {
+            "s_after_record_change": 5.004,
+            "direct": "172.31.0.4 NEW 200",
+            "numeric": "unavailable",
+            "fqdn": "unavailable"
+          },
+          {
+            "s_after_record_change": 10.001,
+            "direct": "172.31.0.4 NEW 200",
+            "numeric": "unavailable",
+            "fqdn": "unavailable"
+          },
+          {
+            "s_after_record_change": 15.001,
+            "direct": "172.31.0.4 NEW 200",
+            "numeric": "unavailable",
+            "fqdn": "unavailable"
+          }
+        ],
+        "reload_unchanged": {
+          "direct": "172.31.0.4 NEW 200",
+          "numeric": "unavailable",
+          "fqdn": "NEW"
+        },
+        "numeric_config_updated_compose_up": {
+          "same_container": true,
+          "numeric": "unavailable"
+        },
+        "numeric_updated_then_reloaded": {
+          "numeric": "NEW"
+        }
+      },
+      "version": "3.0.31-f286fee",
+      "old_backend": "172.31.0.3",
+      "new_backend": "172.31.0.4",
+      "cleaned": true
+    },
+    "arbiter": {
+      "scope": "real shell functions called with health and SSH doubles, real localhost HTTP DNS hook; each tick in a fresh shell retaining state",
+      "runs": [
+        {
+          "first_http": 200,
+          "after_first": {
+            "events": 1,
+            "record": "127.0.0.4",
+            "active": "127.0.0.4",
+            "fail_count": 0,
+            "timestamp_present": true
+          },
+          "after_restarted_process_and_healthy_dns_api": {
+            "events": 1,
+            "record": "127.0.0.4",
+            "active": "127.0.0.4",
+            "fail_count": 0,
+            "timestamp_present": true
+          }
+        },
+        {
+          "first_http": 503,
+          "after_first": {
+            "events": 1,
+            "record": "127.0.0.3",
+            "active": "127.0.0.4",
+            "fail_count": 0,
+            "timestamp_present": true
+          },
+          "after_restarted_process_and_healthy_dns_api": {
+            "events": 1,
+            "record": "127.0.0.3",
+            "active": "127.0.0.4",
+            "fail_count": 0,
+            "timestamp_present": true
+          }
+        }
+      ]
+    },
+    "client_protocols": {
+      "service": "SFTPGo 2.7.6",
+      "state": "PostgreSQL 16 and shared local payload volume",
+      "zone": "files.vault.test, local authoritative DNS, TTL 2s",
+      "protocols": [
+        "SFTP pinned host key",
+        "Explicit FTPS PASV with protected data",
+        "HTTPS TLS 1.3 WebClient with login, CSRF and cookies"
+      ],
+      "bytes_per_file": 262144,
+      "sha256": "2312394bd99545d9de131c24efb781e765ac1aec243f2ed9347597a793a415e9",
+      "before_verified_uploads_and_downloads": 3,
+      "after_verified_uploads_and_downloads": 3,
+      "previous_files_read_on_replacement": 3,
+      "old_record_control_sftp_exit": 28,
+      "manual_record_change_s_after_kill": 9.12,
+      "first_verified_previous_file_s_after_kill": 11.411,
+      "preexisting_connections_tested": false,
+      "real_public_dns": false
+    },
+    "failback_gates": {
+      "type": "real gate logic with test-double Patroni payloads, SSH replies, edge checks and sleep recorder",
+      "cases": [
+        {
+          "case": "within_3600s",
+          "rc": 1,
+          "probe_count": 0,
+          "requested_sleeps_s": [],
+          "ssh_commands": []
+        },
+        {
+          "case": "all_ready",
+          "rc": 0,
+          "probe_count": 5,
+          "requested_sleeps_s": [
+            30,
+            30,
+            30,
+            30
+          ],
+          "ssh_commands": [
+            "check-gates",
+            "restart-sftpgo"
+          ]
+        },
+        {
+          "case": "replica_report_has_unequal_lsn",
+          "rc": 1,
+          "probe_count": 0,
+          "requested_sleeps_s": [],
+          "ssh_commands": []
+        },
+        {
+          "case": "replica_report_lacks_both_lsn_fields",
+          "rc": 0,
+          "probe_count": 5,
+          "requested_sleeps_s": [
+            30,
+            30,
+            30,
+            30
+          ],
+          "ssh_commands": [
+            "check-gates",
+            "restart-sftpgo"
+          ]
+        },
+        {
+          "case": "remote_marks_dirty",
+          "rc": 1,
+          "probe_count": 0,
+          "requested_sleeps_s": [],
+          "ssh_commands": [
+            "check-gates"
+          ]
+        },
+        {
+          "case": "fourth_probe_fails",
+          "rc": 1,
+          "probe_count": 4,
+          "requested_sleeps_s": [
+            30,
+            30,
+            30
+          ],
+          "ssh_commands": [
+            "check-gates",
+            "restart-sftpgo"
+          ]
+        }
+      ]
+    },
+    "isolated_ftps_outage": {
+      "service": "SFTPGo 2.7.6 portable, real HTTPS and authenticated SFTP, FTPS listener off",
+      "real_https_login_http": 200,
+      "sftp_fixture_host_key_verified": false,
+      "real_sftp_read": true,
+      "explicit_ftps_client_exit": 7,
+      "consecutive_cycles": 3,
+      "failure_counter": 0,
+      "active_unchanged": true,
+      "lease_requests": 3,
+      "failover_commands": 0,
+      "spacing": "independent of whether 15s elapsed; harness invokes the three cycles immediately",
+      "ssh": "recording substitute"
+    }
+  },
+  "management_panel": {
+    "setup": "actual web/panel.py, one management service, lab CA, Docker internal FQDN, separate from client endpoint; unauthenticated health",
+    "initial_api_healthy": true,
+    "after_kill_curl_exit": 6,
+    "after_restart_api_healthy": true
+  },
+  "unreachable_node_health": {
+    "method": "Actual check_node_health body, SSH adapter returned exit 255 and no stdout for one node",
+    "ssh_returncode": 255,
+    "reported_node": {
+      "node": "absent",
+      "ip": "192.0.2.9",
+      "dc": "dc1",
+      "ntp_offset": "",
+      "disk_root": "",
+      "patroni_role": "",
+      "swfs_volume": "",
+      "swfs_filer": "",
+      "haproxy": "",
+      "sftpgo": ""
+    },
+    "incremented_errors": 0,
+    "incremented_warnings": 0
+  },
+  "interrupted_node_add": {
+    "method": "Actual cmd_add with SQLite persistence adapter, remote calls stubbed, deterministic abort on first firewall update",
+    "node": "n4, 192.0.2.4",
+    "attempts": [
+      {
+        "attempt": 1,
+        "exit": 73,
+        "node_entries": 1,
+        "voter_entries": 1
+      },
+      {
+        "attempt": 2,
+        "exit": 73,
+        "node_entries": 2,
+        "voter_entries": 2
+      }
+    ]
+  },
+  "external_s3_and_audit": {
+    "laboratory": {
+      "dns": "isolated Docker DNS",
+      "client_protocol": "SFTP",
+      "external_backend": "SeaweedFS 4.55 HTTPS/SigV4 with CA verification",
+      "internal_backend": "separate SeaweedFS S3 via local gateway",
+      "database": "PostgreSQL 16",
+      "audit_driver": "Docker json-file, max-size 50m, max-file 3"
+    },
+    "two_client_isolation": {
+      "client_b_list": [
+        ".",
+        "folderb"
+      ],
+      "get_client_a_path_rc": 78,
+      "get_same_filename_in_own_prefix_rc": 79,
+      "client_b_own_put_get_sha256": "4a492ae2ae9df1f9f62877441fe3564da0264173a2bf37c5b78bc0575ec613a4",
+      "client_b_own_prefix_verified": true,
+      "source_read_sha256": "4a492ae2ae9df1f9f62877441fe3564da0264173a2bf37c5b78bc0575ec613a4"
+    },
+    "interrupted_16mib_sftp_upload": {
+      "payload_bytes": 16777216,
+      "timeout_seconds": 2,
+      "throttle_bytes_per_second": 786432,
+      "client_returncode": 28,
+      "reported_upload_bytes_before_abort": "1572864",
+      "pre_retry_s3_http": "200",
+      "pre_retry_object_bytes": 1572864,
+      "successful_retry_sftp_returncode": 0,
+      "successful_retry_reported_size": "16777216",
+      "successful_retry_external_read_bytes": 16777216,
+      "expected_sha256": "63272b3a5200c85bbcdccce5d5a12d6247aca3c205bb88e08f6de2088ed1b701",
+      "external_object_sha256": "63272b3a5200c85bbcdccce5d5a12d6247aca3c205bb88e08f6de2088ed1b701"
+    },
+    "provider_outage": {
+      "external_sftp_get_rc": 79,
+      "external_running": "false",
+      "local_work_sftp_upload_rc": 0,
+      "local_work_checked_bytes": 65536,
+      "local_work_sha256": "4a492ae2ae9df1f9f62877441fe3564da0264173a2bf37c5b78bc0575ec613a4",
+      "local_s3_direct_sha256_confirmed": true
+    },
+    "file_event_durability": {
+      "filename": "audit-id-e48476720861620cb7b1d0c8.bin",
+      "recorded_local_transfers": [
+        {
+          "time": "2026-11-28T08:43:29.923",
+          "sender": "Upload",
+          "username": "clienta",
+          "protocol": "SFTP",
+          "connection_id": "SFTP_a57b7faca43d3ea313dc78dda709c8a3acadf92571bde067f3441d75c325df8c_1",
+          "size_bytes": 65536,
+          "file_path": "tenant-a/audit-id-e48476720861620cb7b1d0c8.bin"
+        },
+        {
+          "time": "2026-11-28T08:43:30.012",
+          "sender": "Download",
+          "username": "clienta",
+          "protocol": "SFTP",
+          "connection_id": "SFTP_efed1e14581a8ca6d18043eb88bb4e120864c0b98c1165e819dbbc3348d5e4bc_1",
+          "size_bytes": 65536,
+          "file_path": "tenant-a/audit-id-e48476720861620cb7b1d0c8.bin"
+        },
+        {
+          "time": "2026-11-28T08:43:30.372",
+          "sender": "Download",
+          "username": "clientb",
+          "protocol": "SFTP",
+          "connection_id": "SFTP_8716d77db6e62ac7d225d5d0e2b5aeb37b3a5af70c55cfb3ff084cb3b2b56a62_1",
+          "size_bytes": 0,
+          "file_path": "tenant-b/audit-id-e48476720861620cb7b1d0c8.bin"
+        },
+        {
+          "time": "2026-11-28T08:43:40.333",
+          "sender": "Download",
+          "username": "clienta",
+          "protocol": "SFTP",
+          "connection_id": "SFTP_43423f01854a37e7818d71eabf87c0802df439b9180d9d50bfb0d173d9c9192b_1",
+          "size_bytes": 0,
+          "file_path": "tenant-a/audit-id-e48476720861620cb7b1d0c8.bin"
+        }
+      ],
+      "public_tables_count": 23,
+      "public_table_names": [
+        "active_transfers",
+        "admins",
+        "admins_groups_mapping",
+        "api_keys",
+        "configurations",
+        "defender_events",
+        "defender_hosts",
+        "events_actions",
+        "events_rules",
+        "folders",
+        "groups",
+        "groups_folders_mapping",
+        "ip_lists",
+        "nodes",
+        "roles",
+        "rules_actions_mapping",
+        "schema_version",
+        "shared_sessions",
+        "shares",
+        "tasks",
+        "users",
+        "users_folders_mapping",
+        "users_groups_mapping"
+      ],
+      "confirmed_postgres_users": [
+        "clienta",
+        "clientb",
+        "localclient"
+      ],
+      "before_node_delete_pg_dump_bytes": 12985,
+      "unique_filename_in_pg_dump_before": false,
+      "matched_connection_ids_before": 0,
+      "docker_logs_after_rm_exit": 1,
+      "docker_logs_after_rm_no_such_container": true,
+      "after_node_delete_pg_dump_bytes": 12985,
+      "unique_filename_in_pg_dump_after": false,
+      "matched_connection_ids_after": 0
+    },
+    "status": "complete"
+  },
+  "sftpgo_journal": {
+    "laboratory": {
+      "dns": "isolated Docker DNS",
+      "client_protocol": "SFTP",
+      "external_backend": "SeaweedFS 4.55 HTTPS/SigV4 with CA verification",
+      "internal_backend": "separate SeaweedFS S3 via local gateway",
+      "database": "PostgreSQL 16",
+      "audit_driver": "Docker json-file, max-size 50m, max-file 3"
+    },
+    "observed": {
+      "tracked": "optrace-53ee39ae69",
+      "bad_login_client_rc": 67,
+      "small_put_rc": 0,
+      "small_get_rc": 0,
+      "rename_rc": 0,
+      "delete_rc": 0,
+      "deleted_key_http": "404",
+      "interrupted_sftp_rc": 28,
+      "intended_upload_bytes": 16777216,
+      "interrupted_client_bytes": 1572864,
+      "aborted_actual_object_bytes": 1572864,
+      "sender_counts": {
+        "connection_failed": 2,
+        "login": 5,
+        "S3Fs bucket \"external\"": 3,
+        "SFTP": 2,
+        "Upload": 2,
+        "Download": 1,
+        "Rename": 1,
+        "Remove": 1
+      },
+      "selected_log_rows": [
+        {
+          "level": "debug",
+          "time": "2026-11-28T08:55:33.506",
+          "sender": "connection_failed",
+          "client_ip": "172.21.0.2",
+          "username": "clienta",
+          "login_type": "password",
+          "protocol": "SSH",
+          "error": "invalid credentials",
+          "message": ""
+        },
+        {
+          "level": "debug",
+          "time": "2026-11-28T08:55:33.570",
+          "sender": "connection_failed",
+          "client_ip": "172.21.0.2",
+          "username": "clienta",
+          "login_type": "keyboard-interactive",
+          "protocol": "SSH",
+          "error": "invalid credentials",
+          "message": ""
+        },
+        {
+          "level": "info",
+          "time": "2026-11-28T08:55:33.673",
+          "sender": "login",
+          "ip": "172.21.0.2",
+          "username": "clienta",
+          "method": "password",
+          "protocol": "SSH",
+          "connection_id": "8a2fda02ed977f3a1623db097138fef793fb3fbd8ca71a9fddaefbf2ec1954b5",
+          "client": "SSH-2.0-libssh2_1.11.1",
+          "encrypted": true,
+          "info": "negotiated algorithms: {KeyExchange:curve25519-sha256 HostKey:ssh-ed25519 Read:{Cipher:chacha20-poly1305@openssh.com MAC: compression:none} Write:{Cipher:chacha20-poly1305@openssh.com MAC: compression:none}}",
+          "message": ""
+        },
+        {
+          "level": "debug",
+          "time": "2026-11-28T08:55:33.905",
+          "sender": "S3Fs bucket \"external\"",
+          "connection_id": "SFTP_8a2fda02ed977f3a1623db097138fef793fb3fbd8ca71a9fddaefbf2ec1954b5_1",
+          "message": "upload completed, path: \"tenant-a/optrace-53ee39ae69-before.bin\", acl: \"\", readed bytes: 65536, err: <nil>"
+        },
+        {
+          "level": "debug",
+          "time": "2026-11-28T08:55:33.906",
+          "sender": "SFTP",
+          "connection_id": "SFTP_8a2fda02ed977f3a1623db097138fef793fb3fbd8ca71a9fddaefbf2ec1954b5_1",
+          "message": "upload file size 65536, num files 1, deleted files 0, fs path \"tenant-a/optrace-53ee39ae69-before.bin\""
+        },
+        {
+          "level": "info",
+          "time": "2026-11-28T08:55:33.907",
+          "sender": "Upload",
+          "local_addr": "172.21.0.4:2022",
+          "remote_addr": "172.21.0.2:59156",
+          "elapsed_ms": 209,
+          "size_bytes": 65536,
+          "username": "clienta",
+          "file_path": "tenant-a/optrace-53ee39ae69-before.bin",
+          "virtual_path": "/foldera/optrace-53ee39ae69-before.bin",
+          "connection_id": "SFTP_8a2fda02ed977f3a1623db097138fef793fb3fbd8ca71a9fddaefbf2ec1954b5_1",
+          "protocol": "SFTP",
+          "message": ""
+        },
+        {
+          "level": "info",
+          "time": "2026-11-28T08:55:33.949",
+          "sender": "login",
+          "ip": "172.21.0.2",
+          "username": "clienta",
+          "method": "password",
+          "protocol": "SSH",
+          "connection_id": "8b091dfa1d75dee5e966684f7cc92a9b49d0d75ebe0366f5f2d787902aa7682f",
+          "client": "SSH-2.0-libssh2_1.11.1",
+          "encrypted": true,
+          "info": "negotiated algorithms: {KeyExchange:curve25519-sha256 HostKey:ssh-ed25519 Read:{Cipher:chacha20-poly1305@openssh.com MAC: compression:none} Write:{Cipher:chacha20-poly1305@openssh.com MAC: compression:none}}",
+          "message": ""
+        },
+        {
+          "level": "debug",
+          "time": "2026-11-28T08:55:33.956",
+          "sender": "S3Fs bucket \"external\"",
+          "connection_id": "SFTP_8b091dfa1d75dee5e966684f7cc92a9b49d0d75ebe0366f5f2d787902aa7682f_1",
+          "message": "download completed, path: \"tenant-a/optrace-53ee39ae69-before.bin\" size: 65536, err: <nil>"
+        },
+        {
+          "level": "info",
+          "time": "2026-11-28T08:55:33.956",
+          "sender": "Download",
+          "local_addr": "172.21.0.4:2022",
+          "remote_addr": "172.21.0.2:59160",
+          "elapsed_ms": 5,
+          "size_bytes": 65536,
+          "username": "clienta",
+          "file_path": "tenant-a/optrace-53ee39ae69-before.bin",
+          "virtual_path": "/foldera/optrace-53ee39ae69-before.bin",
+          "connection_id": "SFTP_8b091dfa1d75dee5e966684f7cc92a9b49d0d75ebe0366f5f2d787902aa7682f_1",
+          "protocol": "SFTP",
+          "message": ""
+        },
+        {
+          "level": "info",
+          "time": "2026-11-28T08:55:34.010",
+          "sender": "login",
+          "ip": "172.21.0.2",
+          "username": "clienta",
+          "method": "password",
+          "protocol": "SSH",
+          "connection_id": "10c43c562c73cbca8bb789e0acf8f0c23a5adba07f199fdac7773146f63a417e",
+          "client": "SSH-2.0-libssh2_1.11.1",
+          "encrypted": true,
+          "info": "negotiated algorithms: {KeyExchange:curve25519-sha256 HostKey:ssh-ed25519 Read:{Cipher:chacha20-poly1305@openssh.com MAC: compression:none} Write:{Cipher:chacha20-poly1305@openssh.com MAC: compression:none}}",
+          "message": ""
+        },
+        {
+          "level": "info",
+          "time": "2026-11-28T08:55:34.021",
+          "sender": "Rename",
+          "local_addr": "172.21.0.4:2022",
+          "remote_addr": "172.21.0.2:59164",
+          "username": "clienta",
+          "file_path": "tenant-a/optrace-53ee39ae69-before.bin",
+          "target_path": "tenant-a/optrace-53ee39ae69-after.bin",
+          "virtual_path": "/foldera/optrace-53ee39ae69-before.bin",
+          "virtual_target_path": "/foldera/optrace-53ee39ae69-after.bin",
+          "filemode": "",
+          "uid": -1,
+          "gid": -1,
+          "access_time": "",
+          "modification_time": "",
+          "size": -1,
+          "elapsed": 10,
+          "ssh_command": "",
+          "connection_id": "SFTP_10c43c562c73cbca8bb789e0acf8f0c23a5adba07f199fdac7773146f63a417e_1",
+          "protocol": "SFTP",
+          "message": ""
+        },
+        {
+          "level": "info",
+          "time": "2026-11-28T08:55:34.116",
+          "sender": "login",
+          "ip": "172.21.0.2",
+          "username": "clienta",
+          "method": "password",
+          "protocol": "SSH",
+          "connection_id": "d7189fb95d1022c4ddc97bd63058f88342f0d57e9947e711bd603ad2c6b50f53",
+          "client": "SSH-2.0-libssh2_1.11.1",
+          "encrypted": true,
+          "info": "negotiated algorithms: {KeyExchange:curve25519-sha256 HostKey:ssh-ed25519 Read:{Cipher:chacha20-poly1305@openssh.com MAC: compression:none} Write:{Cipher:chacha20-poly1305@openssh.com MAC: compression:none}}",
+          "message": ""
+        },
+        {
+          "level": "info",
+          "time": "2026-11-28T08:55:34.121",
+          "sender": "Remove",
+          "local_addr": "172.21.0.4:2022",
+          "remote_addr": "172.21.0.2:59170",
+          "username": "clienta",
+          "file_path": "tenant-a/optrace-53ee39ae69-after.bin",
+          "target_path": "",
+          "virtual_path": "/foldera/optrace-53ee39ae69-after.bin",
+          "virtual_target_path": "",
+          "filemode": "",
+          "uid": -1,
+          "gid": -1,
+          "access_time": "",
+          "modification_time": "",
+          "size": -1,
+          "elapsed": 0,
+          "ssh_command": "",
+          "connection_id": "SFTP_d7189fb95d1022c4ddc97bd63058f88342f0d57e9947e711bd603ad2c6b50f53_1",
+          "protocol": "SFTP",
+          "message": ""
+        },
+        {
+          "level": "info",
+          "time": "2026-11-28T08:55:34.227",
+          "sender": "login",
+          "ip": "172.21.0.2",
+          "username": "clienta",
+          "method": "password",
+          "protocol": "SSH",
+          "connection_id": "99eec806289a39fa90bccdb530748f0cf1fbba3460e2bf03185a5f7b8ca72a6f",
+          "client": "SSH-2.0-libssh2_1.11.1",
+          "encrypted": true,
+          "info": "negotiated algorithms: {KeyExchange:curve25519-sha256 HostKey:ssh-ed25519 Read:{Cipher:chacha20-poly1305@openssh.com MAC: compression:none} Write:{Cipher:chacha20-poly1305@openssh.com MAC: compression:none}}",
+          "message": ""
+        },
+        {
+          "level": "debug",
+          "time": "2026-11-28T08:55:36.250",
+          "sender": "S3Fs bucket \"external\"",
+          "connection_id": "SFTP_99eec806289a39fa90bccdb530748f0cf1fbba3460e2bf03185a5f7b8ca72a6f_1",
+          "message": "upload completed, path: \"tenant-a/optrace-53ee39ae69-part.bin\", acl: \"\", readed bytes: 1572864, err: <nil>"
+        },
+        {
+          "level": "debug",
+          "time": "2026-11-28T08:55:36.251",
+          "sender": "SFTP",
+          "connection_id": "SFTP_99eec806289a39fa90bccdb530748f0cf1fbba3460e2bf03185a5f7b8ca72a6f_1",
+          "message": "upload file size 1572864, num files 1, deleted files 0, fs path \"tenant-a/optrace-53ee39ae69-part.bin\""
+        },
+        {
+          "level": "info",
+          "time": "2026-11-28T08:55:36.252",
+          "sender": "Upload",
+          "local_addr": "172.21.0.4:2022",
+          "remote_addr": "172.21.0.2:59172",
+          "elapsed_ms": 2018,
+          "size_bytes": 1572864,
+          "username": "clienta",
+          "file_path": "tenant-a/optrace-53ee39ae69-part.bin",
+          "virtual_path": "/foldera/optrace-53ee39ae69-part.bin",
+          "connection_id": "SFTP_99eec806289a39fa90bccdb530748f0cf1fbba3460e2bf03185a5f7b8ca72a6f_1",
+          "protocol": "SFTP",
+          "message": ""
+        }
+      ]
+    },
+    "status": "complete"
+  },
+  "backup_layers": {
+    "sftp_ftps_https_user_api_put_get_verified_bytes": 65536,
+    "pgbackrest_full_incr_wal_restore_to_time": {
+      "before": [
+        "A",
+        "B"
+      ],
+      "after_target": "C",
+      "restored_rows": [
+        "A",
+        "B"
+      ]
+    },
+    "continuous_filer_backup": {
+      "size": 1048576,
+      "external_object_matches": true
+    },
+    "empty_volume_dr": {
+      "fs_meta_load": "2 directories, 1 files",
+      "client_http_read_status": 500,
+      "client_reason": "volume 1 not found",
+      "external_copy_present": true
+    },
+    "metadata_backup_producer": {
+      "exit": 1,
+      "error": "KeyError: 'ENC_KEY'",
+      "failure_before_upload": true
+    }
+  },
+  "ci": {
+    "passed_jobs": 3,
+    "url": "https://github.com/aligorov/ligament-vault/actions/runs/45993093598"
+  },
+  "five_node_ftps": {
+    "method": "Five logical failure domains on a single local Docker Desktop host and isolated DNS networks. Each failure killed etcd, Patroni/PostgreSQL, SeaweedFS (master, volume, filer, S3), and SFTPGo on two nodes together. Single dedicated HAProxy and client stayed online. Primary data access was FTPS, TLS hostname verification, protected data channel, fresh sessions, 128 KiB deterministic test payload verified with SHA-256. Test controller moved files.audit.test alias to a surviving endpoint and verified its DNS result. The real DNS provider, arbiter, external S3 and WAN were outside this experiment. PG and etcd TLS enabled; SeaweedFS internal traffic used isolated HTTP, same-node local S3. SFTPGo default admin auto-creation disabled, lab test user provisioned in shared PG using a test fixture. The total time includes DNS change and retry until concurrent old-file RETR plus new STOR/RETR + SHA. Successful retries may overwrite same test key; version counts unmeasured. Templates adapted for test ports, a Docker subnet, disposable certificates and credentials, SeaweedFS replication 200, master electionTimeout 10s, 80 thin 20MB volumes per node, file payloads out of Filer metadata, archiving off.",
+    "summary": {
+      "valid_ftps": 10,
+      "combinations": 10,
+      "rejoined": 10,
+      "final_acked_keys": 11,
+      "pass_min_s": 0.98,
+      "pass_max_s": 88.07,
+      "gt60": 4,
+      "old_pg_leader_terminated": 4,
+      "min_manual_dns_s": 0.4,
+      "max_manual_dns_s": 1.05
+    },
+    "evidence": [
+      {
+        "setup": "PG 5/5",
+        "first_leader": 1
+      },
+      {
+        "setup": "S3 bucket + five SeaweedFS nodes"
+      },
+      {
+        "baseline": "baseline.bin",
+        "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+        "db_streaming": 4,
+        "dcs": 5,
+        "stable_fqdn": "files.audit.test",
+        "cluster": "lva-full5-11b72d8"
+      },
+      {
+        "event": "loss",
+        "lost": [
+          1,
+          2
+        ],
+        "old_pg_leader": 1,
+        "old_swfs_leader": "sw1.audit.test:9333.19333",
+        "pre_read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 0.11
+        },
+        "manual_dns_to_edge": 3,
+        "dns_s": 0.41,
+        "combined_s": 84.93,
+        "new_pg_leader": 3,
+        "read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 84.26
+        },
+        "write_and_read": {
+          "ok": true,
+          "sha256": "4887e9dd1d4c7a308b80b8befbca17cb3bd0a3c968e2e3dcf708e8bc8ea10bcf",
+          "seconds": 84.52
+        }
+      },
+      {
+        "event": "healed",
+        "pair": [
+          1,
+          2
+        ],
+        "all_acked_read_by_ftps": true,
+        "receipts": 2,
+        "failed_receipts": [],
+        "db_streaming": 4,
+        "dcs": 5,
+        "verify_seconds": 0.24
+      },
+      {
+        "event": "loss",
+        "lost": [
+          1,
+          3
+        ],
+        "old_pg_leader": 3,
+        "old_swfs_leader": "sw4.audit.test:9333.19333",
+        "pre_read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 0.19
+        },
+        "manual_dns_to_edge": 2,
+        "dns_s": 1.05,
+        "combined_s": 88.07,
+        "new_pg_leader": 4,
+        "read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 86.95
+        },
+        "write_and_read": {
+          "ok": true,
+          "sha256": "e53dcb2d01793debcd0911c3123cca386a20fb8312106f6b2e2a848516d32b13",
+          "seconds": 87.01
+        }
+      },
+      {
+        "event": "healed",
+        "pair": [
+          1,
+          3
+        ],
+        "all_acked_read_by_ftps": true,
+        "receipts": 3,
+        "failed_receipts": [],
+        "db_streaming": 4,
+        "dcs": 5,
+        "verify_seconds": 0.23
+      },
+      {
+        "event": "loss",
+        "lost": [
+          1,
+          4
+        ],
+        "old_pg_leader": 4,
+        "old_swfs_leader": "sw5.audit.test:9333.19333",
+        "pre_read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 0.17
+        },
+        "manual_dns_to_edge": 2,
+        "dns_s": 0.51,
+        "combined_s": 68.16,
+        "new_pg_leader": 2,
+        "read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 67.66
+        },
+        "write_and_read": {
+          "ok": true,
+          "sha256": "503d4aaa41b61d8e630abaa5ff7ce7591aa927247c07766989df2344614a570e",
+          "seconds": 66.9
+        }
+      },
+      {
+        "event": "healed",
+        "pair": [
+          1,
+          4
+        ],
+        "all_acked_read_by_ftps": true,
+        "receipts": 4,
+        "failed_receipts": [],
+        "db_streaming": 4,
+        "dcs": 5,
+        "verify_seconds": 0.21
+      },
+      {
+        "event": "loss",
+        "lost": [
+          1,
+          5
+        ],
+        "old_pg_leader": 2,
+        "old_swfs_leader": "sw5.audit.test:9333.19333",
+        "pre_read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 0.16
+        },
+        "manual_dns_to_edge": 2,
+        "dns_s": 0.57,
+        "combined_s": 26.82,
+        "new_pg_leader": 2,
+        "read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 0.16
+        },
+        "write_and_read": {
+          "ok": true,
+          "sha256": "918e92fcccccf265b713b450e5832bbee9e4717f7cb9ee57bdf6f2c9c2cd02e1",
+          "seconds": 26.24
+        }
+      },
+      {
+        "event": "healed",
+        "pair": [
+          1,
+          5
+        ],
+        "all_acked_read_by_ftps": true,
+        "receipts": 5,
+        "failed_receipts": [],
+        "db_streaming": 4,
+        "dcs": 5,
+        "verify_seconds": 0.34
+      },
+      {
+        "event": "loss",
+        "lost": [
+          2,
+          3
+        ],
+        "old_pg_leader": 2,
+        "old_swfs_leader": "sw2.audit.test:9333.19333",
+        "pre_read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 0.11
+        },
+        "manual_dns_to_edge": 1,
+        "dns_s": 0.57,
+        "combined_s": 84.27,
+        "new_pg_leader": 1,
+        "read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 83.63
+        },
+        "write_and_read": {
+          "ok": true,
+          "sha256": "a103f489726240e1a4335f66eddf0ea810571c0a8e9035cb6f709632533157aa",
+          "seconds": 83.7
+        }
+      },
+      {
+        "event": "healed",
+        "pair": [
+          2,
+          3
+        ],
+        "all_acked_read_by_ftps": true,
+        "receipts": 6,
+        "failed_receipts": [],
+        "db_streaming": 4,
+        "dcs": 5,
+        "verify_seconds": 0.28
+      },
+      {
+        "event": "loss",
+        "lost": [
+          2,
+          4
+        ],
+        "old_pg_leader": 1,
+        "old_swfs_leader": "sw4.audit.test:9333.19333",
+        "pre_read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 0.17
+        },
+        "manual_dns_to_edge": 1,
+        "dns_s": 0.4,
+        "combined_s": 36.71,
+        "new_pg_leader": 1,
+        "read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 0.12
+        },
+        "write_and_read": {
+          "ok": true,
+          "sha256": "588a0c612f3ea62ac70115a9a3adb542dabc159f96aed01ece4f6611b910e927",
+          "seconds": 36.31
+        }
+      },
+      {
+        "event": "healed",
+        "pair": [
+          2,
+          4
+        ],
+        "all_acked_read_by_ftps": true,
+        "receipts": 7,
+        "failed_receipts": [],
+        "db_streaming": 4,
+        "dcs": 5,
+        "verify_seconds": 0.38
+      },
+      {
+        "event": "loss",
+        "lost": [
+          2,
+          5
+        ],
+        "old_pg_leader": 1,
+        "old_swfs_leader": null,
+        "pre_read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 0.17
+        },
+        "manual_dns_to_edge": 1,
+        "dns_s": 0.47,
+        "combined_s": 27.03,
+        "new_pg_leader": 1,
+        "read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 0.12
+        },
+        "write_and_read": {
+          "ok": true,
+          "sha256": "8f1cb1addcf3d531e1fc6052b2316da1efbe4cad5bc4c6a9719f50aae409c3bc",
+          "seconds": 26.55
+        }
+      },
+      {
+        "event": "healed",
+        "pair": [
+          2,
+          5
+        ],
+        "all_acked_read_by_ftps": true,
+        "receipts": 8,
+        "failed_receipts": [],
+        "db_streaming": 4,
+        "dcs": 5,
+        "verify_seconds": 0.35
+      },
+      {
+        "event": "loss",
+        "lost": [
+          3,
+          4
+        ],
+        "old_pg_leader": 1,
+        "old_swfs_leader": "sw3.audit.test:9333.19333",
+        "pre_read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 0.16
+        },
+        "manual_dns_to_edge": 1,
+        "dns_s": 0.41,
+        "combined_s": 26.63,
+        "new_pg_leader": 1,
+        "read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 0.11
+        },
+        "write_and_read": {
+          "ok": true,
+          "sha256": "2e4ef6491b1cd6f51c6a1e70910778d1d28e43dd1fed67c51c09c3e10afdb030",
+          "seconds": 26.21
+        }
+      },
+      {
+        "event": "healed",
+        "pair": [
+          3,
+          4
+        ],
+        "all_acked_read_by_ftps": true,
+        "receipts": 9,
+        "failed_receipts": [],
+        "db_streaming": 4,
+        "dcs": 5,
+        "verify_seconds": 0.94
+      },
+      {
+        "event": "loss",
+        "lost": [
+          3,
+          5
+        ],
+        "old_pg_leader": 1,
+        "old_swfs_leader": "sw2.audit.test:9333.19333",
+        "pre_read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 0.18
+        },
+        "manual_dns_to_edge": 1,
+        "dns_s": 0.6,
+        "combined_s": 8.45,
+        "new_pg_leader": 1,
+        "read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 0.19
+        },
+        "write_and_read": {
+          "ok": true,
+          "sha256": "5002fcd61aece6f172097a04c5c7ee275b4316b3d99ac4ada4d0e20cc5eddc29",
+          "seconds": 7.85
+        }
+      },
+      {
+        "event": "healed",
+        "pair": [
+          3,
+          5
+        ],
+        "all_acked_read_by_ftps": true,
+        "receipts": 10,
+        "failed_receipts": [],
+        "db_streaming": 4,
+        "dcs": 5,
+        "verify_seconds": 0.6
+      },
+      {
+        "event": "loss",
+        "lost": [
+          4,
+          5
+        ],
+        "old_pg_leader": 1,
+        "old_swfs_leader": "sw2.audit.test:9333.19333",
+        "pre_read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 0.19
+        },
+        "manual_dns_to_edge": 1,
+        "dns_s": 0.66,
+        "combined_s": 0.98,
+        "new_pg_leader": 1,
+        "read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 0.23
+        },
+        "write_and_read": {
+          "ok": true,
+          "sha256": "6d08b816229b58b3b242607e9075562fe87658bf8540334a8d06ccfcff7886d4",
+          "seconds": 0.31
+        }
+      },
+      {
+        "event": "healed",
+        "pair": [
+          4,
+          5
+        ],
+        "all_acked_read_by_ftps": true,
+        "receipts": 11,
+        "failed_receipts": [],
+        "db_streaming": 4,
+        "dcs": 5,
+        "verify_seconds": 0.93
+      },
+      {
+        "completed": true,
+        "receipts": 11
+      }
+    ],
+    "physical_observations": [
+      {
+        "physical_3plus": {
+          "baseline.bin": [
+            [
+              1,
+              "sftp-work_1.dat"
+            ],
+            [
+              2,
+              "sftp-work_1.dat"
+            ],
+            [
+              3,
+              "sftp-work_1.dat"
+            ]
+          ]
+        },
+        "at": 1795855880.915885
+      },
+      {
+        "physical_3plus": {
+          "pair-1-3.bin": [
+            [
+              2,
+              "sftp-work_10.dat"
+            ],
+            [
+              4,
+              "sftp-work_10.dat"
+            ],
+            [
+              5,
+              "sftp-work_10.dat"
+            ]
+          ],
+          "pair-1-4.bin": [
+            [
+              2,
+              "sftp-work_17.dat"
+            ],
+            [
+              3,
+              "sftp-work_17.dat"
+            ],
+            [
+              5,
+              "sftp-work_17.dat"
+            ]
+          ],
+          "pair-1-5.bin": [
+            [
+              2,
+              "sftp-work_20.dat"
+            ],
+            [
+              2,
+              "sftp-work_21.dat"
+            ],
+            [
+              3,
+              "sftp-work_20.dat"
+            ],
+            [
+              3,
+              "sftp-work_21.dat"
+            ],
+            [
+              4,
+              "sftp-work_20.dat"
+            ],
+            [
+              4,
+              "sftp-work_21.dat"
+            ]
+          ],
+          "pair-1-2.bin": [
+            [
+              3,
+              "sftp-work_9.dat"
+            ],
+            [
+              4,
+              "sftp-work_9.dat"
+            ],
+            [
+              5,
+              "sftp-work_9.dat"
+            ]
+          ]
+        },
+        "at": 1795855910.179343
+      },
+      {
+        "physical_3plus": {
+          "pair-2-3.bin": [
+            [
+              1,
+              "sftp-work_2.dat"
+            ],
+            [
+              4,
+              "sftp-work_2.dat"
+            ],
+            [
+              5,
+              "sftp-work_2.dat"
+            ]
+          ],
+          "pair-2-4.bin": [
+            [
+              1,
+              "sftp-work_25.dat"
+            ],
+            [
+              1,
+              "sftp-work_26.dat"
+            ],
+            [
+              1,
+              "sftp-work_27.dat"
+            ],
+            [
+              3,
+              "sftp-work_25.dat"
+            ],
+            [
+              3,
+              "sftp-work_26.dat"
+            ],
+            [
+              3,
+              "sftp-work_27.dat"
+            ],
+            [
+              5,
+              "sftp-work_25.dat"
+            ],
+            [
+              5,
+              "sftp-work_26.dat"
+            ],
+            [
+              5,
+              "sftp-work_27.dat"
+            ]
+          ]
+        },
+        "at": 1795856039.3181021
+      }
+    ]
+  }
+}

@@ -18,13 +18,6 @@ source "${SCRIPT_DIR}/scripts/lib/deploy.sh"
 load_cluster_env "${CONFIG_ROOT:-${SCRIPT_DIR}}"
 log_step "Стадия 3: Bootstrap DB (etcd + Patroni + HAProxy + pgBackRest)"
 
-PG_PORT_MIGRATED=false
-if [[ ! -f "$(state_root)/.cluster_installed" && "${PG_PORT:-15432}" == "5432" ]]; then
-    log_warn "🔒 Автоперевод PostgreSQL со стандартного порта 5432 на закрытый mTLS-порт 15432..."
-    persist_cluster_env_var "PG_PORT" "15432"
-    export PG_PORT=15432
-    PG_PORT_MIGRATED=true
-fi
 export PG_PORT="${PG_PORT:-15432}"
 
 ensure_quorum_nodes_initialized
@@ -45,7 +38,7 @@ for_each_node harden_node_ufw
 ensure_node_pki_fresh_cb() {
     local ip="$1" dc="$2" name="$3" idx="$4"
     [[ "${DRY_RUN:-false}" == "true" ]] && return 0
-    if ! remote_exec "${ip}" "test -f '${REMOTE_BASE_DIR}/certs/${name}/etcd-server.crt' && test -f '${REMOTE_BASE_DIR}/certs/${name}/pg-server.crt' && test -f '${REMOTE_BASE_DIR}/certs/${name}/swfs-client.crt' && openssl x509 -in '${REMOTE_BASE_DIR}/certs/${name}/etcd-server.crt' -noout -ext subjectAltName 2>/dev/null | grep -Fq 'IP Address:${ip}'" >/dev/null 2>&1; then
+    if ! remote_exec "${ip}" "test -f '${REMOTE_BASE_DIR}/certs/${name}/etcd-server.crt' && test -f '${REMOTE_BASE_DIR}/certs/${name}/pg-server.crt' && test -f '${REMOTE_BASE_DIR}/certs/${name}/swfs-client.crt' && openssl x509 -in '${REMOTE_BASE_DIR}/certs/${name}/etcd-server.crt' -noout -ext subjectAltName 2>/dev/null | tr ', ' '\\n' | grep -Fxq -e 'DNS:${ip}' -e 'Address:${ip}'" >/dev/null 2>&1; then
         log_warn "  🔐 Сертификаты на ${name} (${ip}) отсутствуют или содержат старый IP — обновляем PKI (Remote-CSR)..."
         ensure_ca_exists
         generate_node_certs "${ip}" "${dc}" "${name}" "${idx}"
@@ -108,8 +101,16 @@ ensure_etcd_mesh_cb() {
 }
 for_each_node ensure_etcd_mesh_cb
 
-NODE1_IP=$(get_node_ip 1)
-NODE1_NAME=$(get_node_name 1)
+NODE1_IP=""; NODE1_NAME=""
+for seed_i in $(seq 1 "$(get_node_count)"); do
+    seed_name=$(get_node_name "$seed_i")
+    if is_quorum_node "$seed_i" "$seed_name"; then
+        NODE1_IP=$(get_node_ip "$seed_i")
+        NODE1_NAME=$seed_name
+        break
+    fi
+done
+[[ -n "$NODE1_IP" ]] || { log_error "В инвентаре нет голосующих узлов"; exit 1; }
 ETCD_ALL_ENDPOINTS=$(build_etcd_hosts | tr ',' '\n' | awk -v p="${ETCD_CLIENT_PORT:-2379}" '{sub(/:[0-9]+$/,""); print "https://" $1 ":" p}' | paste -sd, -)
 
 ETCD_QUORUM_CHECK_CMD="CID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q etcd | head -n1) && [[ -n \"\${CID}\" ]] && docker exec \"\${CID}\" etcdctl --endpoints=https://127.0.0.1:${ETCD_CLIENT_PORT:-2379} --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key endpoint health && curl -sf --cacert '${REMOTE_BASE_DIR}/certs/${NODE1_NAME}/ca.crt' --cert '${REMOTE_BASE_DIR}/certs/${NODE1_NAME}/etcd-client.crt' --key '${REMOTE_BASE_DIR}/certs/${NODE1_NAME}/etcd-client.key' https://127.0.0.1:${ETCD_CLIENT_PORT:-2379}/version | grep -qE '\"etcdcluster\":\"3\\.[456]'"
@@ -167,18 +168,9 @@ REMOTE_ETCD_CHK
         ETCD_CLUSTER_CONSISTENT=false
     fi
 
-    if [[ "${ETCD_CLUSTER_CONSISTENT}" != "true" && ! -f "$(state_root)/.cluster_installed" ]]; then
-        log_warn "🔄 Обнаружено незавершенное состояние etcd (${ETCD_CHK_OUT:-quorum unreachable}) — пересоздаем чистый кворум etcd..."
-        for_each_node ensure_etcd_mesh_cb
-        reset_uninstalled_etcd_cb() {
-            local ip="$1"
-            remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose stop patroni etcd 2>/dev/null || true; find '${ETCD_DATA_DIR:-/data/etcd}' '${PG_DATA_DIR:-/data/postgresql}/data' -mindepth 1 -delete 2>/dev/null || true; mkdir -p '${ETCD_DATA_DIR:-/data/etcd}' '${PG_DATA_DIR:-/data/postgresql}/data'"
-        }
-        for_each_node reset_uninstalled_etcd_cb
-        for_each_node start_etcd_cb
-        for_each_node ensure_etcd_mesh_cb
-        wait_for_remote_health "${NODE1_IP}" "etcd quorum (fresh)" "${ETCD_QUORUM_CHECK_CMD}" 30 3 \
-            "cd '${REMOTE_BASE_DIR}' && docker compose logs --tail 50 etcd || true"
+    if [[ "${ETCD_CLUSTER_CONSISTENT}" != true ]]; then
+        log_error "Кворум etcd не соответствует инвентарю: ${ETCD_CHK_OUT:-нет связи}. Проверьте сеть и фактический состав; данные сохранены."
+        exit 1
     fi
 
     log_info "Проверка всех участников etcd (${ETCD_ALL_ENDPOINTS}):"
@@ -200,8 +192,8 @@ ACTIVE_PRIMARY_NAME="${NODE1_NAME}"
 if [[ "${DRY_RUN:-false}" == "true" ]]; then
     remote_compose_up "${NODE1_IP}" "--force-recreate" patroni
     for_each_node_dry_rep() {
-        local ip="$1" idx="$4"
-        (( idx == 1 )) && return 0
+        local ip="$1"
+        [[ "$ip" == "$NODE1_IP" ]] && return 0
         remote_compose_up "${ip}" "--force-recreate" patroni
     }
     for_each_node for_each_node_dry_rep
@@ -209,9 +201,7 @@ else
     # 1. Проверяем, есть ли уже действующий лидер Patroni, напрямую видимый со всех узлов на текущем PG_PORT
     REUSE_EXISTING_PRIMARY=""
     CANDIDATE_PRIMARY=""
-    if [[ "${PG_PORT_MIGRATED}" != "true" ]]; then
-        CANDIDATE_PRIMARY=$(find_writable_pg_primary_ip || find_patroni_primary_ip || true)
-    fi
+    CANDIDATE_PRIMARY=$(find_writable_pg_primary_ip || find_patroni_primary_ip || true)
     if [[ -n "${CANDIDATE_PRIMARY}" ]]; then
         PEER_REACH_OK=true
         check_pg_reach_cb() {
@@ -251,21 +241,22 @@ else
         fi
     else
         if [[ ! -f "$(state_root)/.cluster_installed" ]]; then
-            log_info "Очистка незавершенного состояния Patroni и автоподбор доступного маршрута/порта PostgreSQL..."
-            stop_and_clean_pg_cb() {
-                local ip="$1"
-                remote_exec "${ip}" "cd '${REMOTE_BASE_DIR}' && docker compose stop patroni 2>/dev/null || true; rm -rf '${PG_DATA_DIR}/data' && mkdir -p '${PG_DATA_DIR}/data'"
+            # Port selection and first-primary bootstrap are safe only on empty data directories.
+            assert_empty_pgdata() {
+                remote_exec_stdin "$1" "$PG_DATA_DIR" <<'REMOTE_EMPTY'
+set -euo pipefail
+dir="$1/data"
+[[ ! -d "$dir" || -z "$(find "$dir" -mindepth 1 -print -quit)" ]] || {
+    echo "Found PostgreSQL data in $dir; restore the existing primary or use the recovery procedure" >&2
+    exit 1
+}
+REMOTE_EMPTY
             }
-            for_each_node stop_and_clean_pg_cb
-            remote_exec "${NODE1_IP}" "
-                ECID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q etcd | head -n1 || true)
-                if [[ -n \"\${ECID}\" ]]; then
-                    docker exec \"\${ECID}\" etcdctl --endpoints='https://127.0.0.1:${ETCD_CLIENT_PORT:-2379}' \
-                        --cacert=/certs/ca.crt --cert=/certs/etcd-client.crt --key=/certs/etcd-client.key \
-                        del --prefix '/${CLUSTER_SLUG}/' >/dev/null 2>&1 || true
-                fi
-            "
-
+            if [[ -n "$CANDIDATE_PRIMARY" ]]; then
+                log_error "Текущий primary недоступен части узлов. Восстановите связность перед продолжением."
+                exit 1
+            fi
+            for_each_node assert_empty_pgdata
             # Формируем список портов-кандидатов (текущий PG_PORT, 2382 рядом с рабочим etcd, HTTPS-alt 8445/6443/4433/8080)
             RESERVED_PORTS=" ${ADMIN_SSH_PORT:-22} ${HTTPS_PORT:-443} ${SFTP_PORT:-2022} ${FTPS_PORT:-21} ${PANEL_PORT:-9443} ${PATRONI_API_PORT:-8008} ${HAPROXY_PG_PORT:-5433} ${ETCD_CLIENT_PORT:-2379} ${ETCD_PEER_PORT:-2380} ${ETCD_METRICS_PORT:-2381} "
             CAND_PORTS=""
@@ -303,7 +294,7 @@ else
             else
                 if [[ "${SELECTED_PORT}" != "${PG_PORT}" ]]; then
                     log_warn "🔄 Автопереключение PostgreSQL с фильтруемого порта ${PG_PORT} на открытый mTLS-порт ${SELECTED_PORT} (Primary: ${SELECTED_PRIMARY_NAME})..."
-                    persist_cluster_env_var "PG_PORT" "${SELECTED_PORT}"
+                    config_db_set "PG_PORT" "${SELECTED_PORT}"
                     export PG_PORT="${SELECTED_PORT}"
                     for_each_node harden_node_ufw
                     for_each_node render_and_push_cb
@@ -354,13 +345,6 @@ else
             log_info "Реплика Patroni на ${name} (${ip}) уже синхронизирована — обновляем без перезапуска..."
             remote_compose_up "${ip}" "" patroni
         else
-            remote_exec_stdin "${ip}" "${PG_DATA_DIR}" <<'REMOTE_PREP_REPLICA'
-set -euo pipefail
-PG_DIR="$1"
-if [[ ! -f "${PG_DIR}/data/PG_VERSION" && -d "${PG_DIR}/data" ]]; then
-    find "${PG_DIR}/data" -mindepth 1 -delete 2>/dev/null || true
-fi
-REMOTE_PREP_REPLICA
             log_info "Старт Patroni Replica на ${name} (${ip})..."
             remote_compose_up "${ip}" "--force-recreate" patroni
         fi
@@ -402,50 +386,7 @@ for _db_try in $(seq 1 10); do
     ACTIVE_PRIMARY_NAME=$(get_node_name_by_ip "${ACTIVE_PRIMARY_IP}")
     log_info "  Инициализация ролей/БД на ${ACTIVE_PRIMARY_NAME} (${ACTIVE_PRIMARY_IP}, попытка ${_db_try}/10)..."
     _db_rc=0
-    remote_exec_env_stdin "${ACTIVE_PRIMARY_IP}" "SFTPGO_DB_PASSWORD,SWFS_FILER_DB_PASSWORD" "${REMOTE_BASE_DIR}" <<'REMOTE_DB_INIT' || _db_rc=$?
-set -euo pipefail
-BASE_DIR="$1"
-
-PATRONI_CID=$(cd "${BASE_DIR}" && docker compose ps -q patroni | head -n1)
-[[ -n "${PATRONI_CID}" ]] || { echo "Patroni container not found" >&2; exit 2; }
-TMP_DB_ENV=$(mktemp)
-chmod 600 "${TMP_DB_ENV}"
-trap 'rm -f "${TMP_DB_ENV}"' EXIT
-printf 'SFTPGO_PW=%s\nSWFS_PW=%s\n' "${SFTPGO_DB_PASSWORD}" "${SWFS_FILER_DB_PASSWORD}" > "${TMP_DB_ENV}"
-docker exec -i --env-file "${TMP_DB_ENV}" "${PATRONI_CID}" python3 - <<'PYEOF'
-import os, sys, psycopg2
-from psycopg2 import sql
-
-try:
-    conn = psycopg2.connect(dbname="postgres", user="postgres", host="/var/run/postgresql")
-    conn.autocommit = True
-    cur = conn.cursor()
-    cur.execute("SELECT pg_is_in_recovery()")
-    row = cur.fetchone()
-    if row and row[0]:
-        sys.stderr.write("PostgreSQL is in recovery (standby) — switching/waiting for writable Primary...\n")
-        sys.exit(2)
-
-    def ensure_role_and_db(role, pw, db):
-        cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,))
-        if not cur.fetchone():
-            cur.execute(sql.SQL("CREATE USER {} WITH PASSWORD %s").format(sql.Identifier(role)), (pw,))
-        else:
-            cur.execute(sql.SQL("ALTER USER {} WITH PASSWORD %s").format(sql.Identifier(role)), (pw,))
-        cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (db,))
-        if not cur.fetchone():
-            cur.execute(sql.SQL("CREATE DATABASE {} OWNER {}").format(sql.Identifier(db), sql.Identifier(role)))
-
-    ensure_role_and_db("sftpgo", os.environ["SFTPGO_PW"], "sftpgo")
-    ensure_role_and_db("seaweedfs", os.environ["SWFS_PW"], "seaweedfs_filer")
-    cur.close()
-    conn.close()
-    print("PostgreSQL roles and databases ensured cleanly.")
-except (psycopg2.errors.ReadOnlySqlTransaction, psycopg2.OperationalError) as exc:
-    sys.stderr.write(f"PostgreSQL not writable yet ({exc}) — retrying against current Primary...\n")
-    sys.exit(2)
-PYEOF
-REMOTE_DB_INIT
+    provision_cluster_databases "${ACTIVE_PRIMARY_IP}" || _db_rc=$?
     if (( _db_rc == 0 )); then
         DB_INIT_DONE=true
         break

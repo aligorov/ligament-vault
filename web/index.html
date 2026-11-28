@@ -205,7 +205,7 @@
         </h3>
         <table>
           <thead>
-            <tr><th>Узел</th><th>IP адрес</th><th>ДЦ</th><th>PostgreSQL</th><th>HAProxy</th><th>SWFS Volume</th><th>SWFS Filer</th><th>SFTPGo</th><th>Диск / NTP</th><th>Действия</th></tr>
+            <tr><th>Узел</th><th>Адрес узла</th><th>ДЦ</th><th>PostgreSQL</th><th>HAProxy</th><th>SWFS Volume</th><th>SWFS Filer</th><th>SFTPGo</th><th>Диск / NTP</th><th>Действия</th></tr>
           </thead>
           <tbody id="nodesBody"><tr><td colspan="10" style="color:var(--muted);">Загрузка...</td></tr></tbody>
         </table>
@@ -266,7 +266,7 @@
             Укажите IP и разовый пароль <code>root</code> от второго, третьего (или нового) VPS — панель сама пропишет SSH-ключ, установит Docker и подготовит сервер к объединению в кластер.
           </p>
           <form id="connectVpsForm">
-            <label>IP адрес удаленного VPS</label>
+            <label>DNS-имя или IPv4 удалённого VPS</label>
             <input id="vpsIp" placeholder="198.51.100.20" required />
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
               <div>
@@ -301,13 +301,13 @@
           <p style="color:var(--muted);font-size:13px;margin-bottom:8px;">
             Минимум 3 VPS для отказоустойчивого кворума (1-й сервер уже добавлен автоматически).
           </p>
-          <label>Список серверов кластера (<code>IP:dc:node</code>)</label>
+          <label>Список серверов кластера (<code>fqdn:dc:node</code>)</label>
           <input id="cfgNodes" placeholder="203.0.113.10:dc1:node1 198.51.100.20:dc2:node2 192.0.2.30:dc3:node3" />
           <label>Домен кластера (в Cloudflare: одна A-запись → IP node1, серое облачко <b>DNS only</b>)</label>
           <input id="cfgDomain" placeholder="file.ligam.org" />
           <label>Cloudflare DNS API Token (Profile → API Tokens → шаблон <b>Edit zone DNS</b> для зоны домена)</label>
           <input id="cfgCfToken" type="password" placeholder="Вставьте токен для авто-выпуска SSL и авто-переключения IP при сбое" />
-          <label>IP внешнего сервера-арбитра (опц., для мониторинга и авто-Failover)</label>
+          <label>DNS-имя или IPv4 внешнего арбитра (опц., для мониторинга и авто-Failover)</label>
           <input id="cfgArbiter" placeholder="Опционально" />
           <div class="btn-row">
             <button class="btn btn-sec" onclick="saveAndRun('preflight')">Проверить связь и RTT</button>
@@ -441,8 +441,8 @@
     <h3 id="repTitle">Замена узла</h3>
     <form id="replaceForm">
       <input id="repNode" type="hidden" />
-      <label>Новый IPv4 адрес VPS</label>
-      <input id="repNewIp" placeholder="198.51.100.25" required />
+      <label>DNS-имя или IPv4 нового VPS</label>
+      <input id="repNewIp" placeholder="node4.example.com" required />
       <label>Пароль root (опционально, если SSH-ключ уже прописан)</label>
       <input id="repPass" type="password" placeholder="Пароль root от хостера" />
       <div class="btn-row" style="justify-content:flex-end;">

@@ -5,7 +5,7 @@
 # Вызов: ./ligactl publish-image [--repo aligorov/ligament_vault_patroni] [--tag 16] [--multiarch]
 #
 # Собирает Dockerfile.patroni, пушит в Docker Hub (:16, :latest, :git-sha) и
-# автоматически фиксирует @sha256 дайджест в versions.env!
+# автоматически фиксирует @sha256 дайджест в control.sqlite3!
 # ============================================================================
 
 set -euo pipefail
@@ -15,8 +15,7 @@ export SCRIPT_DIR
 
 # shellcheck source=../lib/common.sh
 source "${SCRIPT_DIR}/scripts/lib/common.sh"
-# shellcheck source=../../versions.env
-source "${SCRIPT_DIR}/versions.env"
+load_cluster_env "${CONFIG_ROOT:-${SCRIPT_DIR}}"
 
 REPO="${DOCKERHUB_PATRONI_REPO:-aligorov/ligament_vault_patroni}"
 TAG="16"
@@ -97,15 +96,8 @@ PYEOF
 )
 
 if [[ "${DIGEST}" == sha256:* ]]; then
-    python3 - "${SCRIPT_DIR}/versions.env" "${REPO}:${TAG}" "${DIGEST}" <<'PYEOF'
-import re, sys
-path, img, dig = sys.argv[1], sys.argv[2], sys.argv[3]
-text = open(path, "r", encoding="utf-8").read()
-text = re.sub(r'^PATRONI_PG_IMAGE=".*"', f'PATRONI_PG_IMAGE="{img}"', text, flags=re.M)
-text = re.sub(r'^PATRONI_PG_DIGEST=".*"', f'PATRONI_PG_DIGEST="{dig}"', text, flags=re.M)
-open(path, "w", encoding="utf-8").write(text)
-PYEOF
-    log_info "✅ Опубликован в Docker Hub: ${REPO}:${TAG}@${DIGEST} (versions.env обновлен)"
+    config_db_set_many PATRONI_PG_IMAGE "${REPO}:${TAG}" PATRONI_PG_DIGEST "${DIGEST}"
+    log_info "✅ Опубликован в Docker Hub: ${REPO}:${TAG}@${DIGEST} (control.sqlite3 обновлен)"
 else
     log_info "✅ Опубликован в Docker Hub: ${REPO}:${TAG}"
 fi

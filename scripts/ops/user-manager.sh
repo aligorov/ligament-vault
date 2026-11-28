@@ -28,9 +28,9 @@ usage() {
 
 Подкоманды:
   add          --username <name> [--profile dual|work-only|worm-only|ext:<folder>] [--quota-gb <N>]
-               [--ssh-key <pubkey|@file>] [--password <pw>|--generate-password]
+               [--ssh-key <pubkey|@file>] [--password-stdin|--password <pw>|--generate-password]
                [--allow-ip <cidr1,cidr2>] [--require-2fa] [--shared]
-  add-s3-folder --name <n> --endpoint <url> --bucket <b> --access-key <ak> --secret-key <sk> [--region r] [--prefix p]
+  add-s3-folder --name <n> --endpoint <url> --bucket <b> --access-key <ak> --secret-key-stdin [--region r] [--prefix p]
   list         [--json]
   list-folders
   inspect      --username <name>
@@ -55,14 +55,44 @@ read_pubkey_arg() {
     fi
 }
 
+# Stdin is an exact UTF-8 secret, including newlines. Bash cannot represent NUL.
+read_input_secret() {
+    local input_value LC_ALL=C
+    if IFS= read -r -d '' input_value; then
+        log_error "NUL в секрете не поддерживается"
+        return 1
+    fi
+    [[ -n "${input_value}" && ${#input_value} -le 16384 ]] || {
+        log_error "Ожидался непустой секрет размером до 16 KiB на stdin"
+        return 1
+    }
+    if ! printf '%s' "${input_value}" | python3 -c 'import sys; sys.stdin.buffer.read().decode("utf-8")' 2>/dev/null; then
+        log_error "Секрет должен быть в UTF-8"
+        return 1
+    fi
+    printf -v "$1" '%s' "${input_value}"
+}
+
+# Write ephemeral operation credentials directly into remote Python file descriptors.
+# The SSH stdin script is protected by the same umask as remote_exec_stdin.
+user_request_stdin() {
+    local host="$1" credential1="$2" credential2="$3" credential3="$4"
+    shift 4
+    {
+        printf 'exec 5< <(printf %%s %q) 6< <(printf %%s %q) 7< <(printf %%s %q)\n'             "${credential1}" "${credential2}" "${credential3}"
+        cat
+    } | remote_exec_stdin "${host}" "$@"
+}
+
 cmd_add() {
-    local uname="" profile="dual" quota_gb="0" ssh_key="" pw="${USER_PASSWORD:-}" gen_pw=false allow_ips="" req_2fa="false" shared="false"
+    local uname="" profile="dual" quota_gb="0" ssh_key="" pw="" gen_pw=false allow_ips="" req_2fa="false" shared="false"
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --username)          uname="$2"; shift 2 ;;
             --profile)           profile="$2"; shift 2 ;;
             --quota-gb)          quota_gb="$2"; shift 2 ;;
             --ssh-key)           ssh_key="$(read_pubkey_arg "$2")"; shift 2 ;;
+            --password-stdin)    read_input_secret pw; shift ;;
             --password)          pw="$2"; shift 2 ;;
             --generate-password) gen_pw=true; shift ;;
             --allow-ip)          allow_ips="$2"; shift 2 ;;
@@ -82,7 +112,17 @@ cmd_add() {
         exit 1
     fi
 
-    if [[ "${gen_pw}" == "true" && -z "${pw}" ]]; then
+    if [[ "${gen_pw}" == "true" && -n "${pw}" ]]; then
+        log_error "--generate-password и переданный пароль взаимоисключают друг друга"
+        return 1
+    fi
+    if [[ "${gen_pw}" == "true" && "${DRY_RUN:-false}" != true ]]; then
+        if ! { exec 8>/dev/tty; } 2>/dev/null; then
+            log_error "Для выдачи сгенерированного пароля требуется TTY. Для автоматизации используйте --password-stdin"
+            return 1
+        fi
+    fi
+    if [[ "${gen_pw}" == "true" ]]; then
         pw=$(python3 -c '
 import secrets, string
 up, lo, dg, sp = string.ascii_uppercase, string.ascii_lowercase, string.digits, "!@#%^&*_-"
@@ -107,9 +147,7 @@ print("".join(chars))
 
     sftpgo_provision_s3_folders "${active_ip}"
 
-    USER_PASSWORD_VAL="${pw}"
-    export USER_PASSWORD_VAL
-    remote_exec_env_stdin "${active_ip}" "SFTPGO_ADMIN_PASSWORD,SWFS_S3_SECRET_KEY_SFTPGO,USER_PASSWORD_VAL" \
+    user_request_stdin "${active_ip}" "${SFTPGO_ADMIN_PASSWORD}" "${SWFS_S3_SECRET_KEY_SFTPGO}" "${pw}" \
         "${SFTPGO_ADMIN_USERNAME:-admin}" \
         "${uname}" "${profile}" "${quota_gb}" "${ssh_key}" "${allow_ips}" "${req_2fa}" "${shared}" \
         "${SWFS_S3_PORT:-8333}" "sftpgo-s3-access" <<'REMOTE_USER_ADD'
@@ -122,9 +160,9 @@ python3 - "${ADMIN_U}" "${UNAME}" "${PROFILE}" "${QUOTA_GB}" "${PUBKEY}" "${ALLO
 import base64, json, os, sys, urllib.error, urllib.request
 
 admin_u, uname, profile, quota_gb, pubkey, allow_ips, req_2fa, shared, s3_port, s3_ak = sys.argv[1:]
-admin_p = os.environ["SFTPGO_ADMIN_PASSWORD"]
-user_pw = os.environ.get("USER_PASSWORD_VAL", "")
-s3_sk = os.environ["SWFS_S3_SECRET_KEY_SFTPGO"]
+admin_p = os.fdopen(5, "rb").read().decode()
+s3_sk = os.fdopen(6, "rb").read().decode()
+user_pw = os.fdopen(7, "rb").read().decode()
 base = "http://127.0.0.1:8081/api/v2"
 
 def api(method, path, body=None, headers=None):
@@ -164,11 +202,11 @@ def ensure_scoped_folder(folder_name, bucket, key_prefix=""):
     if st_f == 200:
         st_w, res_w = api("PUT", f"/folders/{folder_name}", body=f_payload, headers=auth)
         if st_w not in (200, 204):
-            raise RuntimeError(f"Ошибка обновления S3 папки {folder_name} (HTTP {st_w}): {res_w}")
+            raise RuntimeError(f"Ошибка обновления S3 папки {folder_name} (HTTP {st_w})")
     elif st_f == 404:
         st_c, res_c = api("POST", "/folders", body=f_payload, headers=auth)
         if st_c not in (200, 201):
-            raise RuntimeError(f"Ошибка создания S3 папки {folder_name} (HTTP {st_c}): {res_c}")
+            raise RuntimeError(f"Ошибка создания S3 папки {folder_name} (HTTP {st_c})")
     else:
         raise RuntimeError(f"Ошибка чтения папки {folder_name} (HTTP {st_f})")
 
@@ -176,7 +214,7 @@ try:
     basic = base64.b64encode(f"{admin_u}:{admin_p}".encode()).decode()
     st, tok = api("GET", "/token", headers={"Authorization": f"Basic {basic}"})
     if st != 200 or not isinstance(tok, dict) or "access_token" not in tok:
-        raise RuntimeError(f"Ошибка авторизации SFTPGo API (HTTP {st}): {tok}")
+        raise RuntimeError(f"Ошибка авторизации SFTPGo API (HTTP {st})")
     auth = {"Authorization": f"Bearer {tok['access_token']}"}
 
     vfolders = []
@@ -235,12 +273,12 @@ try:
             merged.pop("password", None)
         st_w, res = api("PUT", f"/users/{uname}", body=merged, headers=auth)
         if st_w not in (200, 204):
-            raise RuntimeError(f"Ошибка обновления пользователя '{uname}' (HTTP {st_w}): {res}")
+            raise RuntimeError(f"Ошибка обновления пользователя '{uname}' (HTTP {st_w})")
         print(f"Updated SFTPGo user '{uname}' (profile={profile})")
     else:
         st_c, res = api("POST", "/users", body=payload, headers=auth)
         if st_c not in (200, 201):
-            raise RuntimeError(f"Ошибка создания пользователя '{uname}' (HTTP {st_c}): {res}")
+            raise RuntimeError(f"Ошибка создания пользователя '{uname}' (HTTP {st_c})")
         print(f"Created SFTPGo user '{uname}' (profile={profile})")
 except Exception as exc:
     sys.stderr.write(f"ERROR: {exc}\n")
@@ -250,7 +288,8 @@ REMOTE_USER_ADD
 
     log_info "✅ Пользователь '${uname}' готов (SFTP :${SFTP_PORT:-2022}, HTTPS https://${DOMAIN})"
     if [[ "${gen_pw}" == "true" ]]; then
-        log_info "🔑 Сгенерированный пароль для '${uname}': ${pw}"
+        printf 'Пароль %s: %s\n' "${uname}" "${pw}" >&8
+        exec 8>&-
     fi
 }
 
@@ -265,13 +304,13 @@ cmd_list() {
         return 0
     fi
 
-    remote_exec_env_stdin "${active_ip}" "SFTPGO_ADMIN_PASSWORD" "${SFTPGO_ADMIN_USERNAME:-admin}" "${json_out}" <<'REMOTE_LIST'
+    remote_exec_private_stdin "${active_ip}" "SFTPGO_ADMIN_PASSWORD" "${SFTPGO_ADMIN_USERNAME:-admin}" "${json_out}" <<'REMOTE_LIST'
 set -euo pipefail
 ADMIN_U="$1"; JSON_OUT="$2"
-python3 - "${ADMIN_U}" "${JSON_OUT}" <<'PYEOF'
+python3 - "${ADMIN_U}" "${JSON_OUT}" 3< <(printf '%s' "${SFTPGO_ADMIN_PASSWORD}") <<'PYEOF'
 import base64, json, os, sys, urllib.error, urllib.request
 u, jout = sys.argv[1:]
-p = os.environ["SFTPGO_ADMIN_PASSWORD"]
+p = os.fdopen(3).read()
 base = "http://127.0.0.1:8081/api/v2"
 try:
     b64 = base64.b64encode(f"{u}:{p}".encode()).decode()
@@ -323,13 +362,13 @@ cmd_mutate_simple() {
     if [[ "${action}" == "disconnect" ]]; then
         disconnect_cb() {
             local ip="$1"
-            remote_exec_env_stdin "${ip}" "SFTPGO_ADMIN_PASSWORD" "${SFTPGO_ADMIN_USERNAME:-admin}" "${uname}" <<'REMOTE_DISC' || true
+            remote_exec_private_stdin "${ip}" "SFTPGO_ADMIN_PASSWORD" "${SFTPGO_ADMIN_USERNAME:-admin}" "${uname}" <<'REMOTE_DISC' || true
 set -euo pipefail
 ADMIN_U="$1"; UNAME="$2"
-python3 - "${ADMIN_U}" "${UNAME}" <<'PYEOF'
+python3 - "${ADMIN_U}" "${UNAME}" 3< <(printf '%s' "${SFTPGO_ADMIN_PASSWORD}") <<'PYEOF'
 import base64, json, os, sys, urllib.parse, urllib.request
 u, target = sys.argv[1:]
-p = os.environ["SFTPGO_ADMIN_PASSWORD"]
+p = os.fdopen(3).read()
 base = "http://127.0.0.1:8081/api/v2"
 b64 = base64.b64encode(f"{u}:{p}".encode()).decode()
 tok = json.loads(urllib.request.urlopen(urllib.request.Request(f"{base}/token", headers={"Authorization": f"Basic {b64}"}), timeout=10).read().decode())["access_token"]
@@ -350,13 +389,13 @@ REMOTE_DISC
         return 0
     fi
 
-    remote_exec_env_stdin "${active_ip}" "SFTPGO_ADMIN_PASSWORD" "${SFTPGO_ADMIN_USERNAME:-admin}" "${action}" "${uname}" "${quota_gb}" "${ssh_key}" <<'REMOTE_MUT'
+    remote_exec_private_stdin "${active_ip}" "SFTPGO_ADMIN_PASSWORD" "${SFTPGO_ADMIN_USERNAME:-admin}" "${action}" "${uname}" "${quota_gb}" "${ssh_key}" <<'REMOTE_MUT'
 set -euo pipefail
 ADMIN_U="$1"; ACT="$2"; UNAME="$3"; QUOTA_GB="$4"; PUBKEY="$5"
-python3 - "${ADMIN_U}" "${ACT}" "${UNAME}" "${QUOTA_GB}" "${PUBKEY}" <<'PYEOF'
+python3 - "${ADMIN_U}" "${ACT}" "${UNAME}" "${QUOTA_GB}" "${PUBKEY}" 3< <(printf '%s' "${SFTPGO_ADMIN_PASSWORD}") <<'PYEOF'
 import base64, json, os, sys, urllib.error, urllib.request
 u, act, uname, q_gb, pubkey = sys.argv[1:]
-p = os.environ["SFTPGO_ADMIN_PASSWORD"]
+p = os.fdopen(3).read()
 base = "http://127.0.0.1:8081/api/v2"
 try:
     b64 = base64.b64encode(f"{u}:{p}".encode()).decode()
@@ -401,7 +440,7 @@ REMOTE_MUT
 }
 
 cmd_add_s3_folder() {
-    local fname="" endpoint="" bucket="" region="us-east-1" ak="" sk="${S3_SECRET_KEY:-}" path_style="true" prefix=""
+    local fname="" endpoint="" bucket="" region="us-east-1" ak="" sk="" path_style="true" prefix=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --name)       fname="$2"; shift 2 ;;
@@ -409,6 +448,7 @@ cmd_add_s3_folder() {
             --bucket)     bucket="$2"; shift 2 ;;
             --region)     region="$2"; shift 2 ;;
             --access-key) ak="$2"; shift 2 ;;
+            --secret-key-stdin) read_input_secret sk; shift ;;
             --secret-key) sk="$2"; shift 2 ;;
             --path-style) path_style="$2"; shift 2 ;;
             --prefix)     prefix="$2"; shift 2 ;;
@@ -422,23 +462,30 @@ cmd_add_s3_folder() {
     if [[ "${endpoint}" != http://* && "${endpoint}" != https://* ]]; then
         endpoint="https://${endpoint}"
     fi
+    python3 - "${endpoint}" <<'PY_VALIDATE' || return 1
+import ipaddress, sys, urllib.parse
+u = urllib.parse.urlsplit(sys.argv[1])
+if u.scheme != "https" or not u.hostname or u.username is not None or u.path.rstrip("/") or u.query or u.fragment:
+    sys.exit("Для внешнего S3 укажите https://DNS-имя[:порт] без учетных данных")
+try: ipaddress.ip_address(u.hostname)
+except ValueError: pass
+else: sys.exit("Для внешнего S3 требуется DNS-имя")
+PY_VALIDATE
     local active_ip
     active_ip=$(resolve_current_active_ip)
     if [[ "${DRY_RUN:-false}" == "true" ]]; then
         log_info "[DRY-RUN] Подключение внешнего S3 бакета '${bucket}' (${endpoint}) как папки '${fname}'"
         return 0
     fi
-    S3_EXT_SECRET_VAL="${sk}"
-    export S3_EXT_SECRET_VAL
-    remote_exec_env_stdin "${active_ip}" "SFTPGO_ADMIN_PASSWORD,S3_EXT_SECRET_VAL" \
+    user_request_stdin "${active_ip}" "${SFTPGO_ADMIN_PASSWORD}" "${sk}" "" \
         "${SFTPGO_ADMIN_USERNAME:-admin}" "${fname}" "${endpoint}" "${bucket}" "${region}" "${ak}" "${path_style}" "${prefix}" <<'REMOTE_EXT_S3'
 set -euo pipefail
 ADMIN_U="$1"; FNAME="$2"; ENDPOINT="$3"; BUCKET="$4"; REGION="$5"; AK="$6"; PSTYLE="$7"; PREFIX="$8"
 python3 - "${ADMIN_U}" "${FNAME}" "${ENDPOINT}" "${BUCKET}" "${REGION}" "${AK}" "${PSTYLE}" "${PREFIX}" <<'PYEOF'
 import base64, json, os, sys, urllib.error, urllib.request
 u, fname, endpoint, bucket, region, ak, pstyle, prefix = sys.argv[1:]
-p = os.environ["SFTPGO_ADMIN_PASSWORD"]
-sk = os.environ["S3_EXT_SECRET_VAL"]
+p = os.fdopen(5, "rb").read().decode()
+sk = os.fdopen(6, "rb").read().decode()
 base = "http://127.0.0.1:8081/api/v2"
 def api(method, path, body=None, headers=None):
     hdrs = {"Content-Type": "application/json", **(headers or {})}
@@ -455,7 +502,7 @@ try:
     b64 = base64.b64encode(f"{u}:{p}".encode()).decode()
     st_t, tok = api("GET", "/token", headers={"Authorization": f"Basic {b64}"})
     if st_t != 200 or not isinstance(tok, dict) or "access_token" not in tok:
-        raise RuntimeError(f"Ошибка авторизации SFTPGo (HTTP {st_t}): {tok}")
+        raise RuntimeError(f"Ошибка авторизации SFTPGo (HTTP {st_t})")
     hdr = {"Authorization": f"Bearer {tok['access_token']}"}
     s3cfg = {
         "bucket": bucket,
@@ -476,11 +523,11 @@ try:
     if st_f == 200:
         st_w, res_w = api("PUT", f"/folders/{fname}", body=payload, headers=hdr)
         if st_w not in (200, 204):
-            raise RuntimeError(f"Ошибка обновления S3 папки '{fname}' (HTTP {st_w}): {res_w}")
+            raise RuntimeError(f"Ошибка обновления S3 папки '{fname}' (HTTP {st_w})")
     elif st_f == 404:
         st_c, res_c = api("POST", "/folders", body=payload, headers=hdr)
         if st_c not in (200, 201):
-            raise RuntimeError(f"Ошибка создания S3 папки '{fname}' (HTTP {st_c}): {res_c}")
+            raise RuntimeError(f"Ошибка создания S3 папки '{fname}' (HTTP {st_c})")
     else:
         raise RuntimeError(f"Ошибка проверки S3 папки '{fname}' (HTTP {st_f})")
     print(f"External S3 folder '{fname}' -> {endpoint}/{bucket} ready")
@@ -499,12 +546,12 @@ cmd_list_folders() {
         echo "[]"
         return 0
     fi
-    remote_exec_env_stdin "${active_ip}" "SFTPGO_ADMIN_PASSWORD" "${SFTPGO_ADMIN_USERNAME:-admin}" <<'REMOTE_FLIST'
+    remote_exec_private_stdin "${active_ip}" "SFTPGO_ADMIN_PASSWORD" "${SFTPGO_ADMIN_USERNAME:-admin}" <<'REMOTE_FLIST'
 set -euo pipefail
-python3 - "$1" <<'PYEOF'
+python3 - "$1" 3< <(printf '%s' "${SFTPGO_ADMIN_PASSWORD}") <<'PYEOF'
 import base64, json, os, sys, urllib.request
 u = sys.argv[1]
-p = os.environ["SFTPGO_ADMIN_PASSWORD"]
+p = os.fdopen(3).read()
 base = "http://127.0.0.1:8081/api/v2"
 b64 = base64.b64encode(f"{u}:{p}".encode()).decode()
 tok = json.loads(urllib.request.urlopen(urllib.request.Request(f"{base}/token", headers={"Authorization": f"Basic {b64}"}), timeout=10).read().decode())["access_token"]

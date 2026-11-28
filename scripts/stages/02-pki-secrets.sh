@@ -56,7 +56,7 @@ setup_ssh_host_keys
 for_each_node distribute_ssh_keys_to_node
 
 ca_key_plain="$(state_root)/.pki/ca/ca.key"
-if [[ "${DRY_RUN:-false}" != "true" && -f "$(state_root)/secrets.env.age" && -f "${ca_key_plain}" ]] && command -v age &>/dev/null && command -v age-keygen &>/dev/null; then
+if [[ "${DRY_RUN:-false}" != "true" && -f "$(state_root)/control.sqlite3" && -f "${ca_key_plain}" ]] && command -v age &>/dev/null && command -v age-keygen &>/dev/null; then
     age_key=$(resolve_age_key_file)
     if [[ -f "${age_key}" ]]; then
         recipient=$(age-keygen -y "${age_key}")

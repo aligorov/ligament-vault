@@ -25,6 +25,10 @@ from urllib.parse import parse_qs, urlparse
 
 REPO_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 WEB_DIR = os.path.abspath(os.path.dirname(__file__))
+sys.path.insert(0, os.path.join(REPO_DIR, "scripts", "lib"))
+from config_db import Store
+from node_address import valid_node_address
+
 CONFIG_ROOT = os.environ.get("CONFIG_ROOT", REPO_DIR)
 STATE_DIR = os.path.join(CONFIG_ROOT, ".state", "panel")
 
@@ -40,102 +44,17 @@ MAX_TASKS_KEEP = 20
 MAX_TASK_LOG_LINES = 5000
 
 
-def _unescape_dq(s):
-    out = []
-    i = 0
-    while i < len(s):
-        if s[i] == "\\" and i + 1 < len(s) and s[i + 1] in ("\\", '"', "$", "`"):
-            out.append(s[i + 1])
-            i += 2
-        else:
-            out.append(s[i])
-            i += 1
-    return "".join(out)
-
-
-def parse_env_text(text):
-    data = {}
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        m = re.match(r"^([A-Z][A-Z0-9_]*)=(.*)$", line)
-        if not m:
-            continue
-        k, rest = m.group(1), m.group(2).strip()
-        try:
-            if rest.startswith('"'):
-                buf, i, closed = [], 1, False
-                while i < len(rest):
-                    c = rest[i]
-                    if c == "\\" and i + 1 < len(rest):
-                        buf.append(rest[i : i + 2])
-                        i += 2
-                    elif c == '"':
-                        closed = True
-                        break
-                    else:
-                        buf.append(c)
-                        i += 1
-                data[k] = _unescape_dq("".join(buf)) if closed else rest.strip('"')
-            elif rest.startswith("'"):
-                end = rest.find("'", 1)
-                data[k] = rest[1:end] if end != -1 else rest.strip("'")
-            else:
-                parts = shlex.split(rest, comments=True)
-                data[k] = parts[0] if parts else ""
-        except Exception:
-            data[k] = rest.split("#", 1)[0].strip().strip('"').strip("'")
-    return data
-
-
-def read_env_dict(path):
-    if not os.path.exists(path):
-        return {}
-    with open(path, "r", encoding="utf-8") as f:
-        return parse_env_text(f.read())
+def read_config():
+    return Store(CONFIG_ROOT).read()
 
 
 def read_secrets_dict():
-    plain = os.path.join(CONFIG_ROOT, "secrets.env")
-    enc = os.path.join(CONFIG_ROOT, "secrets.env.age")
-    if os.path.exists(plain):
-        return read_env_dict(plain)
-    if os.path.exists(enc):
-        age_key = os.environ.get(
-            "AGE_KEY_FILE",
-            os.environ.get("SOPS_AGE_KEY_FILE", os.path.expanduser("~/.config/ligament/age.key")),
-        )
-        if os.path.exists(age_key):
-            res = subprocess.run(["age", "-d", "-i", age_key, enc], capture_output=True, text=True, timeout=5)
-            if res.returncode == 0:
-                return parse_env_text(res.stdout)
-    return {}
+    return Store(CONFIG_ROOT).read(include_secrets=True)
 
 
 def get_admin_credentials():
-    cenv = read_env_dict(os.path.join(CONFIG_ROOT, "cluster.env"))
-    senv = read_secrets_dict()
-    user = os.environ.get("PANEL_ADMIN_USER") or cenv.get("SFTPGO_ADMIN_USERNAME") or "admin"
-    pw = (
-        os.environ.get("PANEL_ADMIN_PASSWORD")
-        or senv.get("PANEL_ADMIN_PASSWORD")
-        or senv.get("SFTPGO_ADMIN_PASSWORD")
-        or ""
-    )
-    return user, pw
-
-
-def _escape_env_value(val):
-    s = str(val)
-    if any(ch in s for ch in ("\r", "\n", "\x00")):
-        raise ValueError("Недопустимый символ перевода строки или NUL в значении конфигурации")
-    return (
-        s.replace("\\", "\\\\")
-        .replace('"', '\\"')
-        .replace("$", "\\$")
-        .replace("`", "\\`")
-    )
+    cfg = read_secrets_dict()
+    return cfg.get("PANEL_ADMIN_USER") or cfg["SFTPGO_ADMIN_USERNAME"], cfg["PANEL_ADMIN_PASSWORD"]
 
 
 def _validate_cluster_updates(updates):
@@ -151,8 +70,9 @@ def _validate_cluster_updates(updates):
             for tok in tokens:
                 parts = tok.split(":")
                 if len(parts) != 3:
-                    raise ValueError(f"Некорректная запись узла: {tok} (ожидается IP:dc:node)")
-                ipaddress.IPv4Address(parts[0])
+                    raise ValueError(f"Некорректная запись узла: {tok} (ожидается адрес:dc:node)")
+                if not valid_node_address(parts[0]):
+                    raise ValueError(f"Некорректный DNS-адрес ноды: {parts[0]}")
                 if not re.match(r"^[a-zA-Z0-9_-]{1,32}$", parts[1]) or not re.match(r"^[a-zA-Z0-9_-]{1,32}$", parts[2]):
                     raise ValueError(f"Некорректный DC/имя узла: {tok}")
             cleaned[k] = " ".join(tokens)
@@ -195,74 +115,14 @@ def _validate_cluster_updates(updates):
             cleaned[k] = v
         elif k == "ARBITER_IP":
             if v:
-                ipaddress.IPv4Address(v)
+                if not valid_node_address(v):
+                    raise ValueError("Укажите DNS-имя или IPv4 арбитра")
             cleaned[k] = v
     return cleaned
 
 
-def update_env_file(path, updates):
-    with LOCK:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        text = open(path, "r", encoding="utf-8").read() if os.path.exists(path) else ""
-        for k, v in updates.items():
-            if v is None:
-                continue
-            if not re.match(r"^[A-Z][A-Z0-9_]*$", k):
-                raise ValueError(f"Некорректный ключ env: {k}")
-            safe_v = _escape_env_value(v)
-            newline = f'{k}="{safe_v}"'
-            if re.search(rf"^{re.escape(k)}=.*$", text, flags=re.M):
-                text = re.sub(rf"^{re.escape(k)}=.*$", lambda _m, nl=newline: nl, text, flags=re.M)
-            else:
-                text += ("\n" if text and not text.endswith("\n") else "") + newline + "\n"
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(text)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
-
-
-def update_secrets(updates):
-    if not updates:
-        return
-    plain = os.path.join(CONFIG_ROOT, "secrets.env")
-    enc = os.path.join(CONFIG_ROOT, "secrets.env.age")
-    age_key = os.environ.get(
-        "AGE_KEY_FILE",
-        os.environ.get("SOPS_AGE_KEY_FILE", os.path.expanduser("~/.config/ligament/age.key")),
-    )
-    with LOCK:
-        if os.path.exists(enc) and os.path.exists(age_key):
-            res = subprocess.run(["age", "-d", "-i", age_key, enc], capture_output=True, text=True, timeout=5)
-            if res.returncode != 0:
-                raise RuntimeError(f"Не удалось расшифровать secrets.env.age: {(res.stderr or '').strip()}")
-            text = res.stdout
-            for k, v in updates.items():
-                if v is None or v == "":
-                    continue
-                if not re.match(r"^[A-Z][A-Z0-9_]*$", k):
-                    raise ValueError(f"Некорректный ключ секрета: {k}")
-                safe_v = _escape_env_value(v)
-                newline = f'{k}="{safe_v}"'
-                if re.search(rf"^{re.escape(k)}=.*$", text, flags=re.M):
-                    text = re.sub(rf"^{re.escape(k)}=.*$", lambda _m, nl=newline: nl, text, flags=re.M)
-                else:
-                    text += ("\n" if text and not text.endswith("\n") else "") + newline + "\n"
-            rec = subprocess.check_output(["age-keygen", "-y", age_key], text=True, timeout=5).strip()
-            p = subprocess.run(["age", "-r", rec, "-o", enc + ".tmp"], input=text, capture_output=True, text=True, timeout=5)
-            if p.returncode != 0:
-                raise RuntimeError(f"Не удалось перешифровать secrets.env.age: {(p.stderr or '').strip()}")
-            os.chmod(enc + ".tmp", 0o600)
-            os.replace(enc + ".tmp", enc)
-            return
-
-    filtered = {k: v for k, v in updates.items() if v is not None and v != ""}
-    if filtered:
-        update_env_file(plain, filtered)
-
-
 def ensure_tls_cert():
-    cenv = read_env_dict(os.path.join(CONFIG_ROOT, "cluster.env"))
+    cenv = read_config()
     domain = cenv.get("DOMAIN", "")
     le_crt = os.path.join(CONFIG_ROOT, ".ssl", "certificates", f"{domain}.crt")
     le_key = os.path.join(CONFIG_ROOT, ".ssl", "certificates", f"{domain}.key")
@@ -303,9 +163,8 @@ def ensure_tls_cert():
 
 
 def get_orchestrator_pubkey():
-    if os.environ.get("ORCHESTRATOR_PUBKEY"):
-        return os.environ["ORCHESTRATOR_PUBKEY"].strip()
-    for candidate in ("/root/.ssh/id_ed25519.pub", os.path.expanduser("~/.ssh/id_ed25519.pub")):
+    identity = read_config().get("SSH_IDENTITY_FILE") or os.path.expanduser("~/.ssh/id_ed25519")
+    for candidate in (identity + ".pub",):
         if os.path.exists(candidate):
             return open(candidate, "r", encoding="utf-8").read().strip()
     return ""
@@ -338,11 +197,10 @@ def bootstrap_remote_vps_ssh(ip, ssh_port, root_password, pubkey):
     if not root_password:
         return False, "Ключ еще не прописан на целевом VPS — укажите пароль root для автоматического подключения"
 
-    # 2. Через sshpass -e (пароль передается через env в памяти, не светится в ps aux!)
+    # Пароль поступает sshpass через отдельный ввод.
     if shutil_which("sshpass"):
         r_pw = subprocess.run(
-            ["sshpass", "-e", *base_ssh],
-            env={**os.environ, "SSHPASS": root_password},
+            ["sshpass", "-d", "0", *base_ssh], input=root_password + "\n",
             capture_output=True, text=True, timeout=180,
         )
         if r_pw.returncode == 0 and "VPS_BOOTSTRAP_OK" in r_pw.stdout:
@@ -569,7 +427,7 @@ class PanelHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/v1/overview":
-            cenv = read_env_dict(os.path.join(CONFIG_ROOT, "cluster.env"))
+            cenv = read_config()
             installed = os.path.exists(os.path.join(CONFIG_ROOT, ".cluster_installed"))
             nodes_raw = cenv.get("CLUSTER_NODES", "")
             health = {"nodes": [], "swfs_replication_healthy": True, "ssl_days_remaining": "N/A", "last_backup": "N/A", "warnings": 0, "errors": 0}
@@ -754,8 +612,8 @@ class PanelHandler(BaseHTTPRequestHandler):
             dc_input = str(body.get("dc", "")).strip()
             auto_join = bool(body.get("auto_join", False))
 
-            if not re.match(r"^[0-9]{1,3}(\.[0-9]{1,3}){3}$", ip):
-                self.send_json(400, {"error": "Укажите корректный IPv4 адрес VPS"})
+            if not valid_node_address(ip):
+                self.send_json(400, {"error": "Укажите корректный DNS-адрес или IPv4 VPS"})
                 return
             pubkey = get_orchestrator_pubkey()
             if not pubkey:
@@ -770,8 +628,7 @@ class PanelHandler(BaseHTTPRequestHandler):
                 self.send_json(400, {"error": msg})
                 return
 
-            cenv_path = os.path.join(CONFIG_ROOT, "cluster.env")
-            cenv = read_env_dict(cenv_path)
+            cenv = read_config()
             existing = [e for e in cenv.get("CLUSTER_NODES", "").split() if "FIXME" not in e]
             installed = os.path.exists(os.path.join(CONFIG_ROOT, ".cluster_installed"))
 
@@ -798,7 +655,11 @@ class PanelHandler(BaseHTTPRequestHandler):
                 dc = dc_input or f"dc{next_idx}"
                 name = f"node{next_idx}"
                 existing.append(f"{ip}:{dc}:{name}")
-                update_env_file(cenv_path, {"CLUSTER_NODES": " ".join(existing), "ADMIN_SSH_PORT": str(ssh_port)})
+                try:
+                    Store(CONFIG_ROOT).update({"CLUSTER_NODES": " ".join(existing), "ADMIN_SSH_PORT": str(ssh_port)}, expected={"CLUSTER_NODES": cenv["CLUSTER_NODES"]})
+                except ValueError as err:
+                    self.send_json(409, {"error": str(err)})
+                    return
                 ck = os.path.join(CONFIG_ROOT, ".state", "checkpoints.install")
                 if os.path.exists(ck):
                     os.remove(ck)
@@ -812,15 +673,18 @@ class PanelHandler(BaseHTTPRequestHandler):
                 self.send_json(400, {"error": "Некорректное имя узла"})
                 return
             installed = os.path.exists(os.path.join(CONFIG_ROOT, ".cluster_installed"))
-            cenv_path = os.path.join(CONFIG_ROOT, "cluster.env")
-            cenv = read_env_dict(cenv_path)
+            cenv = read_config()
             existing = [e for e in cenv.get("CLUSTER_NODES", "").split() if "FIXME" not in e]
 
             if not installed:
                 kept = [e for e in existing if e.split(":")[-1] != target_node]
                 # Перенумеровываем dcN:nodeN по порядку, чтобы не было дыр до установки
                 reindexed = [f"{e.split(':')[0]}:dc{i+1}:node{i+1}" for i, e in enumerate(kept)]
-                update_env_file(cenv_path, {"CLUSTER_NODES": " ".join(reindexed)})
+                try:
+                    Store(CONFIG_ROOT).update({"CLUSTER_NODES": " ".join(reindexed)}, expected={"CLUSTER_NODES": cenv["CLUSTER_NODES"]})
+                except ValueError as err:
+                    self.send_json(409, {"error": str(err)})
+                    return
                 ck = os.path.join(CONFIG_ROOT, ".state", "checkpoints.install")
                 if os.path.exists(ck):
                     os.remove(ck)
@@ -843,8 +707,8 @@ class PanelHandler(BaseHTTPRequestHandler):
             new_ip = str(body.get("new_ip", "")).strip()
             ssh_port = int(body.get("ssh_port") or 22)
             root_pw = str(body.get("password", ""))
-            if not re.match(r"^[a-zA-Z0-9_-]+$", target_node) or not re.match(r"^[0-9]{1,3}(\.[0-9]{1,3}){3}$", new_ip):
-                self.send_json(400, {"error": "Укажите корректное имя узла и новый IPv4 адрес"})
+            if not re.match(r"^[a-zA-Z0-9_-]+$", target_node) or not valid_node_address(new_ip):
+                self.send_json(400, {"error": "Укажите корректное имя узла и новый DNS-адрес или IPv4"})
                 return
             pubkey = get_orchestrator_pubkey()
             if os.environ.get("DRY_RUN") != "true":
@@ -853,8 +717,7 @@ class PanelHandler(BaseHTTPRequestHandler):
                     self.send_json(400, {"error": msg})
                     return
             installed = os.path.exists(os.path.join(CONFIG_ROOT, ".cluster_installed"))
-            cenv_path = os.path.join(CONFIG_ROOT, "cluster.env")
-            cenv = read_env_dict(cenv_path)
+            cenv = read_config()
             existing = [e for e in cenv.get("CLUSTER_NODES", "").split() if "FIXME" not in e]
             if not installed:
                 updated = []
@@ -864,7 +727,11 @@ class PanelHandler(BaseHTTPRequestHandler):
                         updated.append(f"{new_ip}:{parts[1]}:{parts[2]}")
                     else:
                         updated.append(e)
-                update_env_file(cenv_path, {"CLUSTER_NODES": " ".join(updated)})
+                try:
+                    Store(CONFIG_ROOT).update({"CLUSTER_NODES": " ".join(updated)}, expected={"CLUSTER_NODES": cenv["CLUSTER_NODES"]})
+                except ValueError as err:
+                    self.send_json(409, {"error": str(err)})
+                    return
                 ck = os.path.join(CONFIG_ROOT, ".state", "checkpoints.install")
                 if os.path.exists(ck):
                     os.remove(ck)
@@ -887,8 +754,6 @@ class PanelHandler(BaseHTTPRequestHandler):
             c_updates_raw = {k: body[k] for k in allowed_cluster if k in body}
             try:
                 c_updates = _validate_cluster_updates(c_updates_raw)
-                if c_updates:
-                    update_env_file(os.path.join(CONFIG_ROOT, "cluster.env"), c_updates)
             except ValueError as exc:
                 self.send_json(400, {"error": str(exc)})
                 return
@@ -899,9 +764,9 @@ class PanelHandler(BaseHTTPRequestHandler):
                 "BACKUP_S3_ACCESS_KEY", "BACKUP_S3_SECRET_KEY", "BACKUP_ENCRYPTION_KEY",
             )
             s_updates = {k: body[k] for k in allowed_secrets if k in body and body[k]}
-            if s_updates:
+            if c_updates or s_updates:
                 try:
-                    update_secrets(s_updates)
+                    Store(CONFIG_ROOT).update({**c_updates, **s_updates})
                 except ValueError as exc:
                     self.send_json(400, {"error": str(exc)})
                     return
@@ -920,16 +785,16 @@ class PanelHandler(BaseHTTPRequestHandler):
             bucket = str(body.get("bucket", "")).strip()
             region = str(body.get("region", "us-east-1")).strip() or "us-east-1"
             ak = str(body.get("access_key", "")).strip()
-            sk = str(body.get("secret_key", "")).strip()
+            sk = str(body.get("secret_key", ""))
             if not re.match(r"^[a-zA-Z0-9_-]+$", fname) or not endpoint or not bucket or not ak or not sk:
                 self.send_json(400, {"error": "Заполните имя папки (латиница), Endpoint, Bucket, Access Key и Secret Key"})
                 return
             cmd = [
                 os.path.join(REPO_DIR, "ligactl"), "user", "add-s3-folder",
                 "--name", fname, "--endpoint", endpoint, "--bucket", bucket,
-                "--region", region, "--access-key", ak,
+                "--region", region, "--access-key", ak, "--secret-key-stdin",
             ]
-            res = subprocess.run(cmd, cwd=REPO_DIR, env={**os.environ, "CONFIG_ROOT": CONFIG_ROOT, "S3_SECRET_KEY": sk}, capture_output=True, text=True, timeout=25)
+            res = subprocess.run(cmd, cwd=REPO_DIR, env={**os.environ, "CONFIG_ROOT": CONFIG_ROOT}, input=sk, capture_output=True, text=True, timeout=25)
             if res.returncode != 0:
                 self.send_json(400, {"error": (res.stderr.strip() or res.stdout.strip() or "Ошибка подключения S3").splitlines()[-1]})
                 return
@@ -944,23 +809,21 @@ class PanelHandler(BaseHTTPRequestHandler):
             profile = str(body.get("profile", "dual")).strip()
             quota_gb = str(body.get("quota_gb", "0")).strip() or "0"
             ssh_key = str(body.get("ssh_key", "")).strip()
-            pw = str(body.get("password", "")).strip()
+            pw = str(body.get("password", ""))
             req_2fa = bool(body.get("require_2fa", False))
 
             cmd = [os.path.join(REPO_DIR, "ligactl"), "user", "add", "--username", uname, "--profile", profile, "--quota-gb", quota_gb]
             child_env = {**os.environ, "CONFIG_ROOT": CONFIG_ROOT}
-            generated_pw = False
+            if not pw and not ssh_key:
+                pw = secrets.token_urlsafe(24)
             if pw:
-                child_env["USER_PASSWORD"] = pw
-            elif not ssh_key:
-                cmd += ["--generate-password"]
-                generated_pw = True
+                cmd += ["--password-stdin"]
             if ssh_key:
                 cmd += ["--ssh-key", ssh_key]
             if req_2fa:
                 cmd += ["--require-2fa"]
 
-            res = subprocess.run(cmd, cwd=REPO_DIR, env=child_env, capture_output=True, text=True, timeout=30)
+            res = subprocess.run(cmd, cwd=REPO_DIR, env=child_env, input=pw if pw else None, capture_output=True, text=True, timeout=30)
             if res.returncode != 0:
                 raw_err = (res.stderr.strip() or res.stdout.strip())
                 if "ConnectionRefusedError" in raw_err or "Errno 111" in raw_err or "недоступен на 127.0.0.1:8081" in raw_err:
@@ -970,12 +833,7 @@ class PanelHandler(BaseHTTPRequestHandler):
                     raw_err = err_lines[-1] if err_lines else "Ошибка создания клиента"
                 self.send_json(400, {"error": raw_err})
                 return
-            out_pw = pw
-            if generated_pw:
-                m = re.search(r"Сгенерированный пароль для '[^']+':\s*(\S+)", res.stdout)
-                if m:
-                    out_pw = m.group(1)
-            self.send_json(200, {"ok": True, "username": uname, "password": out_pw, "output": res.stdout})
+            self.send_json(200, {"ok": True, "username": uname, "password": pw})
             return
 
         if path == "/api/v1/users/action":
@@ -1015,7 +873,7 @@ class PanelHandler(BaseHTTPRequestHandler):
                 ip = str(body.get("ip", "")).strip()
                 dc = str(body.get("dc", "")).strip()
                 role = str(body.get("role", "edge")).strip()
-                if not re.match(r"^[0-9.]+$", ip) or not re.match(r"^[a-zA-Z0-9_-]+$", dc) or role not in ("edge", "quorum"):
+                if not valid_node_address(ip) or not re.match(r"^[a-zA-Z0-9_-]+$", dc) or role not in ("edge", "quorum"):
                     self.send_json(400, {"error": "Укажите корректные IP, DC и роль (edge/quorum)"})
                     return
                 label, argv = (f"Добавление ноды {ip} ({dc}, {role})", [ligactl, "scale", "add", "--ip", ip, "--dc", dc, "--role", role, "--yes"])
@@ -1036,9 +894,9 @@ class PanelHandler(BaseHTTPRequestHandler):
 
 
 def main():
-    cenv = read_env_dict(os.path.join(CONFIG_ROOT, "cluster.env"))
-    port = int(os.environ.get("PANEL_PORT") or cenv.get("PANEL_PORT") or 9443)
-    bind_addr = os.environ.get("PANEL_BIND", "0.0.0.0")
+    cenv = read_config()
+    port = int(cenv["PANEL_PORT"])
+    bind_addr = cenv["PANEL_BIND"]
     crt, key = ensure_tls_cert()
 
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)

@@ -160,7 +160,7 @@ REMOTE_SWAP
         CID=\$(cd '${REMOTE_BASE_DIR}' && docker compose ps -q patroni | head -n1 || true)
         if [[ -n \"\${CID}\" ]]; then
             docker exec \"\${CID}\" bash -c 'cp -L /certs/*.crt /certs/*.key /run/pg-certs/ && chown postgres:postgres /run/pg-certs/* && chmod 600 /run/pg-certs/*.key && chmod 644 /run/pg-certs/*.crt'
-            docker exec -u postgres \"\${CID}\" psql -U postgres -c 'SELECT pg_reload_conf();' >/dev/null
+            docker exec -u postgres \"\${CID}\" psql -p '${PG_PORT}' -U postgres -c 'SELECT pg_reload_conf();' >/dev/null
         fi
     "
 }

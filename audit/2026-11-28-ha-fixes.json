@@ -1,0 +1,1012 @@
+{
+  "date": "2026-11-28",
+  "environment": "Isolated local Docker on one host. FQDN files.audit.test, explicit FTPS, TLS certificate and file hash checked.",
+  "five_nodes": {
+    "limits": "One trial per pair. One shared HAProxy outside failed roles, combined weed services, manually switched Docker DNS network alias. Time includes reconnect, original read and new write/read.",
+    "settings": {
+      "etcd_voters": 5,
+      "seaweed_logical_dcs": 5,
+      "volume_placement": "200",
+      "postgres_synchronous_node_count": 2,
+      "postgres_synchronous_mode_strict": true,
+      "bytes_per_file": 131072
+    },
+    "single_failure": [
+      {
+        "sync_after_election": "2 (pg2,pg3)|2",
+        "event": "loss",
+        "lost": [
+          1
+        ],
+        "old_pg_leader": 1,
+        "old_swfs_leader": "sw1.audit.test:9333.19333",
+        "pre_read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 0.28
+        },
+        "manual_dns_to_edge": 2,
+        "dns_s": 1.51,
+        "combined_s": 84.84,
+        "new_pg_leader": 5,
+        "read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 83.18
+        },
+        "write_and_read": {
+          "ok": true,
+          "sha256": "8a8cc1b3db4017a74d3dc848bc76138795abf417a7a29b5df2205d502f256167",
+          "seconds": 83.03
+        }
+      }
+    ],
+    "pairs": [
+      {
+        "sync_after_election": "2 (pg5,pg4)|2",
+        "event": "loss",
+        "lost": [
+          1,
+          2
+        ],
+        "old_pg_leader": 1,
+        "old_swfs_leader": "sw2.audit.test:9333.19333",
+        "pre_read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 0.97
+        },
+        "manual_dns_to_edge": 3,
+        "dns_s": 3.76,
+        "combined_s": 103.81,
+        "new_pg_leader": 3,
+        "read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 91.89
+        },
+        "write_and_read": {
+          "ok": true,
+          "sha256": "2b693c24f351e81166e7dc2cd32a7004220c86528dd9d1df28d1cb213640a877",
+          "seconds": 97.25
+        }
+      },
+      {
+        "sync_after_election": "2 (pg1,pg2)|2",
+        "event": "loss",
+        "lost": [
+          3,
+          4
+        ],
+        "old_pg_leader": 3,
+        "old_swfs_leader": "sw3.audit.test:9333.19333",
+        "pre_read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 0.51
+        },
+        "manual_dns_to_edge": 1,
+        "dns_s": 2.95,
+        "combined_s": 85.03,
+        "new_pg_leader": 5,
+        "read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 81.53
+        },
+        "write_and_read": {
+          "ok": true,
+          "sha256": "ac04e441686cb147cc5004ae41ff67572c1980b82793d7792dd968baefa67c29",
+          "seconds": 81.82
+        }
+      },
+      {
+        "sync_after_election": "2 (pg2,pg4)|2",
+        "event": "loss",
+        "lost": [
+          1,
+          3
+        ],
+        "old_pg_leader": 5,
+        "old_swfs_leader": "sw5.audit.test:9333.19333",
+        "pre_read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 0.15
+        },
+        "manual_dns_to_edge": 2,
+        "dns_s": 0.7,
+        "combined_s": 43.66,
+        "new_pg_leader": 5,
+        "read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 0.53
+        },
+        "write_and_read": {
+          "ok": true,
+          "sha256": "9cb5d0fd15a54d7eacce9359b5b7c8baf7246804269ebde97ab765310e62bbdc",
+          "seconds": 42.87
+        }
+      },
+      {
+        "sync_after_election": "2 (pg2,pg3)|2",
+        "event": "loss",
+        "lost": [
+          1,
+          4
+        ],
+        "old_pg_leader": 5,
+        "old_swfs_leader": null,
+        "pre_read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 0.43
+        },
+        "manual_dns_to_edge": 2,
+        "dns_s": 1.36,
+        "combined_s": 7.56,
+        "new_pg_leader": 5,
+        "read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 0.51
+        },
+        "write_and_read": {
+          "ok": true,
+          "sha256": "e1eaa2d4b31dba1de8dd6cbcc153931748a04f0bb40892cc513c59cea34dbad0",
+          "seconds": 5.8
+        }
+      },
+      {
+        "sync_after_election": "2 (pg3,pg4)|2",
+        "event": "loss",
+        "lost": [
+          1,
+          5
+        ],
+        "old_pg_leader": 5,
+        "old_swfs_leader": null,
+        "pre_read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 0.2
+        },
+        "manual_dns_to_edge": 2,
+        "dns_s": 1.41,
+        "combined_s": 85.42,
+        "new_pg_leader": 2,
+        "read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 83.68
+        },
+        "write_and_read": {
+          "ok": true,
+          "sha256": "263c27e32a08ce27fe4aa5edd899a922097356e310633add36969c869167695d",
+          "seconds": 83.9
+        }
+      },
+      {
+        "sync_after_election": "2 (pg5,pg1)|2",
+        "event": "loss",
+        "lost": [
+          2,
+          3
+        ],
+        "old_pg_leader": 2,
+        "old_swfs_leader": "sw3.audit.test:9333.19333",
+        "pre_read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 0.1
+        },
+        "manual_dns_to_edge": 1,
+        "dns_s": 0.47,
+        "combined_s": 86.54,
+        "new_pg_leader": 4,
+        "read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 85.84
+        },
+        "write_and_read": {
+          "ok": true,
+          "sha256": "896dafa68ff656262b0002a9225bb65ff734ff893b35089a436097f74b45e670",
+          "seconds": 85.42
+        }
+      },
+      {
+        "sync_after_election": "2 (pg5,pg3)|2",
+        "event": "loss",
+        "lost": [
+          2,
+          4
+        ],
+        "old_pg_leader": 4,
+        "old_swfs_leader": null,
+        "pre_read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 0.17
+        },
+        "manual_dns_to_edge": 1,
+        "dns_s": 0.5,
+        "combined_s": 73.08,
+        "new_pg_leader": 1,
+        "read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 72.5
+        },
+        "write_and_read": {
+          "ok": true,
+          "sha256": "f77abd36b6348cbac507aedd2f9257cc2b090620e4736c33bf72962450b2e744",
+          "seconds": 72.5
+        }
+      },
+      {
+        "sync_after_election": "2 (pg3,pg4)|2",
+        "event": "loss",
+        "lost": [
+          2,
+          5
+        ],
+        "old_pg_leader": 1,
+        "old_swfs_leader": null,
+        "pre_read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 0.15
+        },
+        "manual_dns_to_edge": 1,
+        "dns_s": 0.38,
+        "combined_s": 42.77,
+        "new_pg_leader": 1,
+        "read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 0.13
+        },
+        "write_and_read": {
+          "ok": true,
+          "sha256": "1479679e976ecaaffc769019551486607438117416bea6e5a5eb1300476a8df7",
+          "seconds": 42.32
+        }
+      },
+      {
+        "sync_after_election": "2 (pg4,pg2)|2",
+        "event": "loss",
+        "lost": [
+          3,
+          5
+        ],
+        "old_pg_leader": 1,
+        "old_swfs_leader": "sw3.audit.test:9333.19333",
+        "pre_read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 0.16
+        },
+        "manual_dns_to_edge": 1,
+        "dns_s": 0.37,
+        "combined_s": 29.25,
+        "new_pg_leader": 1,
+        "read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 0.12
+        },
+        "write_and_read": {
+          "ok": true,
+          "sha256": "b62a7eefd5f100e267498a5a424361f04efec0731f15b43acc7ed7dd9d652852",
+          "seconds": 28.79
+        }
+      },
+      {
+        "sync_after_election": "2 (pg2,pg3)|2",
+        "event": "loss",
+        "lost": [
+          4,
+          5
+        ],
+        "old_pg_leader": 1,
+        "old_swfs_leader": "sw2.audit.test:9333.19333",
+        "pre_read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 0.16
+        },
+        "manual_dns_to_edge": 1,
+        "dns_s": 0.4,
+        "combined_s": 9.41,
+        "new_pg_leader": 1,
+        "read": {
+          "ok": true,
+          "sha256": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "seconds": 0.12
+        },
+        "write_and_read": {
+          "ok": true,
+          "sha256": "d47a8f6ef63f0bd20113728e383e547e63fcde8923deae683971f28ac6bc61a7",
+          "seconds": 8.93
+        }
+      }
+    ],
+    "after_return": [
+      {
+        "event": "healed",
+        "pair": [
+          1,
+          2
+        ],
+        "all_acked_read_by_ftps": true,
+        "receipts": 2,
+        "failed_receipts": [],
+        "db_streaming": 4,
+        "dcs": 5,
+        "verify_seconds": 1.23
+      },
+      {
+        "event": "healed",
+        "pair": [
+          3,
+          4
+        ],
+        "all_acked_read_by_ftps": true,
+        "receipts": 3,
+        "failed_receipts": [],
+        "db_streaming": 4,
+        "dcs": 5,
+        "verify_seconds": 0.29
+      },
+      {
+        "event": "healed",
+        "pair": [
+          1,
+          3
+        ],
+        "all_acked_read_by_ftps": true,
+        "receipts": 4,
+        "failed_receipts": [],
+        "db_streaming": 4,
+        "dcs": 5,
+        "verify_seconds": 0.87
+      },
+      {
+        "event": "healed",
+        "pair": [
+          1,
+          4
+        ],
+        "all_acked_read_by_ftps": true,
+        "receipts": 5,
+        "failed_receipts": [],
+        "db_streaming": 4,
+        "dcs": 5,
+        "verify_seconds": 0.48
+      },
+      {
+        "event": "healed",
+        "pair": [
+          1,
+          5
+        ],
+        "all_acked_read_by_ftps": true,
+        "receipts": 6,
+        "failed_receipts": [],
+        "db_streaming": 4,
+        "dcs": 5,
+        "verify_seconds": 0.37
+      },
+      {
+        "event": "healed",
+        "pair": [
+          2,
+          3
+        ],
+        "all_acked_read_by_ftps": true,
+        "receipts": 7,
+        "failed_receipts": [],
+        "db_streaming": 4,
+        "dcs": 5,
+        "verify_seconds": 0.41
+      },
+      {
+        "event": "healed",
+        "pair": [
+          2,
+          4
+        ],
+        "all_acked_read_by_ftps": true,
+        "receipts": 8,
+        "failed_receipts": [],
+        "db_streaming": 4,
+        "dcs": 5,
+        "verify_seconds": 0.3
+      },
+      {
+        "event": "healed",
+        "pair": [
+          2,
+          5
+        ],
+        "all_acked_read_by_ftps": true,
+        "receipts": 9,
+        "failed_receipts": [],
+        "db_streaming": 4,
+        "dcs": 5,
+        "verify_seconds": 0.43
+      },
+      {
+        "event": "healed",
+        "pair": [
+          3,
+          5
+        ],
+        "all_acked_read_by_ftps": true,
+        "receipts": 10,
+        "failed_receipts": [],
+        "db_streaming": 4,
+        "dcs": 5,
+        "verify_seconds": 0.41
+      },
+      {
+        "event": "healed",
+        "pair": [
+          4,
+          5
+        ],
+        "all_acked_read_by_ftps": true,
+        "receipts": 11,
+        "failed_receipts": [],
+        "db_streaming": 4,
+        "dcs": 5,
+        "verify_seconds": 0.4
+      }
+    ],
+    "degraded_reads": [
+      {
+        "time": 1795859549.078917,
+        "live_volume_nodes_before_after": [
+          1,
+          2,
+          4
+        ],
+        "receipts_retrieved_and_sha256_matched": {
+          "baseline.bin": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "loss-1-2.bin": "2b693c24f351e81166e7dc2cd32a7004220c86528dd9d1df28d1cb213640a877",
+          "loss-3-4.bin": "ac04e441686cb147cc5004ae41ff67572c1980b82793d7792dd968baefa67c29",
+          "loss-1-3.bin": "9cb5d0fd15a54d7eacce9359b5b7c8baf7246804269ebde97ab765310e62bbdc",
+          "loss-1-4.bin": "e1eaa2d4b31dba1de8dd6cbcc153931748a04f0bb40892cc513c59cea34dbad0",
+          "loss-1-5.bin": "263c27e32a08ce27fe4aa5edd899a922097356e310633add36969c869167695d",
+          "loss-2-3.bin": "896dafa68ff656262b0002a9225bb65ff734ff893b35089a436097f74b45e670",
+          "loss-2-4.bin": "f77abd36b6348cbac507aedd2f9257cc2b090620e4736c33bf72962450b2e744",
+          "loss-2-5.bin": "1479679e976ecaaffc769019551486607438117416bea6e5a5eb1300476a8df7"
+        }
+      },
+      {
+        "time": 1795859596.65109,
+        "live_volume_nodes_before_after": [
+          1,
+          2,
+          3
+        ],
+        "receipts_retrieved_and_sha256_matched": {
+          "baseline.bin": "15a02c38bfab9db09e9568a80a35e818b9ab793d357595dfa9fdda5bb76ef816",
+          "loss-1-2.bin": "2b693c24f351e81166e7dc2cd32a7004220c86528dd9d1df28d1cb213640a877",
+          "loss-3-4.bin": "ac04e441686cb147cc5004ae41ff67572c1980b82793d7792dd968baefa67c29",
+          "loss-1-3.bin": "9cb5d0fd15a54d7eacce9359b5b7c8baf7246804269ebde97ab765310e62bbdc",
+          "loss-1-4.bin": "e1eaa2d4b31dba1de8dd6cbcc153931748a04f0bb40892cc513c59cea34dbad0",
+          "loss-1-5.bin": "263c27e32a08ce27fe4aa5edd899a922097356e310633add36969c869167695d",
+          "loss-2-3.bin": "896dafa68ff656262b0002a9225bb65ff734ff893b35089a436097f74b45e670",
+          "loss-2-4.bin": "f77abd36b6348cbac507aedd2f9257cc2b090620e4736c33bf72962450b2e744",
+          "loss-2-5.bin": "1479679e976ecaaffc769019551486607438117416bea6e5a5eb1300476a8df7",
+          "loss-3-5.bin": "b62a7eefd5f100e267498a5a424361f04efec0731f15b43acc7ed7dd9d652852"
+        }
+      }
+    ],
+    "etcd_health_samples": [
+      {
+        "time": 1795859383.7626166,
+        "health_by_node": {
+          "1": true,
+          "2": true,
+          "3": true,
+          "4": true,
+          "5": true
+        },
+        "healthy": 5
+      },
+      {
+        "time": 1795859397.8451042,
+        "health_by_node": {
+          "1": true,
+          "2": false,
+          "3": true,
+          "4": false,
+          "5": true
+        },
+        "healthy": 3
+      }
+    ],
+    "volume_samples": [
+      {
+        "responding_nodes": [
+          1,
+          4,
+          5
+        ],
+        "volumes_by_available_copy_count": {
+          "1": 7,
+          "2": 13
+        }
+      },
+      {
+        "responding_nodes": [
+          1,
+          4,
+          5
+        ],
+        "volumes_by_available_copy_count": {
+          "1": 7,
+          "2": 13,
+          "3": 3
+        }
+      },
+      {
+        "responding_nodes": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ],
+        "volumes_by_available_copy_count": {
+          "3": 23
+        }
+      },
+      {
+        "responding_nodes": [
+          1,
+          3,
+          5
+        ],
+        "volumes_by_available_copy_count": {
+          "1": 9,
+          "2": 13,
+          "3": 1
+        }
+      },
+      {
+        "responding_nodes": [
+          1,
+          2,
+          3,
+          5
+        ],
+        "volumes_by_available_copy_count": {
+          "2": 15,
+          "3": 8
+        }
+      },
+      {
+        "responding_nodes": [
+          1,
+          3,
+          4
+        ],
+        "volumes_by_available_copy_count": {
+          "1": 9,
+          "2": 14
+        }
+      },
+      {
+        "responding_nodes": [
+          1,
+          3,
+          4
+        ],
+        "volumes_by_available_copy_count": {
+          "1": 9,
+          "2": 14,
+          "3": 1
+        }
+      },
+      {
+        "responding_nodes": [
+          1,
+          2,
+          3,
+          4
+        ],
+        "volumes_by_available_copy_count": {
+          "2": 16,
+          "3": 8
+        }
+      },
+      {
+        "responding_nodes": [
+          1,
+          2,
+          4
+        ],
+        "volumes_by_available_copy_count": {
+          "1": 7,
+          "2": 14,
+          "3": 3
+        }
+      },
+      {
+        "responding_nodes": [
+          1,
+          2,
+          3
+        ],
+        "volumes_by_available_copy_count": {
+          "1": 9,
+          "2": 14,
+          "3": 1
+        }
+      }
+    ]
+  },
+  "authoritative_dns_and_arbiter": {
+    "fqdn": "files.audit.test",
+    "ttl_s": 1,
+    "published": [
+      "172.21.0.11",
+      "172.21.0.12"
+    ],
+    "ftps_error_after_stop": 28,
+    "original_bytes": 65536,
+    "sha256_before_and_after": "19a760b46df0dbcca4dcd15a0b37aa2171fd93ea03092b22fc306726bc67f2c4",
+    "seconds_to_verified_ftps_read": 56.666,
+    "new_bytes_verified": 32768,
+    "s3_unavailable_probe_exit": 1,
+    "simulated_ssh_commands": [
+      "node1.audit.test etcd-lease 172.21.0.11",
+      "node1.audit.test etcd-lease 172.21.0.12",
+      "node1.audit.test fence-edge"
+    ],
+    "topology": "two real SFTPGo edges with local test admin DBs and one shared SeaweedFS server"
+  },
+  "haproxy": {
+    "template_fqdn": "pg.unit.test",
+    "old": "172.21.0.2",
+    "new": "172.21.0.4",
+    "first_verified_after_kill_s": 2.394,
+    "reload_needed": false,
+    "updated_numeric_reload_s": 0.044
+  },
+  "live_postgres_policy": {
+    "version": "16.16 (Debian 16.16-1.pgdg12+1)",
+    "patroni": "3.3.11",
+    "initial": {
+      "mode": false,
+      "strict": false,
+      "node_count": 0,
+      "replication": "pg2:streaming:async",
+      "postgres_sync_standby_names": ""
+    },
+    "steps": [
+      {
+        "target": 1,
+        "elapsed_s": 2.886,
+        "rc": 0,
+        "diagnostic": "",
+        "after": {
+          "mode": true,
+          "strict": true,
+          "node_count": 1,
+          "replication": "pg2:streaming:sync",
+          "postgres_sync_standby_names": "pg2"
+        },
+        "synchronous_commit_visible_on_replica": true
+      },
+      {
+        "target": 2,
+        "elapsed_s": 0.676,
+        "rc": 1,
+        "diagnostic": "Доступно streaming-реплик: 1, запрошено: 2",
+        "after": {
+          "mode": true,
+          "strict": true,
+          "node_count": 1,
+          "replication": "pg2:streaming:sync",
+          "postgres_sync_standby_names": "pg2"
+        }
+      },
+      {
+        "target": 0,
+        "elapsed_s": 1.177,
+        "rc": 0,
+        "diagnostic": "",
+        "after": {
+          "mode": false,
+          "strict": false,
+          "node_count": 1,
+          "replication": "pg2:streaming:async",
+          "postgres_sync_standby_names": ""
+        }
+      }
+    ]
+  },
+  "client_audit_postgres": {
+    "sftpgo_bcrypt_auth": true,
+    "postgres_outage_replay": true,
+    "rows_after_edge_removal": 9,
+    "events": "connection_failed|3\nDownload|1\nlogin|3\nUpload|2",
+    "topology": "SFTPGo used a local account DB. A separate PostgreSQL accepted the client_logger role, was stopped, and replayed queued events after restarting."
+  },
+  "external_s3_and_publish": {
+    "laboratory": {
+      "dns": "isolated Docker DNS",
+      "client_protocol": "SFTP",
+      "external_backend": "SeaweedFS 4.55 HTTPS/SigV4 with CA verification",
+      "internal_backend": "separate SeaweedFS S3 via local gateway",
+      "database": "PostgreSQL 16",
+      "audit_driver": "Docker json-file, max-size 50m, max-file 3"
+    },
+    "stdin_secret": {
+      "s3_folder_provisioned": true,
+      "multiline_password_with_trailing_LF_accepted_by_SFTPGo_user_auth": true,
+      "NUL_refused": true
+    },
+    "checked_publication": {
+      "stdout": "b5386b914150452e09ec6eaea770babcee96f6dbd6cefd2ade789dd062963fac  65536 bytes  /external/published file.bin",
+      "s3_size": 65536,
+      "sha256": "b5386b914150452e09ec6eaea770babcee96f6dbd6cefd2ade789dd062963fac"
+    },
+    "interrupted_verified_publication": {
+      "old_confirmed_bytes": 65536,
+      "old_final_bytes_after_interruption": 65536,
+      "sha256_unchanged": true,
+      "interrupted_exit": -15,
+      "retry_exit": 0,
+      "final_verified_bytes": 16777216,
+      "final_sha256": "da27da3e8ec42e37ccbc7c9377b1535fca328b8727b52218ac69a26c22ad6a74"
+    },
+    "status": "complete"
+  },
+  "file_restore": {
+    "recovery_point": {
+      "in_catalog": true,
+      "unsupported_time_refused": true
+    },
+    "changed_source_rejected_at_commit": 75,
+    "later_file_at_historical_point": 404,
+    "clean_volume_restore": {
+      "version_id_preserved": "6713d47335395bfd1f3143ddb6fc321e",
+      "bytes": 131072,
+      "sha256": "40aecafef06db91fcdeff75ee0ab3fe94e643c44c8e166356a47f0b4e2c24149",
+      "compliance": true,
+      "protected_delete_http": "403"
+    },
+    "corruption_rejected": "Snapshot failed: archive authentication failed: blocks/050ce8cfa023f110ab72b2c55c23138f6c9f383a44a0090aa17c45a759937779"
+  },
+  "pg_restore": {
+    "PITR": {
+      "named_restore": "lv_6cfa4df295d14dad93f1a9d16c187473",
+      "selected": "2026-11-28 09:18:34.644813+00:00",
+      "before_boundary": [
+        "base",
+        "cut"
+      ],
+      "after_boundary": "later",
+      "restored_query": "base|cut",
+      "restored_SQL_on_new_unix_socket": true
+    }
+  },
+  "membership_and_old_volumes": {
+    "fixed_etcd.log": [
+      {
+        "run": "ftpaudit-q20a97e3",
+        "test": "baseline",
+        "n": 3,
+        "replicas": [
+          "e1",
+          "e2",
+          "e3"
+        ],
+        "version": "3.5.17"
+      },
+      {
+        "run": "ftpaudit-q20a97e3",
+        "test": "actual-helper-join",
+        "voters": 4,
+        "id_hex": "fd63976fecbb0362"
+      },
+      {
+        "run": "ftpaudit-q20a97e3",
+        "test": "actual-helper-replace",
+        "voters": 4,
+        "new_id_hex": "3cb6bda4492aed0c",
+        "data_intact": true
+      },
+      {
+        "run": "ftpaudit-q20a97e3",
+        "test": "actual-helper-remove",
+        "voters": 3
+      },
+      {
+        "run": "ftpaudit-q20a97e3",
+        "test": "converged",
+        "n": 3
+      }
+    ],
+    "fixed_five_guard.log": [
+      {
+        "run": "ftpaudit-q70503df",
+        "test": "baseline",
+        "n": 3,
+        "replicas": [
+          "e1",
+          "e2",
+          "e3"
+        ],
+        "version": "3.5.17"
+      },
+      {
+        "run": "ftpaudit-q70503df",
+        "test": "guard-three",
+        "denied_live": true,
+        "allowed_failed": true,
+        "detail": "Остановка e2 опасна: доступно других голосующих 1, требуется 2 из 3"
+      },
+      {
+        "run": "ftpaudit-q70503df",
+        "test": "voter-added",
+        "voters": 4,
+        "node": "e4"
+      },
+      {
+        "run": "ftpaudit-q70503df",
+        "test": "voter-added",
+        "voters": 5,
+        "node": "e5"
+      },
+      {
+        "run": "ftpaudit-q70503df",
+        "test": "guard-five",
+        "denied_live": true,
+        "allowed_failed": true,
+        "still_writable": true
+      },
+      {
+        "run": "ftpaudit-q70503df",
+        "test": "converged",
+        "n": 3
+      }
+    ],
+    "fixed_raft.log": [
+      {
+        "test": "reconcile",
+        "run": "ftpaudit-r49a858c",
+        "expected": [
+          "m1",
+          "m2",
+          "m3"
+        ],
+        "removed": "",
+        "status": 0,
+        "last": ""
+      },
+      {
+        "test": "reconcile",
+        "run": "ftpaudit-r49a858c",
+        "expected": [
+          "m1",
+          "m2",
+          "m3",
+          "m4"
+        ],
+        "removed": "",
+        "status": 0,
+        "last": ""
+      },
+      {
+        "test": "reconcile",
+        "run": "ftpaudit-r49a858c",
+        "expected": [
+          "m1",
+          "m2",
+          "m3",
+          "m4",
+          "m5"
+        ],
+        "removed": "",
+        "status": 0,
+        "last": ""
+      },
+      {
+        "test": "reconcile",
+        "run": "ftpaudit-r49a858c",
+        "expected": [
+          "m1",
+          "m2",
+          "m3",
+          "m5"
+        ],
+        "removed": "m4",
+        "status": 0,
+        "last": "removed server m4:9333.19333\n"
+      }
+    ],
+    "fixed_lock.log": [
+      {
+        "run": "ftpaudit-qc63548a",
+        "test": "baseline",
+        "n": 3,
+        "replicas": [
+          "e1",
+          "e2",
+          "e3"
+        ],
+        "version": "3.5.17"
+      },
+      {
+        "run": "ftpaudit-qc63548a",
+        "test": "etcd-lock",
+        "result": [
+          "LOCKED",
+          "LOCKED",
+          "BUSY",
+          "NOT_OWNER",
+          "BUSY",
+          "UNLOCKED",
+          "LOCKED",
+          "UNLOCKED"
+        ]
+      },
+      {
+        "run": "ftpaudit-qc63548a",
+        "test": "converged",
+        "n": 3
+      }
+    ],
+    "layout_regression.log": [
+      {
+        "test": "initial",
+        "run": "ftpaudit-rb9cbd8d",
+        "fid": "1,01415d06a9",
+        "locations": [
+          "a",
+          "b"
+        ],
+        "sha256": "cba5e213aba96a260d9681c7b6cf7bcd021354cb71156b207f621290d2ef5158"
+      },
+      {
+        "test": "old-policy",
+        "run": "ftpaudit-rb9cbd8d",
+        "default100_ok": true,
+        "target200_rejected": true,
+        "reason": "SeaweedFS: том 1 на a:8080: метка 100, требуется 200"
+      },
+      {
+        "test": "under-replicated",
+        "run": "ftpaudit-rb9cbd8d",
+        "reason": "SeaweedFS: том 1: размещение [('dc1', 'DefaultRack', 'a:8080'), ('dc2', 'DefaultRack', 'b:8080')] не выполняет 200"
+      },
+      {
+        "test": "migrated",
+        "run": "ftpaudit-rb9cbd8d",
+        "healthy": [
+          0,
+          "Проверено томов: 9, volume servers: 3, политика: 200"
+        ],
+        "locations": [
+          "a",
+          "b",
+          "d"
+        ]
+      },
+      {
+        "test": "after-two-failures",
+        "run": "ftpaudit-rb9cbd8d",
+        "sha256": "cba5e213aba96a260d9681c7b6cf7bcd021354cb71156b207f621290d2ef5158",
+        "new_disk": true
+      }
+    ]
+  }
+}

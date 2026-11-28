@@ -139,7 +139,7 @@ REMOTE_FS_CONF
 
 # 5. Создание бакетов sftp-work (Versioning) и sftp-worm (Object Lock + DefaultRetention)
 log_step "Создание S3 бакетов: sftp-work и sftp-worm (${WORM_RETENTION_MODE:-COMPLIANCE}, ${WORM_RETENTION_DAYS:-365}d)"
-remote_exec_env_stdin "${NODE1_IP}" \
+remote_exec_private_stdin "${NODE1_IP}" \
     "SWFS_ADMIN_PASSWORD" \
     "${SWFS_S3_PORT:-8333}" \
     "provision-s3-admin" \
@@ -148,11 +148,11 @@ remote_exec_env_stdin "${NODE1_IP}" \
 set -euo pipefail
 S3_PORT="$1"; ACCESS_KEY="$2"; RET_MODE="$3"; RET_DAYS="$4"
 
-python3 - "${S3_PORT}" "${ACCESS_KEY}" "${RET_MODE}" "${RET_DAYS}" <<'PYEOF'
+python3 - "${S3_PORT}" "${ACCESS_KEY}" "${RET_MODE}" "${RET_DAYS}" 3< <(printf '%s' "${SWFS_ADMIN_PASSWORD}") <<'PYEOF'
 import datetime, hashlib, hmac, os, sys, urllib.error, urllib.request
 
 port, ak, ret_mode, ret_days = sys.argv[1:]
-sk = os.environ["SWFS_ADMIN_PASSWORD"]
+sk = os.fdopen(3).read()
 endpoint = f"http://127.0.0.1:{port}"
 region = "us-east-1"
 

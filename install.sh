@@ -9,25 +9,29 @@
 
 set -euo pipefail
 
-REPO_URL="${REPO_URL:-https://github.com/aligorov/ligament-vault.git}"
-INSTALL_DIR="${INSTALL_DIR:-/opt/ligament-vault-ctl}"
-PANEL_PORT="${PANEL_PORT:-9443}"
-
+REPO_URL=https://github.com/aligorov/ligament-vault.git
+INSTALL_DIR=/opt/ligament-vault-ctl
+requested_port=""
+requested_domain=""
+requested_nodes=""
+while (($#)); do
+    case "$1" in
+        --install-dir) INSTALL_DIR="$2"; shift 2 ;;
+        --domain) requested_domain="$2"; shift 2 ;;
+        --nodes) requested_nodes="$2"; shift 2 ;;
+        --panel-port) requested_port="$2"; shift 2 ;;
+        --dry-run) echo "План: установка зависимостей и панели, инициализация control.sqlite3"; exit 0 ;;
+        *) echo "Неизвестная опция $1" >&2; exit 2 ;;
+    esac
+done
 GREEN='\033[0;32m'
-CYAN='\033[0;36m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
-BOLD='\033[1m'
 NC='\033[0m'
 
 info() { echo -e "${GREEN}[Ligament Vault]${NC} $*"; }
 warn() { echo -e "${YELLOW}[ВНИМАНИЕ]${NC} $*" >&2; }
 err()  { echo -e "${RED}[ОШИБКА]${NC} $*" >&2; exit 1; }
-
-if [[ "${DRY_RUN:-false}" == "true" ]]; then
-    info "[DRY-RUN] Установка зависимостей -> клонирование ${REPO_URL} в ${INSTALL_DIR} -> генерация секретов -> запуск systemd сервиса ligament-vault-ui (:${PANEL_PORT})"
-    exit 0
-fi
 
 [[ "${EUID}" -eq 0 ]] || err "Запустите установщик от имени root: curl -fsSL https://raw.githubusercontent.com/aligorov/ligament-vault/main/install.sh | sudo bash"
 
@@ -35,7 +39,7 @@ fi
 info "1/5 — Проверка системных пакетов и Docker..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq git curl jq age openssl python3 python3-yaml openssh-client sshpass iproute2 ca-certificates
+apt-get install -y -qq git curl jq age apache2-utils openssl python3 python3-yaml openssh-client sshpass iproute2 ca-certificates
 
 if ! command -v docker >/dev/null 2>&1; then
     info "Установка Docker Engine + Compose..."
@@ -47,9 +51,24 @@ fi
 info "2/5 — Загрузка Ligament Vault в ${INSTALL_DIR}..."
 if [[ -d "${INSTALL_DIR}/.git" ]]; then
     git -C "${INSTALL_DIR}" fetch --quiet origin main
-    git -C "${INSTALL_DIR}" reset --hard origin/main >/dev/null
+    # Import locally pinned versions before the update removes the old tracked file.
+    if [[ ! -s "${INSTALL_DIR}/control.sqlite3" && -f "${INSTALL_DIR}/versions.env" ]]; then
+        migration_dir=$(mktemp -d)
+        trap 'rm -rf "$migration_dir"' EXIT
+        mkdir -p "$migration_dir/scripts/lib" "$migration_dir/configs"
+        for file in scripts/lib/config_db.py scripts/lib/node_address.py configs/control-defaults.json; do
+            git -C "$INSTALL_DIR" show "FETCH_HEAD:$file" > "$migration_dir/$file"
+        done
+        python3 "$migration_dir/scripts/lib/config_db.py" --root "$INSTALL_DIR" init
+        if ! git -C "$INSTALL_DIR" diff --quiet HEAD -- versions.env; then
+            git -C "$INSTALL_DIR" stash push -m "Image pins imported into control.sqlite3" -- versions.env
+        fi
+        rm -rf "$migration_dir"
+        trap - EXIT
+    fi
+    git -C "${INSTALL_DIR}" merge --ff-only FETCH_HEAD
 else
-    rm -rf "${INSTALL_DIR}"
+    [[ ! -e "${INSTALL_DIR}" || -z "$(ls -A "${INSTALL_DIR}")" ]] || err "Каталог установки занят: ${INSTALL_DIR}"
     git clone --depth 1 "${REPO_URL}" "${INSTALL_DIR}"
 fi
 chmod +x "${INSTALL_DIR}/ligactl" "${INSTALL_DIR}/clusterctl" "${INSTALL_DIR}/web/panel.py" \
@@ -67,50 +86,29 @@ PUBKEY=$(cat /root/.ssh/id_ed25519.pub)
 touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys
 grep -Fqx "${PUBKEY}" /root/.ssh/authorized_keys || echo "${PUBKEY}" >> /root/.ssh/authorized_keys
 
-# Автоподбор свободного порта (если 9443 или старый 8443 занят другим сервисом, например awg-api!)
+info "4/5 — Инициализация базы управления..."
+db=(python3 "${INSTALL_DIR}/scripts/lib/config_db.py" --root "${INSTALL_DIR}")
+"${db[@]}" init
+PANEL_PORT="${requested_port:-$("${db[@]}" get PANEL_PORT)}"
+[[ "$PANEL_PORT" =~ ^[0-9]+$ ]] && ((PANEL_PORT >= 1 && PANEL_PORT <= 65535)) || err "Некорректный порт панели"
+PANEL_HOST=$(hostname -f)
+if [[ "$("${db[@]}" get CLUSTER_NODES)" == *FIXME* && ( -n "$requested_nodes" || "$PANEL_HOST" == *.* ) ]]; then
+    entries=()
+    for host in ${requested_nodes:-${PANEL_HOST}}; do
+        i=$(("${#entries[@]}" + 1))
+        entries+=("${host}:dc${i}:node${i}")
+    done
+    printf %s "${entries[*]}" | "${db[@]}" set CLUSTER_NODES
+fi
+if [[ -n "$requested_domain" ]]; then printf %s "$requested_domain" | "${db[@]}" set DOMAIN; fi
 systemctl stop ligament-vault-ui.service 2>/dev/null || true
-for cand_port in "${PANEL_PORT}" 9443 9444 10443 18443; do
-    if ! ss -H -tln "sport = :${cand_port}" 2>/dev/null | grep -q .; then
-        PANEL_PORT="${cand_port}"
+for candidate in "$PANEL_PORT" 9443 9444 10443 18443; do
+    if ! ss -H -tln "sport = :${candidate}" | grep -q .; then
+        PANEL_PORT="$candidate"
         break
     fi
 done
-
-# 4. Автоконфигурация cluster.env и криптостойких секретов
-info "4/5 — Генерация конфигурации и шифрованных секретов..."
-PUBLIC_IP=$(curl -4 -fsSL --max-time 4 https://ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')
-
-if [[ ! -f "${INSTALL_DIR}/cluster.env" ]]; then
-    cp "${INSTALL_DIR}/cluster.env.example" "${INSTALL_DIR}/cluster.env"
-    chmod 600 "${INSTALL_DIR}/cluster.env"
-
-    if [[ -n "${NODES:-}" ]]; then
-        NODE_LIST=""
-        IDX=1
-        for nip in ${NODES}; do
-            [[ -n "${NODE_LIST}" ]] && NODE_LIST+=" "
-            NODE_LIST+="${nip}:dc${IDX}:node${IDX}"
-            IDX=$((IDX + 1))
-        done
-    else
-        NODE_LIST="${PUBLIC_IP}:dc1:node1"
-    fi
-    sed -i "s|FIXME_IP1:dc1:node1 FIXME_IP2:dc2:node2 FIXME_IP3:dc3:node3|${NODE_LIST}|g" "${INSTALL_DIR}/cluster.env"
-    if [[ -n "${DOMAIN:-}" ]]; then
-        sed -i "s|DOMAIN=\"files.company.com\"|DOMAIN=\"${DOMAIN}\"|g" "${INSTALL_DIR}/cluster.env"
-    fi
-fi
-
-# Гарантированно записываем свободный PANEL_PORT в cluster.env (включая миграцию со старого 8443!)
-if grep -q '^PANEL_PORT=' "${INSTALL_DIR}/cluster.env"; then
-    sed -i "s|^PANEL_PORT=.*|PANEL_PORT=${PANEL_PORT}|g" "${INSTALL_DIR}/cluster.env"
-else
-    echo "PANEL_PORT=${PANEL_PORT}" >> "${INSTALL_DIR}/cluster.env"
-fi
-
-if [[ ! -f "${INSTALL_DIR}/secrets.env" && ! -f "${INSTALL_DIR}/secrets.env.age" ]]; then
-    "${INSTALL_DIR}/ligactl" secrets init
-fi
+printf %s "$PANEL_PORT" | "${db[@]}" set PANEL_PORT
 
 # 5. Запуск HTTPS Веб-панели управления через systemd + проверка /api/v1/health
 info "5/5 — Запуск HTTPS Веб-панели управления (порт ${PANEL_PORT}/tcp)..."
@@ -123,10 +121,6 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=${INSTALL_DIR}
-Environment="HOME=/root"
-Environment="CONFIG_ROOT=${INSTALL_DIR}"
-Environment="AGE_KEY_FILE=/root/.config/ligament/age.key"
-Environment="PANEL_PORT=${PANEL_PORT}"
 ExecStart=/usr/bin/python3 ${INSTALL_DIR}/web/panel.py
 Restart=always
 RestartSec=5
@@ -163,29 +157,6 @@ if [[ "${PANEL_OK}" != "true" ]]; then
     err "Веб-панель не ответила на https://127.0.0.1:${PANEL_PORT}/api/v1/health"
 fi
 
-ADMIN_PASS=$(
-    export SCRIPT_DIR="${INSTALL_DIR}"
-    cd "${INSTALL_DIR}"
-    # shellcheck disable=SC1091
-    source "${INSTALL_DIR}/scripts/lib/common.sh"
-    load_cluster_env "${INSTALL_DIR}"
-    echo "${PANEL_ADMIN_PASSWORD:-${SFTPGO_ADMIN_PASSWORD:-}}"
-)
-
-echo ""
-echo -e "${CYAN}${BOLD}╔══════════════════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${CYAN}${BOLD}║  🎉 Ligament Vault установлен — Веб-панель управления запущена!          ║${NC}"
-echo -e "${CYAN}${BOLD}╠══════════════════════════════════════════════════════════════════════════╣${NC}"
-echo -e "${CYAN}${BOLD}║${NC}  🌐 Веб-интерфейс:  ${GREEN}${BOLD}https://${PUBLIC_IP}:${PANEL_PORT}${NC}"
-echo -e "${CYAN}${BOLD}║${NC}  👤 Логин:          ${BOLD}admin${NC}"
-echo -e "${CYAN}${BOLD}║${NC}  🔑 Пароль:         ${YELLOW}${BOLD}${ADMIN_PASS}${NC}"
-echo -e "${CYAN}${BOLD}╠══════════════════════════════════════════════════════════════════════════╣${NC}"
-echo -e "${CYAN}${BOLD}║${NC}  Откройте ссылку в браузере -> подключите остальные VPS по SSH ->        ${CYAN}${BOLD}║${NC}"
-echo -e "${CYAN}${BOLD}║${NC}  нажмите «Объединить в кластер и установить всё».                        ${CYAN}${BOLD}║${NC}"
-echo -e "${CYAN}${BOLD}╚══════════════════════════════════════════════════════════════════════════╝${NC}"
-echo ""
-
-if [[ -n "${NODES:-}" ]]; then
-    info "Обнаружена переменная NODES — запускаем автоматическое развертывание кластера..."
-    "${INSTALL_DIR}/ligactl" install --yes
-fi
+info "Панель управления https://${PANEL_HOST}:${PANEL_PORT}"
+info "Логин: $("${db[@]}" get SFTPGO_ADMIN_USERNAME). Для получения пароля: sudo ligactl config get PANEL_ADMIN_PASSWORD"
+if [[ -n "${requested_nodes}" ]]; then "${INSTALL_DIR}/ligactl" install --yes; fi
